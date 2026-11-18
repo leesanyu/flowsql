@@ -33,11 +33,11 @@ std::string Join(const std::vector<std::string>& items, const std::string& separ
 }
 class Compiler {
  public:
-    explicit Compiler(const SourceSchemaV1& source) : source_(source) {
+    explicit Compiler(const SourceSchema& source) : source_(source) {
         QuoteIdentifier(source.table, source.dialect);
         for (const auto& field : source.fields) fields_.emplace(field.id, field);
     }
-    SqlPlanV1 Compile(const Json& input, const std::string& mode, uint32_t maximum) {
+    SqlPlan Compile(const Json& input, const std::string& mode, uint32_t maximum) {
         Keys(input, {"workflow", "limit", "offset"});
         if (!input.HasMember("workflow") || !input["workflow"].IsArray() || input["workflow"].Size() > 32)
             Invalid("无效的 workflow");
@@ -98,7 +98,7 @@ class Compiler {
                             select.push_back(Quote(field.name) + " AS " + Quote(field.id));
                         } else {
                             Keys(id, {"field", "unit", "asFieldKey"});
-                            const TimeBucketV1 bucket{Text(id, "field"), Text(id, "unit"), Text(id, "asFieldKey")};
+                            const TimeBucket bucket{Text(id, "field"), Text(id, "unit"), Text(id, "asFieldKey")};
                             const auto& field = Lookup(id["field"]);
                             if (!SupportsTimeBucket(field, source_.dialect))
                                 throw QueryFailure("UNSUPPORTED_TYPE",
@@ -134,7 +134,7 @@ class Compiler {
                         const auto found = aggregates.find(agg);
                         if (found == aggregates.end()) throw QueryFailure("UNSUPPORTED_OPERATION", "此聚合尚不支持");
                         std::string argument;
-                        FieldV1 output{alias, alias, "number", "", true};
+                        Field output{alias, alias, "number", "", true};
                         if (id == "*" || id == "gw_count_fid") {
                             if (agg != "count") Invalid("行数仅支持 count");
                             argument = "*";
@@ -224,14 +224,14 @@ class Compiler {
 
  private:
     std::string Quote(const std::string& name) const { return QuoteIdentifier(name, source_.dialect); }
-    const FieldV1& Lookup(const Json& id) {
+    const Field& Lookup(const Json& id) {
         if (!id.IsString()) Invalid("字段 ID 必须是字符串");
         const auto it = fields_.find(id.GetString());
         if (it == fields_.end()) Invalid("字段不属于所选数据表");
         if (it->second.type == "unsupported") throw QueryFailure("UNSUPPORTED_TYPE", "不支持该字段类型");
         return it->second;
     }
-    void Output(const FieldV1& field) {
+    void Output(const Field& field) {
         if (field.id.empty() || !outputs_.insert(field.id).second) Invalid("结果字段重复");
         plan_.fields.push_back(field);
     }
@@ -311,13 +311,13 @@ class Compiler {
         }
         throw QueryFailure("UNSUPPORTED_OPERATION", "不支持此过滤操作");
     }
-    const SourceSchemaV1& source_;
-    std::unordered_map<std::string, FieldV1> fields_;
+    const SourceSchema& source_;
+    std::unordered_map<std::string, Field> fields_;
     std::set<std::string> outputs_;
-    SqlPlanV1 plan_;
+    SqlPlan plan_;
 };
 }  // namespace
-bool SupportsTimeBucket(const FieldV1& field, const std::string& dialect) {
+bool SupportsTimeBucket(const Field& field, const std::string& dialect) {
     if (field.type != "string") return false;
     if (dialect == "sqlite") return true;
     auto native = field.native_type;
@@ -341,26 +341,26 @@ std::string QuoteIdentifier(const std::string& identifier, const std::string& di
     }
     return result + quote;
 }
-SqlPlanV1 CompileWorkflow(const SourceSchemaV1& source, const rapidjson::Value& payload, const std::string& detail_mode,
-                          uint32_t max_rows) {
+SqlPlan CompileWorkflow(const SourceSchema& source, const rapidjson::Value& payload, const std::string& detail_mode,
+                        uint32_t max_rows) {
     return Compiler(source).Compile(payload, detail_mode, max_rows);
 }
-std::vector<DatabaseParameterV1> BindValues(const std::vector<ExplorationValueV1>& values) {
-    std::vector<DatabaseParameterV1> parameters;
+std::vector<DatabaseParameter> BindValues(const std::vector<ExplorationValue>& values) {
+    std::vector<DatabaseParameter> parameters;
     for (const auto& value : values) {
-        DatabaseParameterV1 parameter;
+        DatabaseParameter parameter;
         if (auto p = std::get_if<int64_t>(&value)) {
-            parameter.kind = DatabaseParameterKindV1::kInt64;
+            parameter.kind = DatabaseParameterKind::kInt64;
             parameter.int64_value = *p;
         } else if (auto p = std::get_if<double>(&value)) {
-            parameter.kind = DatabaseParameterKindV1::kDouble;
+            parameter.kind = DatabaseParameterKind::kDouble;
             parameter.double_value = *p;
         } else if (auto p = std::get_if<std::string>(&value)) {
-            parameter.kind = DatabaseParameterKindV1::kString;
+            parameter.kind = DatabaseParameterKind::kString;
             parameter.data = p->data();
             parameter.size = p->size();
         } else if (auto p = std::get_if<std::vector<uint8_t>>(&value)) {
-            parameter.kind = DatabaseParameterKindV1::kBlob;
+            parameter.kind = DatabaseParameterKind::kBlob;
             parameter.data = p->data();
             parameter.size = p->size();
         }

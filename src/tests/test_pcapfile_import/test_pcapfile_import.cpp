@@ -508,13 +508,13 @@ PcapCanonicalFixture BuildPcapCanonicalFixture(const std::string& filter) {
     assert(parsed && error.empty());
 
     pcapfile::PcapFilterDomainResolver resolver;
-    flowsql::FilterDomainResolveRequestV1 request;
-    request.target_kind = flowsql::FilterDomainTargetKindV1::kSource;
+    flowsql::FilterDomainResolveRequest request;
+    request.target_kind = flowsql::FilterDomainTargetKind::kSource;
     request.target_category = "pcapfile";
     request.target_name = "capture";
     request.output_schema = packet::PacketSchema();
     request.expression = parsed;
-    flowsql::FilterDomainResolveResultV1 resolved;
+    flowsql::FilterDomainResolveResult resolved;
     assert(resolver.Resolve(request, &resolved) == 0);
     assert(resolved.lowered_expression && !resolved.diagnostic.empty());
 
@@ -563,7 +563,7 @@ void TestCanonicalPacketPlanCompilerAndPredicates() {
 
     packet::PcapFilterPlan empty;
     std::string error = "stale";
-    assert(pcapfile::CompilePcapFilterPlanJson(flowsql::kEmptyCanonicalFilterPlanV1, &empty, &error) == 0);
+    assert(pcapfile::CompilePcapFilterPlanJson(flowsql::kEmptyCanonicalFilterPlan, &empty, &error) == 0);
     assert(error.empty());
     assert(pcapfile::EvaluatePcapHeaderFilter(empty, meta) == pcapfile::PacketHeaderFilterResult::kMatch);
     assert(pcapfile::EvaluatePcapDecodedFilter(empty, meta, layer));
@@ -713,7 +713,7 @@ void TestCanonicalPacketPlanCompilerAndPredicates() {
         assert(pcapfile::CompilePcapFilterPlanJson(invalid, &rejected, &error) == EINVAL);
         assert(!error.empty());
     }
-    assert(pcapfile::CompilePcapFilterPlanJson(flowsql::kEmptyCanonicalFilterPlanV1, nullptr, &error) == EINVAL);
+    assert(pcapfile::CompilePcapFilterPlanJson(flowsql::kEmptyCanonicalFilterPlan, nullptr, &error) == EINVAL);
 }
 
 void TestPcapFilterCandidateSelection() {
@@ -752,9 +752,9 @@ void TestPcapFilterCandidateSelection() {
 
     std::vector<uint32_t> rejected = {123};
     std::string error = "stale";
-    assert(pcapfile::SelectCompilablePcapFilterNodes(flowsql::kEmptyCanonicalFilterPlanV1, {}, &rejected, &error) == 0);
+    assert(pcapfile::SelectCompilablePcapFilterNodes(flowsql::kEmptyCanonicalFilterPlan, {}, &rejected, &error) == 0);
     assert(rejected.empty() && error.empty());
-    assert(pcapfile::SelectCompilablePcapFilterNodes(flowsql::kEmptyCanonicalFilterPlanV1, {1}, &rejected, &error) ==
+    assert(pcapfile::SelectCompilablePcapFilterNodes(flowsql::kEmptyCanonicalFilterPlan, {1}, &rejected, &error) ==
            EINVAL);
     assert(rejected.empty() && !error.empty());
 
@@ -798,8 +798,8 @@ void TestPcapFilterPushdownCapability() {
 
     const auto mixed = BuildPcapCanonicalFixture("timestamp_ns >= 10 AND src_port = 443 AND captured_len <= 64");
     assert(mixed.split.candidate_node_ids.size() == 3);
-    flowsql::FilterPushdownRequestV1 request;
-    request.target_kind = flowsql::FilterPushdownTargetKindV1::kSource;
+    flowsql::FilterPushdownRequest request;
+    request.target_kind = flowsql::FilterPushdownTargetKind::kSource;
     request.target_category = "PCAPFILE";
     request.target_name = "pushdown";
     request.output_schema = packet::PacketSchema();
@@ -807,7 +807,7 @@ void TestPcapFilterPushdownCapability() {
     request.candidate_node_ids = {mixed.split.candidate_node_ids[2], mixed.split.candidate_node_ids[1],
                                   mixed.split.candidate_node_ids[0]};
     const auto candidates_copy = request.candidate_node_ids;
-    flowsql::FilterPushdownResultV1 result;
+    flowsql::FilterPushdownResult result;
     result.accepted_node_ids = {std::numeric_limits<uint32_t>::max()};
     result.diagnostic = "stale";
     assert(plugin.EvaluatePushdown(request, &result) == 0);
@@ -824,12 +824,12 @@ void TestPcapFilterPushdownCapability() {
     assert(plugin.EvaluatePushdown(request, &result) == 0);
     assert(result.accepted_node_ids.empty() && !result.diagnostic.empty());
 
-    request.target_kind = flowsql::FilterPushdownTargetKindV1::kTransform;
+    request.target_kind = flowsql::FilterPushdownTargetKind::kTransform;
     result.accepted_node_ids = {1};
     result.diagnostic = "stale";
     assert(plugin.EvaluatePushdown(request, &result) == ENOTSUP);
     assert(result.accepted_node_ids.empty() && result.diagnostic.empty());
-    request.target_kind = flowsql::FilterPushdownTargetKindV1::kSource;
+    request.target_kind = flowsql::FilterPushdownTargetKind::kSource;
     request.target_category = "other";
     result.accepted_node_ids = {1};
     assert(plugin.EvaluatePushdown(request, &result) == ENOTSUP);
@@ -843,10 +843,10 @@ void TestPcapFilterPushdownCapability() {
     request.target_name = "pushdown";
     request.canonical_plan_json = mixed.canonical_json.c_str();
     request.candidate_node_ids = mixed.split.candidate_node_ids;
-    request.contract_version = flowsql::kFilterPushdownContractVersionV1 + 1;
+    request.contract_version = flowsql::kFilterPushdownContractVersion + 1;
     assert(plugin.EvaluatePushdown(request, &result) == EINVAL);
     assert(result.accepted_node_ids.empty() && !result.diagnostic.empty());
-    request.contract_version = flowsql::kFilterPushdownContractVersionV1;
+    request.contract_version = flowsql::kFilterPushdownContractVersion;
     request.output_schema = arrow::schema({arrow::field("value", arrow::int64())});
     assert(plugin.EvaluatePushdown(request, &result) == EINVAL);
     assert(result.accepted_node_ids.empty() && !result.diagnostic.empty());
@@ -1024,13 +1024,13 @@ void TestPcapFilterDomainResolverResidual() {
         return expression;
     };
     auto resolve = [&](const std::shared_ptr<flowsql::FilterExpr>& expression) {
-        flowsql::FilterDomainResolveRequestV1 request;
-        request.target_kind = flowsql::FilterDomainTargetKindV1::kSource;
+        flowsql::FilterDomainResolveRequest request;
+        request.target_kind = flowsql::FilterDomainTargetKind::kSource;
         request.target_category = "pcapfile";
         request.target_name = "capture";
         request.output_schema = schema;
         request.expression = expression;
-        flowsql::FilterDomainResolveResultV1 result;
+        flowsql::FilterDomainResolveResult result;
         assert(resolver.Resolve(request, &result) == 0);
         assert(result.lowered_expression && !result.diagnostic.empty());
         return result.lowered_expression;
@@ -1084,7 +1084,7 @@ void TestPcapFilterDomainResolverResidual() {
         assert(node->kind != flowsql::FilterExprKind::kLiteral ||
                node->literal.kind != flowsql::FilterLiteralKind::kTyped);
         assert(node->node_id != 0 && lowered_ids.insert(node->node_id).second);
-        if (node->node_id >= flowsql::kFilterDomainSyntheticNodeIdBaseV1) ++synthetic_count;
+        if (node->node_id >= flowsql::kFilterDomainSyntheticNodeIdBase) ++synthetic_count;
         for (const auto& operand : node->operands) inspect_lowered(operand);
     };
     inspect_lowered(lowered);
@@ -1160,26 +1160,26 @@ void TestPcapFilterDomainResolverResidual() {
     expect_sequences("tcp('192.0.2.10', 52314, '198.51.100.20', 3389)", {1, 2});
     expect_sequences("udp('2001:db8::10', 65535, '2001:db8::20', 0)", {5});
 
-    flowsql::FilterDomainResolveRequestV1 request;
-    request.target_kind = flowsql::FilterDomainTargetKindV1::kSource;
+    flowsql::FilterDomainResolveRequest request;
+    request.target_kind = flowsql::FilterDomainTargetKind::kSource;
     request.target_category = "other";
     request.target_name = "capture";
     request.output_schema = schema;
     request.expression = original;
-    flowsql::FilterDomainResolveResultV1 result;
+    flowsql::FilterDomainResolveResult result;
     result.lowered_expression = original;
     result.diagnostic = "stale";
     assert(resolver.Resolve(request, &result) == ENOTSUP);
     assert(!result.lowered_expression && result.diagnostic.empty());
     request.target_category = "pcapfile";
-    request.target_kind = flowsql::FilterDomainTargetKindV1::kTransform;
+    request.target_kind = flowsql::FilterDomainTargetKind::kTransform;
     assert(resolver.Resolve(request, &result) == ENOTSUP);
-    request.target_kind = flowsql::FilterDomainTargetKindV1::kSource;
+    request.target_kind = flowsql::FilterDomainTargetKind::kSource;
     request.contract_version = 99;
     assert(resolver.Resolve(request, &result) == EINVAL);
     assert(!result.lowered_expression && !result.diagnostic.empty());
 
-    request.contract_version = flowsql::kFilterDomainResolverContractVersionV1;
+    request.contract_version = flowsql::kFilterDomainResolverContractVersion;
     request.target_name = "";
     assert(resolver.Resolve(request, &result) == EINVAL);
     assert(!result.lowered_expression && !result.diagnostic.empty());
@@ -2463,7 +2463,7 @@ void TestExclusiveReaderFactory() {
     std::string category_one = "pcapfile";
     std::string source_one = "exclusive";
     std::string plan_one = BuildPcapCanonicalPlan("timestamp_ns >= 10");
-    flowsql::BlockStreamReaderConfigV1 config_one;
+    flowsql::BlockStreamReaderConfig config_one;
     config_one.task_id = task_one.c_str();
     config_one.source_category = category_one.c_str();
     config_one.source_name = source_one.c_str();
@@ -2473,7 +2473,7 @@ void TestExclusiveReaderFactory() {
     assert(reader_one != nullptr && reader_one != managed && reader_one->IsOpened());
 
     std::string plan_two = BuildPcapCanonicalPlan("timestamp_ns < 10");
-    flowsql::BlockStreamReaderConfigV1 config_two;
+    flowsql::BlockStreamReaderConfig config_two;
     config_two.task_id = "reader-task-two";
     config_two.source_category = "PCAPFILE";
     config_two.source_name = "exclusive";
@@ -2530,16 +2530,16 @@ void TestExclusiveReaderFactory() {
     assert(validation_plugin.Load(&querier) == 0);
     assert(validation_plugin.Start() == 0);
     assert(validation_plugin.AddChannel("pcapfile", "validation", "{\"path\":\"" + path + "\"}") == 0);
-    flowsql::BlockStreamReaderConfigV1 invalid;
+    flowsql::BlockStreamReaderConfig invalid;
     invalid.task_id = "invalid-task";
     invalid.source_category = "pcapfile";
     invalid.source_name = "validation";
-    invalid.pushed_filter_plan_json = flowsql::kEmptyCanonicalFilterPlanV1;
+    invalid.pushed_filter_plan_json = flowsql::kEmptyCanonicalFilterPlan;
     auto* rejected = reinterpret_cast<flowsql::IBlockStreamChannel*>(1);
-    invalid.contract_version = flowsql::kBlockStreamReaderContractVersionV1 + 1;
+    invalid.contract_version = flowsql::kBlockStreamReaderContractVersion + 1;
     assert(validation_plugin.CreateReader(invalid, &rejected) == EINVAL);
     assert(rejected == nullptr);
-    invalid.contract_version = flowsql::kBlockStreamReaderContractVersionV1;
+    invalid.contract_version = flowsql::kBlockStreamReaderContractVersion;
     invalid.task_id = nullptr;
     rejected = reinterpret_cast<flowsql::IBlockStreamChannel*>(1);
     assert(validation_plugin.CreateReader(invalid, &rejected) == EINVAL);
@@ -2582,8 +2582,8 @@ void AssertDynamicPluginOrder(bool pcapfile_first) {
     assert(loader->StartAll() == 0);
     assert(loader->First(flowsql::IID_PROTOCOL) != nullptr);
     assert(loader->First(flowsql::IID_BLOCK_STREAM_FACTORY) != nullptr);
-    assert(loader->First(flowsql::IID_BLOCK_STREAM_READER_FACTORY_V1) != nullptr);
-    assert(loader->First(flowsql::IID_FILTER_PUSHDOWN_V1) != nullptr);
+    assert(loader->First(flowsql::IID_BLOCK_STREAM_READER_FACTORY) != nullptr);
+    assert(loader->First(flowsql::IID_FILTER_PUSHDOWN) != nullptr);
     loader->StopAll();
     assert(loader->Unload() == 0);
 }
@@ -3176,11 +3176,11 @@ void TestPcapFilePluginPersistentRemoveAndReaderLifecycle() {
     assert(LoadPcapFileChannelRecords(db_path).size() == 1);
     assert(base->ReleaseBlock(base_batch.batch) == 0);
 
-    flowsql::BlockStreamReaderConfigV1 reader_config;
+    flowsql::BlockStreamReaderConfig reader_config;
     reader_config.task_id = "persistent-remove-reader";
     reader_config.source_category = "pcapfile";
     reader_config.source_name = "removable";
-    reader_config.pushed_filter_plan_json = flowsql::kEmptyCanonicalFilterPlanV1;
+    reader_config.pushed_filter_plan_json = flowsql::kEmptyCanonicalFilterPlan;
     flowsql::IBlockStreamChannel* reader = nullptr;
     assert(plugin.CreateReader(reader_config, &reader) == 0);
     assert(reader != nullptr);

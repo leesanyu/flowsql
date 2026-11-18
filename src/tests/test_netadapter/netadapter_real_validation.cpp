@@ -284,11 +284,17 @@ int main(int argc, char** argv) {
     std::filesystem::create_directories(root);
     auto* loader = PluginLoader::Single();
     PluginOwner libraries{loader};
-    const char* libs[] = {"libflowsql_database.so",       "libflowsql_builtin.so",
-                          "libflowsql_catalog.so",        "libflowsql_npi.so",
-                          "libflowsql_netadapter.so",     "libflowsql_capture_af_packet.so",
-                          "libflowsql_capture_pfring.so", "libflowsql_capture_af_xdp.so",
-                          FLOWSQL_VALIDATION_PROBE_PATH,  "libflowsql_scheduler.so",
+    const char* libs[] = {"libflowsql_config_channel.so",
+                          "libflowsql_database.so",
+                          "libflowsql_builtin.so",
+                          "libflowsql_catalog.so",
+                          "libflowsql_npi.so",
+                          "libflowsql_netadapter.so",
+                          "libflowsql_capture_af_packet.so",
+                          "libflowsql_capture_pfring.so",
+                          "libflowsql_capture_af_xdp.so",
+                          FLOWSQL_VALIDATION_PROBE_PATH,
+                          "libflowsql_scheduler.so",
                           "libflowsql_binaddon.so"};
     std::string db_option = "type=sqlite;name=results;path=" + (root / "results.db").string();
     std::string catalog_option =
@@ -299,7 +305,9 @@ int main(int argc, char** argv) {
     std::string npi_option = std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH +
                              "\",\"concurrency\":" + std::to_string(npi_concurrency) + "}";
     std::string channel_option = "{\"db_path\":\"" + (root / "channels.db").string() + "\"}";
-    const char* options[] = {db_option.c_str(),
+    const std::string semantics_option = "db_path=" + (root / "semantics.db").string();
+    const char* options[] = {semantics_option.c_str(),
+                             db_option.c_str(),
                              nullptr,
                              catalog_option.c_str(),
                              npi_option.c_str(),
@@ -310,16 +318,16 @@ int main(int argc, char** argv) {
                              nullptr,
                              nullptr,
                              addon_option.c_str()};
-    assert(loader->Load(get_absolute_process_path(), libs, options, 11) == 0);
+    assert(loader->Load(get_absolute_process_path(), libs, options, 12) == 0);
     assert(loader->StartAll() == 0);
     IBlockStreamManager* manager = nullptr;
-    IBlockStreamReaderFactoryV1* reader_factory = nullptr;
+    IBlockStreamReaderFactory* reader_factory = nullptr;
     loader->Traverse(IID_BLOCK_STREAM_MANAGER, [&](void* value) {
         manager = static_cast<IBlockStreamManager*>(value);
         return -1;
     });
-    loader->Traverse(IID_BLOCK_STREAM_READER_FACTORY_V1, [&](void* value) {
-        reader_factory = static_cast<IBlockStreamReaderFactoryV1*>(value);
+    loader->Traverse(IID_BLOCK_STREAM_READER_FACTORY, [&](void* value) {
+        reader_factory = static_cast<IBlockStreamReaderFactory*>(value);
         return -1;
     });
     assert(manager && reader_factory);
@@ -412,7 +420,7 @@ int main(int argc, char** argv) {
     assert(getrusage(RUSAGE_SELF, &usage_start) == 0);
     const auto measurement_start = Clock::now();
     if (capture) {
-        BlockStreamReaderConfigV1 request;
+        BlockStreamReaderConfig request;
         request.task_id = "capture-validation";
         request.source_category = "netadapter";
         request.source_name = "live";
@@ -428,11 +436,11 @@ int main(int argc, char** argv) {
             std::cerr << "real capture Open failed: " << rc << "\n";
             return 1;
         }
-        auto* reader = dynamic_cast<ICaptureBlockStreamReaderV2*>(base);
+        auto* reader = dynamic_cast<ICaptureBlockStreamReader*>(base);
         assert(reader);
-        CaptureSourceSetV2 sources;
+        CaptureSourceSet sources;
         assert(reader->DescribeSources(&sources) == 0);
-        CaptureProgressTrackerV2 progress(sources);
+        MultiInputCaptureProgressTracker progress(sources);
         Sender sender(argv[5], argv[6], pps, frame_bytes, profile);
         const auto until = Clock::now() + std::chrono::seconds(duration);
         uint64_t sequence = 0;
@@ -477,7 +485,7 @@ int main(int argc, char** argv) {
                     std::chrono::duration<double, std::milli>(Clock::now() - last_service[fact.source_id]).count());
                 last_service[fact.source_id] = Clock::now();
             }
-            assert(progress.Observe(event.progress) == CaptureProgressErrorV1::kNone);
+            assert(progress.Observe(event.progress) == CaptureProgressError::kNone);
             if (auto watermark = progress.CommonCandidateNs()) {
                 if (!last_common || *watermark > *last_common) ++common_advances;
                 last_common = watermark;
@@ -546,6 +554,11 @@ int main(int argc, char** argv) {
         auto submit = Route(loader, "/scheduler/batch/submit"), status = Route(loader, "/scheduler/batch/status"),
              stop = Route(loader, "/scheduler/batch/stop");
         assert(submit && status && stop);
+        const std::string parameters =
+            std::string(R"({"schema_version":1,"core":{"output_interval_ns":)") +
+            std::to_string(uint64_t(interval) * 1000000000) +
+            R"(,"out_of_order_tolerance_ns":1000000000,"tcp_idle_timeout_ns":600000000000,"udp_idle_timeout_ns":600000000000)" +
+            (probe ? R"(,"max_tracked_bytes":16777216,"max_pending_output_bytes":4194304)" : "") + "}}";
         const std::string sql =
             "SELECT * FROM netadapter.live " +
             (std::string(argv[1]) != "sql"
@@ -553,10 +566,8 @@ int main(int argc, char** argv) {
                     : profile == "high_reject" ? std::string("WHERE src_port < 41002 ")
                                                : std::string())
                  : std::string("WHERE wire_len >= 64 AND (transport_protocol = 6 OR transport_protocol = 17) ")) +
-            "USING npm.basic WITH output_interval_ns=" + std::to_string(uint64_t(interval) * 1000000000) +
-            ",out_of_order_tolerance_ns=1000000000,tcp_idle_timeout_ns=600000000000,udp_idle_timeout_ns=600000000000" +
+            "USING npm.basic WITH parameters='" + parameters + "'" +
             (std::string(argv[1]) != "sql" ? std::string(",features='basic,icmp' ") : std::string(" ")) +
-            (probe ? std::string(",max_tracked_bytes=16777216,max_pending_output_bytes=4194304 ") : std::string()) +
             "INTO "
             "sqlite.results";
         rapidjson::Document request;
@@ -593,7 +604,7 @@ int main(int argc, char** argv) {
         const auto sql_started_ns = NowNs();
         artifact.AddMember("sql_start_wall_ns", sql_started_ns, allocator);
         const auto until = Clock::now() + std::chrono::seconds(duration);
-        const std::string relation = "npm_basic_history_v1 WHERE __npm_run_id='" + run_id + "'";
+        const std::string relation = "npm_basic_ipv4_history WHERE __npm_run_id='" + run_id + "'";
         std::set<std::pair<std::string, std::string>> observed_rows;
         std::optional<int64_t> last_common;
         uint64_t common_advances = 0, recovery_advances = 0;
@@ -803,11 +814,11 @@ int main(int argc, char** argv) {
                 if (std::string(state["status"].GetString()) == "failed") break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
-            const auto domains = Count(db, "SELECT count(DISTINCT observation_domain_id) FROM npm_basic_history_v1");
+            const auto domains = Count(db, "SELECT count(DISTINCT observation_domain_id) FROM npm_basic_ipv4_history");
             const auto other_sessions =
-                Count(db, "SELECT count(DISTINCT session_id) FROM npm_basic_history_v1 WHERE __npm_run_id='" +
+                Count(db, "SELECT count(DISTINCT session_id) FROM npm_basic_ipv4_history WHERE __npm_run_id='" +
                               other_run_id + "'");
-            const std::string other_relation = "npm_basic_history_v1 WHERE __npm_run_id='" + other_run_id + "'";
+            const std::string other_relation = "npm_basic_ipv4_history WHERE __npm_run_id='" + other_run_id + "'";
             const auto other_final_rows = Count(db, "SELECT count(*) FROM " + other_relation + " AND is_final=1");
             const auto own_domains = Count(db, "SELECT count(DISTINCT observation_domain_id) FROM " + relation);
             const auto other_domains = Count(db, "SELECT count(DISTINCT observation_domain_id) FROM " + other_relation);

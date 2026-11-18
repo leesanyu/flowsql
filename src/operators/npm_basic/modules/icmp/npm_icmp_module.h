@@ -13,17 +13,17 @@
 
 namespace flowsql::npm {
 
-class NpmIcmpProtocolModuleV1 final : public INpmProtocolModuleV1, private INpmFamilyIcmpActiveSessionLookup {
+class NpmIcmpProtocolModule final : public INpmProtocolModule, private INpmFamilyIcmpActiveSessionLookup {
  public:
-    NpmIcmpProtocolModuleV1(NpmIcmpConfigV1 config, std::shared_ptr<INpmTaskBudget> budget);
+    NpmIcmpProtocolModule(NpmIcmpConfig config, std::shared_ptr<INpmTaskBudget> budget);
     void BindSessions(const NpmSessionTable* sessions, std::string input_namespace);
 
-    int OnInput(const NpmInputEventV1&, INpmResultEmitterV1&) override;
-    int OnSessionSnapshot(const NpmSessionView&, int64_t, INpmResultEmitterV1&) override { return 0; }
-    int OnSessionEnd(const NpmSessionView&, NpmSessionEndReason, int64_t, INpmResultEmitterV1&) override { return 0; }
+    int OnInput(const NpmInputEvent&, INpmResultEmitter&) override;
+    int OnSessionSnapshot(const NpmSessionView&, int64_t, INpmResultEmitter&) override { return 0; }
+    int OnSessionEnd(const NpmSessionView&, NpmSessionEndReason, int64_t, INpmResultEmitter&) override { return 0; }
     std::optional<int64_t> NextEventDeadlineNs() const override;
-    int OnTime(const NpmModuleTimeV1&, INpmResultEmitterV1&) override;
-    int Finish(int64_t, INpmResultEmitterV1&) override;
+    int OnTime(const NpmModuleTime&, INpmResultEmitter&) override;
+    int Finish(int64_t, INpmResultEmitter&) override;
     void Abort() noexcept override;
 
  private:
@@ -32,12 +32,12 @@ class NpmIcmpProtocolModuleV1 final : public INpmProtocolModuleV1, private INpmF
     template <typename Address>
     std::optional<uint64_t> Lookup(const NpmIcmpFamilyQuotedFlow<Address>&) const;
     template <typename Address>
-    int OnFamilyInput(const NpmInputEventV1&, INpmResultEmitterV1&);
+    int OnFamilyInput(const NpmInputEvent&, INpmResultEmitter&);
     template <typename Address>
-    int Emit(const NpmIcmpFamilyEvent<Address>&, INpmResultEmitterV1&);
+    int Emit(const NpmIcmpFamilyEvent<Address>&, INpmResultEmitter&);
 
     std::shared_ptr<INpmTaskBudget> budget_;
-    NpmIcmpEchoTrackerV1 echoes_;
+    NpmIcmpEchoTracker echoes_;
     const NpmSessionTable* sessions_ = nullptr;
     std::string input_namespace_;
 };

@@ -14,7 +14,7 @@
 
 namespace flowsql {
 
-enum class CaptureProgressErrorV1 : uint8_t {
+enum class CaptureProgressError : uint8_t {
     kNone = 0,
     kInvalidVersion,
     kWrongQueue,
@@ -25,7 +25,7 @@ enum class CaptureProgressErrorV1 : uint8_t {
     kInvalidBacklog,
 };
 
-enum class CaptureProgressDispositionV1 : uint8_t {
+enum class CaptureProgressDisposition : uint8_t {
     kAdvanced = 0,
     kUnchanged,
     kBacklogUnknown,
@@ -34,76 +34,75 @@ enum class CaptureProgressDispositionV1 : uint8_t {
     kTimeRegressed,
 };
 
-struct CaptureProgressResultV1 {
-    CaptureProgressErrorV1 error = CaptureProgressErrorV1::kNone;
-    CaptureProgressDispositionV1 disposition = CaptureProgressDispositionV1::kUnchanged;
+struct CaptureProgressResult {
+    CaptureProgressError error = CaptureProgressError::kNone;
+    CaptureProgressDisposition disposition = CaptureProgressDisposition::kUnchanged;
     std::optional<int64_t> capture_progress_ns;
 };
 
 /** One task, one queue, one generation. Call Observe only after the corresponding batch was processed and released. */
-class CaptureProgressTrackerV1 final {
+class SingleInputCaptureProgressTracker final {
  public:
-    explicit CaptureProgressTrackerV1(const CaptureQueueIdentityV1& identity)
+    explicit SingleInputCaptureProgressTracker(const CaptureQueueIdentity& identity)
         : source_id_(identity.source_id), queue_id_(identity.queue_id), generation_(identity.generation) {}
 
-    CaptureProgressResultV1 Observe(const CaptureProgressV1& fact,
-                                    std::optional<int64_t> processed_packet_max_time_ns = std::nullopt) {
-        CaptureProgressResultV1 result;
+    CaptureProgressResult Observe(const CaptureProgress& fact,
+                                  std::optional<int64_t> processed_packet_max_time_ns = std::nullopt) {
+        CaptureProgressResult result;
         result.capture_progress_ns = capture_progress_ns_;
-        if (fact.struct_size < sizeof(CaptureProgressV1) ||
-            fact.contract_version != kCaptureBlockStreamContractVersionV1) {
-            result.error = CaptureProgressErrorV1::kInvalidVersion;
+        if (fact.struct_size < sizeof(CaptureProgress) || fact.contract_version != kCaptureFactContractVersion) {
+            result.error = CaptureProgressError::kInvalidVersion;
             return result;
         }
         if (fact.source_id != source_id_ || fact.queue_id != queue_id_ || fact.generation != generation_) {
-            result.error = CaptureProgressErrorV1::kWrongQueue;
+            result.error = CaptureProgressError::kWrongQueue;
             return result;
         }
         if (fact.fact_sequence == 0 || fact.fact_sequence <= last_sequence_) {
-            result.error = CaptureProgressErrorV1::kInvalidSequence;
+            result.error = CaptureProgressError::kInvalidSequence;
             return result;
         }
         if (fact.capture_time_ns < 0) {
-            result.error = CaptureProgressErrorV1::kInvalidTime;
+            result.error = CaptureProgressError::kInvalidTime;
             return result;
         }
-        if (fact.backlog != CaptureBacklogV1::kUnknown && fact.backlog != CaptureBacklogV1::kEmpty &&
-            fact.backlog != CaptureBacklogV1::kPresent) {
-            result.error = CaptureProgressErrorV1::kInvalidBacklog;
+        if (fact.backlog != CaptureBacklog::kUnknown && fact.backlog != CaptureBacklog::kEmpty &&
+            fact.backlog != CaptureBacklog::kPresent) {
+            result.error = CaptureProgressError::kInvalidBacklog;
             return result;
         }
         if (fact.packet_observed != processed_packet_max_time_ns.has_value() ||
             (processed_packet_max_time_ns && fact.capture_time_ns > *processed_packet_max_time_ns)) {
-            result.error = CaptureProgressErrorV1::kUnprocessedPacket;
+            result.error = CaptureProgressError::kUnprocessedPacket;
             return result;
         }
         if (fact.packet_observed && fact.source_idle_confirmed) {
-            result.error = CaptureProgressErrorV1::kInvalidFact;
+            result.error = CaptureProgressError::kInvalidFact;
             return result;
         }
 
         last_sequence_ = fact.fact_sequence;
         if (last_seen_time_ns_ && fact.capture_time_ns < *last_seen_time_ns_) {
-            result.disposition = CaptureProgressDispositionV1::kTimeRegressed;
+            result.disposition = CaptureProgressDisposition::kTimeRegressed;
             return result;
         }
         last_seen_time_ns_ = fact.capture_time_ns;
-        if (fact.backlog == CaptureBacklogV1::kUnknown) {
-            result.disposition = CaptureProgressDispositionV1::kBacklogUnknown;
+        if (fact.backlog == CaptureBacklog::kUnknown) {
+            result.disposition = CaptureProgressDisposition::kBacklogUnknown;
             return result;
         }
-        if (fact.backlog == CaptureBacklogV1::kPresent) {
-            result.disposition = CaptureProgressDispositionV1::kBacklogged;
+        if (fact.backlog == CaptureBacklog::kPresent) {
+            result.disposition = CaptureProgressDisposition::kBacklogged;
             return result;
         }
         if (!fact.packet_observed && !fact.source_idle_confirmed) {
-            result.disposition = CaptureProgressDispositionV1::kIdleUnconfirmed;
+            result.disposition = CaptureProgressDisposition::kIdleUnconfirmed;
             return result;
         }
         if (!capture_progress_ns_ || fact.capture_time_ns > *capture_progress_ns_) {
             capture_progress_ns_ = fact.capture_time_ns;
             result.capture_progress_ns = capture_progress_ns_;
-            result.disposition = CaptureProgressDispositionV1::kAdvanced;
+            result.disposition = CaptureProgressDisposition::kAdvanced;
         }
         return result;
     }
@@ -120,27 +119,27 @@ class CaptureProgressTrackerV1 final {
 };
 
 /** Transactional multi-input safety gate. A blocked input suspends the common candidate. */
-class CaptureProgressTrackerV2 final {
+class MultiInputCaptureProgressTracker final {
  public:
-    explicit CaptureProgressTrackerV2(const CaptureSourceSetV2& sources) {
+    explicit MultiInputCaptureProgressTracker(const CaptureSourceSet& sources) {
         for (const auto& input : sources.inputs)
-            inputs_.emplace(input.source_id, Input{CaptureProgressTrackerV1(input)});
+            inputs_.emplace(input.source_id, Input{SingleInputCaptureProgressTracker(input)});
     }
-    CaptureProgressErrorV1 Observe(const std::vector<CaptureProgressV1>& facts) {
+    CaptureProgressError Observe(const std::vector<CaptureProgress>& facts) {
         auto next = inputs_;
         std::set<uint32_t> seen;
         for (const auto& fact : facts) {
             auto it = next.find(fact.source_id);
-            if (it == next.end() || !seen.insert(fact.source_id).second) return CaptureProgressErrorV1::kWrongQueue;
+            if (it == next.end() || !seen.insert(fact.source_id).second) return CaptureProgressError::kWrongQueue;
             auto result = it->second.tracker.Observe(
                 fact, fact.packet_observed ? std::optional<int64_t>(fact.capture_time_ns) : std::nullopt);
-            if (result.error != CaptureProgressErrorV1::kNone) return result.error;
-            it->second.safe = fact.backlog == CaptureBacklogV1::kEmpty &&
+            if (result.error != CaptureProgressError::kNone) return result.error;
+            it->second.safe = fact.backlog == CaptureBacklog::kEmpty &&
                               (fact.packet_observed || fact.source_idle_confirmed) &&
-                              result.disposition != CaptureProgressDispositionV1::kTimeRegressed;
+                              result.disposition != CaptureProgressDisposition::kTimeRegressed;
         }
         inputs_ = std::move(next);
-        return CaptureProgressErrorV1::kNone;
+        return CaptureProgressError::kNone;
     }
     std::optional<int64_t> CommonCandidateNs() const {
         std::optional<int64_t> candidate;
@@ -160,7 +159,7 @@ class CaptureProgressTrackerV2 final {
 
  private:
     struct Input {
-        CaptureProgressTrackerV1 tracker;
+        SingleInputCaptureProgressTracker tracker;
         bool safe = false;
     };
     std::map<uint32_t, Input> inputs_;

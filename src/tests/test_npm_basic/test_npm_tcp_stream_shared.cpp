@@ -38,9 +38,9 @@ class RecordBatch {};
 }  // namespace arrow
 namespace npm = flowsql::npm;
 using Error = npm::NpmTcpStreamError;
-using Kind = npm::NpmTcpStreamEventKindV1;
+using Kind = npm::NpmTcpStreamEventKind;
 using Stream = npm::NpmTcpStreamSharedDirection;
-using EndReason = npm::NpmTcpStreamEndReasonV1;
+using EndReason = npm::NpmTcpStreamEndReason;
 
 namespace {
 class Budget final : public npm::INpmTaskBudget {
@@ -64,7 +64,7 @@ class Budget final : public npm::INpmTaskBudget {
     }
     uint64_t used = 0, peak = 0, limit = 16 * 1024 * 1024;
 };
-class Emitter final : public npm::INpmResultEmitterV1 {
+class Emitter final : public npm::INpmResultEmitter {
  public:
     int Emit(std::string_view, const arrow::RecordBatch&) override {
         ++attempts;
@@ -80,16 +80,16 @@ struct Saved {
     std::string bytes;
     std::optional<int64_t> timestamp;
 };
-class Consumer final : public npm::INpmTcpStreamConsumerV1 {
+class Consumer final : public npm::INpmTcpStreamConsumer {
  public:
-    int OnTcpStreamReadable(const npm::NpmTcpStreamContextV1& ctx, npm::INpmTcpStreamCursorV1& cursor,
-                            npm::INpmResultEmitterV1& emitter) override {
+    int OnTcpStreamReadable(const npm::NpmTcpStreamContext& ctx, npm::INpmTcpStreamCursor& cursor,
+                            npm::INpmResultEmitter& emitter) override {
         ++calls;
         assert(ctx.session && ctx.session->session_id == expected_session);
         final_calls += ctx.final_drain;
         if (callback) return callback(ctx, cursor, emitter);
         uint64_t left = ctx.final_drain && drain_final ? std::numeric_limits<uint64_t>::max() : quota;
-        npm::NpmTcpStreamEventV1 event, again;
+        npm::NpmTcpStreamEvent event, again;
         while (cursor.Peek(&event) && left) {
             assert(cursor.Peek(&again));
             assert(again.kind == event.kind && again.begin == event.begin && again.end == event.end);
@@ -119,13 +119,12 @@ class Consumer final : public npm::INpmTcpStreamConsumerV1 {
     bool drain_final = true, record = true;
     int calls = 0, final_calls = 0;
     std::vector<Saved> seen;
-    std::function<int(const npm::NpmTcpStreamContextV1&, npm::INpmTcpStreamCursorV1&, npm::INpmResultEmitterV1&)>
-        callback;
+    std::function<int(const npm::NpmTcpStreamContext&, npm::INpmTcpStreamCursor&, npm::INpmResultEmitter&)> callback;
 };
 struct Fixture {
     std::shared_ptr<Budget> budget = std::make_shared<Budget>();
     npm::NpmSessionView session;
-    npm::NpmTcpStreamConfigV1 config;
+    npm::NpmTcpStreamConfig config;
     Emitter emitter;
     Consumer fast, slow;
     std::unique_ptr<Stream> stream;
@@ -229,7 +228,7 @@ void TestInvalidConsumptionIsLatched() {
     for (int mode = 0; mode < 5; ++mode) {
         Fixture f;
         f.fast.callback = [mode](const auto&, auto& cursor, auto&) {
-            npm::NpmTcpStreamEventV1 e;
+            npm::NpmTcpStreamEvent e;
             assert(cursor.Peek(&e));
             if (mode == 0) assert(cursor.Consume(0) != 0);
             if (mode == 1) assert(cursor.Consume(e.bytes.size + 1) != 0);
@@ -406,7 +405,7 @@ void TestEmitterConsumerAndAbortFailures() {
     Fixture f;
     arrow::RecordBatch rows;
     f.fast.callback = [&](const auto&, auto& cursor, auto& emitter) {
-        npm::NpmTcpStreamEventV1 e;
+        npm::NpmTcpStreamEvent e;
         while (cursor.Peek(&e)) {
             emitter.Emit("test", rows);  // Ignore emitter failure deliberately.
             cursor.Consume(e.bytes.size);

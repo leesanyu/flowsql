@@ -10,7 +10,7 @@ Draft202012Validator.check_schema(schema);Draft202012Validator.check_schema(api)
 for name in ['standard','dictionary','binding','channel-binding']:
     Draft202012Validator(schema).validate(json.loads((root/f'examples/semantics/{name}.json').read_text()))
 binding=json.loads((root/'examples/semantics/channel-binding.json').read_text())
-for mutate in [lambda b:b.update(schema_id='flowsql.data-binding.v1'),lambda b:b.pop('confirmation'),lambda b:b['source_snapshot'].update(schema_state='made_up'),lambda b:b.update(unexpected=1)]:
+for mutate in [lambda b:b.update(schema_id='flowsql.data-binding.v1'),lambda b:b.pop('confirmation'),lambda b:b.pop('source_snapshot'),lambda b:b['source_snapshot'].update(schema_state='made_up'),lambda b:b.update(unexpected=1)]:
     bad=copy.deepcopy(binding);mutate(bad);assert list(Draft202012Validator(schema).iter_errors(bad))
 openapi=json.loads((root/'config/semantics/openapi.json').read_text())
 ids=[p['post']['operationId'] for p in openapi['paths'].values() if 'post' in p]
@@ -27,7 +27,7 @@ for op in ['describe','preview','check','apply']:
     validator=Draft202012Validator(dict(api,**{'$ref':f'#/$defs/channels_{op}Request'}))
     validator.validate(request)
     request['timeout_ms']=0;assert list(validator.iter_errors(request))
-print('PASS: published channel models, v1/v2 samples, negative cases and four OpenAPI operations')
+print('PASS: published channel models, current binding samples, negative cases and four OpenAPI operations')
 
 # Database products are supplied by metadata providers, not enumerated by the
 # public description protocol. An unknown provider still fails at resolution.

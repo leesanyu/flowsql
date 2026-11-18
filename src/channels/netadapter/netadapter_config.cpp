@@ -7,7 +7,7 @@
 #include <cerrno>
 #include <set>
 namespace flowsql::channels::netadapter {
-int ParseNetAdapterConfig(const std::string& json, CaptureBackendConfigV1* output, std::string* normalized,
+int ParseNetAdapterConfig(const std::string& json, CaptureBackendConfig* output, std::string* normalized,
                           std::string* error) {
     auto fail = [&](const char* text) {
         if (error) *error = text;
@@ -25,7 +25,7 @@ int ParseNetAdapterConfig(const std::string& json, CaptureBackendConfigV1* outpu
             name != "buffer_mib")
             return fail("unknown NetAdapter option");
     }
-    CaptureBackendConfigV1 config;
+    CaptureBackendConfig config;
     if (!doc.HasMember("backend") || !doc["backend"].IsString()) return fail("backend is required");
     config.backend.assign(doc["backend"].GetString(), doc["backend"].GetStringLength());
     if (config.backend != "af_packet" && config.backend != "pfring_classic" && config.backend != "af_xdp_copy_skb")
@@ -77,8 +77,8 @@ int ParseNetAdapterConfig(const std::string& json, CaptureBackendConfigV1* outpu
     if (error) error->clear();
     return 0;
 }
-CaptureSourceSetV2 DefaultSourceSet() {
-    CaptureSourceSetV2 sources;
+CaptureSourceSet DefaultSourceSet() {
+    CaptureSourceSet sources;
     sources.limits.max_packets_per_batch = 256;
     sources.limits.max_bytes_per_batch = kMiB;
     sources.limits.max_wait_ms = 10;

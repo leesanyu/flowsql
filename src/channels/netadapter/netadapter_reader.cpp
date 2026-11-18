@@ -12,10 +12,10 @@
 #include <chrono>
 #include <set>
 namespace flowsql::channels::netadapter {
-NetAdapterReader::NetAdapterReader(std::string name, CaptureBackendConfigV1 config, uint64_t domain,
-                                   uint64_t generation, std::shared_ptr<ICaptureBackendSessionV1> backend,
-                                   IProtocol* protocol, std::shared_ptr<void> lease,
-                                   std::shared_ptr<const packet::PcapFilterPlan> filter, MonotonicNow monotonic_now)
+NetAdapterReader::NetAdapterReader(std::string name, CaptureBackendConfig config, uint64_t domain, uint64_t generation,
+                                   std::shared_ptr<ICaptureBackendSession> backend, IProtocol* protocol,
+                                   std::shared_ptr<void> lease, std::shared_ptr<const packet::PcapFilterPlan> filter,
+                                   MonotonicNow monotonic_now)
     : name_(std::move(name)),
       config_(std::move(config)),
       sources_(DefaultSourceSet()),
@@ -30,7 +30,7 @@ NetAdapterReader::NetAdapterReader(std::string name, CaptureBackendConfigV1 conf
         backend_bytes_ += input.buffer_bytes;
     }
     for (size_t i = 0; i < source_names_.size(); ++i) {
-        CaptureQueueIdentityV1 identity;
+        CaptureQueueIdentity identity;
         identity.source_name = source_names_[i].c_str();
         identity.source_id = i;
         identity.observation_domain_id = domain;
@@ -41,7 +41,7 @@ NetAdapterReader::NetAdapterReader(std::string name, CaptureBackendConfigV1 conf
     }
     counters_.resize(source_names_.size());
     fact_sequences_.resize(source_names_.size());
-    backlogs_.resize(source_names_.size(), CaptureBacklogV1::kUnknown);
+    backlogs_.resize(source_names_.size(), CaptureBacklog::kUnknown);
     candidates_.resize(source_names_.size());
     for (auto& counters : counters_) {
         counters.generation = generation;
@@ -56,7 +56,7 @@ NetAdapterReader::~NetAdapterReader() {
 int NetAdapterReader::Open() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (opened_) return EALREADY;
-    if (ValidateCaptureSourceSetV2(sources_) != CaptureDescriptionErrorV1::kNone ||
+    if (ValidateCaptureSourceSet(sources_) != CaptureDescriptionError::kNone ||
         backend_bytes_ + kSharedEnvelopeBytes > config_.buffer_bytes)
         return ENOMEM;
     pool_ = std::make_shared<CaptureMemoryPool>(config_.buffer_bytes - backend_bytes_);
@@ -92,7 +92,7 @@ void NetAdapterReader::Cancel() {
     }
     backend_->Cancel();
 }
-int NetAdapterReader::DescribeSources(CaptureSourceSetV2* output) const {
+int NetAdapterReader::DescribeSources(CaptureSourceSet* output) const {
     if (!output || output->struct_size < sizeof(*output) || output->contract_version != 2) return EINVAL;
     *output = sources_;
     return 0;
@@ -101,16 +101,16 @@ int NetAdapterReader::ReleaseBlock(const std::shared_ptr<arrow::RecordBatch>& bl
     std::lock_guard<std::mutex> lock(mutex_);
     return block && outstanding_.erase(block.get()) ? 0 : EINVAL;
 }
-int NetAdapterReader::ReadInputCounters(uint32_t source, CaptureCountersV1* output) const {
+int NetAdapterReader::ReadInputCounters(uint32_t source, CaptureCounters* output) const {
     if (!output || source >= counters_.size() || output->struct_size < sizeof(*output) || output->contract_version != 1)
         return EINVAL;
     std::lock_guard<std::mutex> lock(mutex_);
     *output = counters_[source];
     return 0;
 }
-CapturePollEventV2 NetAdapterReader::PollCapture(int timeout_ms) {
+CapturePollEvent NetAdapterReader::PollCapture(int timeout_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
-    CapturePollEventV2 event;
+    CapturePollEvent event;
     auto fail = [&] {
         int expected = 0;
         terminal_.compare_exchange_strong(expected, 3);
@@ -175,7 +175,7 @@ CapturePollEventV2 NetAdapterReader::PollCapture(int timeout_ms) {
                 if (empty[i] || packets[i] >= kInputPacketQuantum || bytes[i] >= kInputByteQuantum) continue;
                 attempted = true;
                 checked[i] = true;
-                CapturePacketViewV1 view;
+                CapturePacketView view;
                 const int rc = backend_->TryRead(i, &view);
                 if (rc == EAGAIN) {
                     empty[i] = true;
@@ -266,7 +266,7 @@ CapturePollEventV2 NetAdapterReader::PollCapture(int timeout_ms) {
     }
     for (size_t i = 0; i < n; ++i) {
         if (!checked[i]) continue;
-        CaptureCountersV1 measured;
+        CaptureCounters measured;
         if (backend_->ReadCounters(i, &measured) == 0) {
             auto& c = counters_[i];
             c.received_packets = measured.received_packets;
@@ -276,14 +276,14 @@ CapturePollEventV2 NetAdapterReader::PollCapture(int timeout_ms) {
                 measured.available_mask & (kCaptureReceivedPacketsAvailable | kCaptureSourceDroppedPacketsAvailable);
         }
         backlogs_[i] = backend_->Backlog(i);
-        CaptureProgressV1 fact;
+        CaptureProgress fact;
         fact.source_id = i;
         fact.queue_id = sources_.inputs[i].queue_id;
         fact.generation = sources_.inputs[i].generation;
         fact.fact_sequence = ++fact_sequences_[i];
         fact.backlog = backlogs_[i];
         fact.packet_observed = packet_times[i].has_value();
-        fact.source_idle_confirmed = !fact.packet_observed && empty[i] && fact.backlog == CaptureBacklogV1::kEmpty;
+        fact.source_idle_confirmed = !fact.packet_observed && empty[i] && fact.backlog == CaptureBacklog::kEmpty;
         fact.capture_time_ns = packet_times[i].value_or(fact.source_idle_confirmed ? backend_->IdleTimeNs(i) : 0);
         candidates_[i] = fact.capture_time_ns;
         event.progress.push_back(fact);
@@ -392,9 +392,9 @@ std::string NetAdapterReader::Diagnostics() const {
         w.Key("counter_source");
         w.String(input.counter_source.c_str());
         w.Key("backlog");
-        w.String(backlogs_[i] == CaptureBacklogV1::kEmpty     ? "empty"
-                 : backlogs_[i] == CaptureBacklogV1::kPresent ? "present"
-                                                              : "unknown");
+        w.String(backlogs_[i] == CaptureBacklog::kEmpty     ? "empty"
+                 : backlogs_[i] == CaptureBacklog::kPresent ? "present"
+                                                            : "unknown");
         w.Key("received_packets");
         if (c.available_mask & kCaptureReceivedPacketsAvailable)
             w.Uint64(c.received_packets);

@@ -1,6 +1,6 @@
 # 产品版本与构建信息
 
-FlowSQL 使用仓库根目录 `VERSION` 统一维护产品版本，当前开发基线为 `0.1.0`。版本号登记或构建成功
+FlowSQL 使用仓库根目录 `VERSION` 统一维护产品版本，当前开发基线为 `0.5.0`。版本号登记或构建成功
 不等于正式发布；发布还需要干净源码、对应标签、实际产物一致及完整功能验收。
 
 ## 维护版本
@@ -10,15 +10,15 @@ FlowSQL 使用仓库根目录 `VERSION` 统一维护产品版本，当前开发�
 
 | 版本 | 用途 |
 | --- | --- |
-| `0.1.0-dev.1` | 开发版本 |
-| `0.1.0-rc.1` | 发布候选 |
-| `0.1.0` | 当前交付基线 |
-| `0.1.1` | 兼容修复 |
-| `0.2.0` | 新能力或 0.x 阶段的适配性调整 |
+| `0.5.0-dev.1` | 开发版本 |
+| `0.5.0-rc.1` | 发布候选 |
+| `0.5.0` | 当前交付基线 |
+| `0.5.1` | 兼容修复 |
+| `0.6.0` | 新能力或 0.x 阶段的适配性调整 |
 
 1.0.0 起确立稳定兼容承诺，不兼容变更递增主版本。日常提交由源码提交号区分，不自动递增版本。
 前端 `package.json` 的包版本不参与产品展示，构建不会改写它或 lockfile。Python 分发版本从同一来源
-映射为 PEP 440：`0.1.0-dev.1` → `0.1.0.dev1`，alpha/beta/rc 分别为 `a1`/`b1`/`rc1`；运行时保留原始产品版本。
+映射为 PEP 440：`0.5.0-dev.1` → `0.5.0.dev1`，alpha/beta/rc 分别为 `a1`/`b1`/`rc1`；运行时保留原始产品版本。
 
 ## 构建与查询
 
@@ -35,7 +35,7 @@ PYTHONPATH=build/output/python python3 -m flowsql.worker --version
 CLI 成功退出 0，输出三行，例如：
 
 ```text
-FlowSQL 0.1.0
+FlowSQL 0.5.0
 revision=0123456789abcdef0123456789abcdef01234567
 dirty=false
 ```
@@ -52,7 +52,7 @@ curl -i http://127.0.0.1:8081/api/version
 返回 HTTP 200、`Content-Type: application/json`、`Cache-Control: no-store`，固定三字段：
 
 ```json
-{"version":"0.1.0","revision":"0123456789abcdef0123456789abcdef01234567","dirty":false}
+{"version":"0.5.0","revision":"0123456789abcdef0123456789abcdef01234567","dirty":false}
 ```
 
 `revision` 是构建时完整 Git commit ID；`dirty` 包括暂存、未暂存和未忽略的新文件，忽略的构建缓存与证据不计入。
@@ -78,10 +78,10 @@ python3 tools/release.py artifacts
 本地制作镜像：
 
 ```bash
-python3 tools/release.py image --tag flowsql:0.1.0
-docker run --rm flowsql:0.1.0 flowsql --version
-docker run --rm flowsql:0.1.0 flowsql-worker --version
-docker image inspect flowsql:0.1.0 --format '{{json .Config.Labels}}'
+python3 tools/release.py image --tag flowsql:0.5.0
+docker run --rm flowsql:0.5.0 flowsql --version
+docker run --rm flowsql:0.5.0 flowsql-worker --version
+docker image inspect flowsql:0.5.0 --format '{{json .Config.Labels}}'
 ```
 
 该命令先核对实际产物与当前源码，再把产物版本、提交号传给 Dockerfile。镜像会再次校验输入，并将相同值写入
@@ -93,20 +93,20 @@ Dockerfile 复制已经构建的 Worker，Python 依赖仍按 requirements 安�
 Compose 用同一个 `FLOWSQL_IMAGE` 选择四个产品服务镜像，默认 `flowsql:latest`：
 
 ```bash
-FLOWSQL_IMAGE=flowsql:0.1.0 docker compose config --images
-FLOWSQL_IMAGE=flowsql:0.1.0 docker compose up -d
+FLOWSQL_IMAGE=flowsql:0.5.0 docker compose config --images
+FLOWSQL_IMAGE=flowsql:0.5.0 docker compose up -d
 ```
 
-也可在部署目录 `.env` 中设置 `FLOWSQL_IMAGE=registry.example.com/flowsql:0.1.0`。镜像选择不改变镜像内版本；
+也可在部署目录 `.env` 中设置 `FLOWSQL_IMAGE=registry.example.com/flowsql:0.5.0`。镜像选择不改变镜像内版本；
 `latest` 只是部署别名。实际部署、推送或上传由操作者明确执行。
 
 ## 正式与候选发布
 
 发布顺序为：修改并提交版本 → 标准构建及完整验收 → 明确创建相应标签 → 只读发布校验 → 交付。
-标签格式为 `v<VERSION>`，例如 `v0.1.0` 或 `v0.1.0-rc.1`。发布校验命令：
+标签格式为 `v<VERSION>`，例如 `v0.5.0` 或 `v0.5.0-rc.1`。发布校验命令：
 
 ```bash
-python3 tools/release.py verify --version 0.1.0
+python3 tools/release.py verify --version 0.5.0
 ```
 
 它要求 `VERSION`、请求版本、当前提交上的精确标签和全部实际产物一致，源码干净且身份已知；缺标签、标签指向

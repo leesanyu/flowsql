@@ -146,7 +146,7 @@ public:
         return -1;
     }
 
-    virtual int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) {
+    virtual int ExecutePrepared(const char* sql, const DatabaseParameter* parameters, size_t parameter_count) {
         (void)sql;
         (void)parameters;
         (void)parameter_count;
@@ -154,7 +154,7 @@ public:
         return -1;
     }
 
-    virtual int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters,
+    virtual int ExecutePreparedBatch(const char* sql, const DatabaseParameter* parameters,
                                      size_t parameters_per_execution, size_t execution_count) {
         (void)sql;
         (void)parameters;

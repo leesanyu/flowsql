@@ -18,7 +18,7 @@
 NetAdapter是连续采集源，不提供Stream队列的重置操作；创建后的SQL来源为`netadapter.<name>`。
 
 Web经现有`/api/channels/stream/*`路由转发Scheduler。类型与五项表单Schema通过
-`IBlockStreamChannelDescriptorV1`公共IID发现，不依赖NetAdapter具体类或修改既有管理器ABI。
+`IBlockStreamChannelDescriptor`公共IID发现，不依赖NetAdapter具体类或修改既有管理器ABI。
 
 ## 构建与插件
 
@@ -163,7 +163,7 @@ generic XDP 仍从 RX0 接收。因此双 veth 用于通道/生产 SQL 联验，
 ```sql
 SELECT * FROM netadapter.edge_mirror
 WHERE wire_len >= 64 AND (transport_protocol = 6 OR transport_protocol = 17)
-USING npm.basic WITH output_interval_ns=15000000000 INTO sqlite.npm
+USING npm.basic WITH parameters='{"schema_version":1,"core":{"output_interval_ns":15000000000}}' INTO sqlite.npm
 ```
 
 input_namespace 与 source_domains 均可省略：前者默认取 SQL 中的具名输入（如 netadapter.edge_mirror），
@@ -176,7 +176,7 @@ input_namespace 与 source_domains 均可省略：前者默认取 SQL 中的具�
 
 ```sql
 SELECT * FROM netadapter.edge_mirror USING npm.basic
-WITH output_interval_ns=15000000000,features='basic,icmp' INTO sqlite.npm
+WITH parameters='{"schema_version":1,"core":{"output_interval_ns":15000000000}}',features='basic,icmp' INTO sqlite.npm
 ```
 
 Basic 与 ICMP 结果仍写入同一个托管数据库目标。IPv6 版本从线格式首字节高四位读取，
@@ -186,7 +186,7 @@ Basic 与 ICMP 结果仍写入同一个托管数据库目标。IPv6 版本从线
 控制台的 npm.basic 来自算子管理中已上传并激活的插件。CMake 更新 build/output/libflowsql_npm_basic.so
 后，已安装到 uploads/binaddon 的副本不会自动更新；单纯重启仍会按元数据库记录加载旧副本。
 升级时先备份旧文件，再通过算子管理停用并删除旧注册，上传当前构建产物并激活。不同文件名也不能绕过同名算子冲突。
-NetAdapter 需要当前插件提供的 Block Transform V2 能力；旧版插件可能仍把省略的输入参数当作错误。
+NetAdapter 使用当前 BlockTransform 的采集事实与时间通知能力；宿主与自有插件须按同一公共契约重建。
 
 例如，以下配置省略两个输入参数即可启用基础、会话和 ICMP 分析，并统一写入一个托管数据库目标：
 

@@ -1,5 +1,5 @@
 {
-  "schema_id": "flowsql.data-dictionary.v1",
+  "schema_id": "flowsql.data-dictionary",
   "title": "应用请求",
   "description": {
     "state": "declared",

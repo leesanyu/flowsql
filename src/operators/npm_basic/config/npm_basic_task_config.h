@@ -44,7 +44,7 @@ struct NpmBasicTaskConfig {
     std::string labeling_reference;
     uint32_t labeling_memory_mib = kNpmDefaultLabelingMemoryMiB;
     std::optional<uint32_t> result_retention_days;
-    NpmTcpStreamConfigV1 tcp_stream;
+    NpmTcpStreamConfig tcp_stream;
 };
 
 enum class NpmBasicTaskConfigError : uint8_t {
@@ -56,33 +56,26 @@ enum class NpmBasicTaskConfigError : uint8_t {
     kDuplicateField,
     kUnknownField,
     kNonStringValue,
-    kInvalidEnum,
-    kInvalidInteger,
     kInvalidFeatures,
     kInvalidObserving,
     kObservingFeatureDisabled,
-    kSessionConfigWithoutFeature,
-    kSessionTcpRangesOutOfRange,
     kInvalidSourceDomains,
     kDomainValidationError,
-    kAnalysisValidationError,
     kAllocationFailed,
     kInvalidParameters,
-    kParameterSourceConflict,
 };
 
 struct NpmBasicTaskConfigStatus {
     NpmBasicTaskConfigError error = NpmBasicTaskConfigError::kNone;
     std::string field;
     NpmObservationDomainError domain_error = NpmObservationDomainError::kNone;
-    NpmAnalysisConfigError analysis_error = NpmAnalysisConfigError::kNone;
-    NpmParameterStatusV1 parameter_status;
+    NpmParameterStatus parameter_status;
 };
 
 /** Owns WITH parameters. Omitted namespace uses the caller's source; omitted domains accept all sources. */
 NpmBasicTaskConfigStatus ParseNpmBasicTaskConfig(const char* with_params_json, NpmBasicTaskConfig* output,
                                                  bool labeling_available = false,
-                                                 const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1(),
+                                                 const NpmModuleCatalog& catalog = ProductionNpmModuleCatalog(),
                                                  std::string_view default_input_namespace = "default",
                                                  bool managed_output = false);
 

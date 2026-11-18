@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { connectionDraft, channelDraft, buildConnection, buildChannel, blockedReason, kafkaError } from './kafkaChannel.js'
 test('packet edit retains uint64 domain and independent directions, validates inputs and budgets', () => {
-  const source = { encoding: 'flowsql_packet_v1', stream_id: 'probe-a', observation_domain_id: '18446744073709551615', inputs: [{ source_id: 4294967295, queue_id: 2, source_name: '探针/eth0' }], offset_reset: 'error', commit_policy: 'none', max_packets_per_batch: 9, max_bytes_per_batch: 8192, max_message_bytes: 16384, max_wait_ms: 75 }
+  const source = { encoding: 'flowsql_packet', stream_id: 'probe-a', observation_domain_id: '18446744073709551615', inputs: [{ source_id: 4294967295, queue_id: 2, source_name: '探针/eth0' }], offset_reset: 'error', commit_policy: 'none', max_packets_per_batch: 9, max_bytes_per_batch: 8192, max_message_bytes: 16384, max_wait_ms: 75 }
   const row = { name: 'packets', connection_name: 'auth', role: 'both', topic: 'packets', consumer_group: 'npm', payload_kind: 'packet', payload_options: { source, sink: {} } }
   const draft = channelDraft(row)
   assert.deepEqual(buildChannel(draft, 7).payload_options, row.payload_options)
@@ -149,7 +149,7 @@ test('Vue structured source form saves edited entity and preserves field units a
   } finally { page.app.unmount() }
 })
 test('Vue packet form keeps uint64 domain, revision and independent sink when edited', async () => {
-  const saved = [], source = { encoding: 'flowsql_packet_v1', stream_id: 'probe', observation_domain_id: '18446744073709551615', inputs: [{ source_id: 0, queue_id: 2, source_name: 'eth0' }], offset_reset: 'error', commit_policy: 'none', max_packets_per_batch: 17, max_bytes_per_batch: 8192, max_message_bytes: 16384, max_wait_ms: 75 }
+  const saved = [], source = { encoding: 'flowsql_packet', stream_id: 'probe', observation_domain_id: '18446744073709551615', inputs: [{ source_id: 0, queue_id: 2, source_name: 'eth0' }], offset_reset: 'error', commit_policy: 'none', max_packets_per_batch: 17, max_bytes_per_batch: 8192, max_message_bytes: 16384, max_wait_ms: 75 }
   const row = { name: 'packets', revision: 6, connection_name: 'auth', role: 'both', topic: 'packets', consumer_group: 'npm', payload_kind: 'packet', payload_options: { source, sink: {} }, adapter_status: { source: 'ready', sink: 'not_installed' } }
   const page = await mountPage({ kafkaDefinitions: async () => ({ data: definitions }), kafkaQuery: async (kind) => ({ data: { items: kind === 'channels' ? [row] : [{ name: 'auth' }] } }), kafkaSave: async (_kind, payload) => { saved.push(payload) }, kafkaTestCancel: async () => {} })
   try {
@@ -199,7 +199,7 @@ test('Vue both form preserves source while editing sink and hides event revision
 
 
 test('packet sink round trip, direction, byte budgets and hidden structured fields', () => {
-  const sink = { encoding: 'flowsql_packet_v1', stream_id: 'probe-a', max_message_bytes: 2097152, queue_max_messages: 64, queue_max_bytes: 8388608, delivery_timeout_ms: 10000 }
+  const sink = { encoding: 'flowsql_packet', stream_id: 'probe-a', max_message_bytes: 2097152, queue_max_messages: 64, queue_max_bytes: 8388608, delivery_timeout_ms: 10000 }
   const row = { name: 'packets', connection_name: 'auth', role: 'sink', topic: 'packets', payload_kind: 'packet', payload_options: { sink } }
   const draft = channelDraft(row)
   assert.deepEqual(buildChannel(draft, 9).payload_options, { sink })
@@ -212,8 +212,8 @@ test('packet sink round trip, direction, byte budgets and hidden structured fiel
   draft.role = 'sink'; draft.payload_kind = 'structured'; assert.equal(buildChannel(draft).payload_options, undefined)
 })
 test('Vue packet both form edits sink independently, keeps revision and preserves conflict draft', async () => {
-  const source = { encoding: 'flowsql_packet_v1', stream_id: 'remote', observation_domain_id: '7', inputs: [{ source_id: 0, queue_id: 2, source_name: 'eth0' }] }
-  const sink = { encoding: 'flowsql_packet_v1', stream_id: 'local', max_message_bytes: 2097152, queue_max_messages: 64, queue_max_bytes: 8388608, delivery_timeout_ms: 10000 }
+  const source = { encoding: 'flowsql_packet', stream_id: 'remote', observation_domain_id: '7', inputs: [{ source_id: 0, queue_id: 2, source_name: 'eth0' }] }
+  const sink = { encoding: 'flowsql_packet', stream_id: 'local', max_message_bytes: 2097152, queue_max_messages: 64, queue_max_bytes: 8388608, delivery_timeout_ms: 10000 }
   const row = { name: 'packets', revision: 12, connection_name: 'auth', role: 'both', topic: 'packets', consumer_group: 'npm', payload_kind: 'packet', payload_options: { source, sink }, adapter_status: { source: 'ready', sink: 'ready' } }
   const saved = []; let conflict = true
   const page = await mountPage({ kafkaDefinitions: async () => ({ data: definitions }), kafkaQuery: async (kind) => ({ data: { items: kind === 'channels' ? [row] : [{ name: 'auth' }] } }), kafkaSave: async (_kind, payload) => { saved.push(payload); if (conflict) throw { response: { status: 409 } } }, kafkaTestCancel: async () => {} })

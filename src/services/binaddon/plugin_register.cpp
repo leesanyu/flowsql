@@ -10,6 +10,6 @@
 BEGIN_PLUGIN_REGIST(flowsql::binaddon::BinAddonHostPlugin)
 ____INTERFACE(flowsql::IID_PLUGIN, flowsql::IPlugin)
 ____INTERFACE(flowsql::IID_BINADDON_HOST, flowsql::IBinAddonHost)
-____INTERFACE(flowsql::IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1, flowsql::ICppOperatorPluginRegistryV1)
-____INTERFACE(flowsql::IID_CPP_OPERATOR_CONTRACT_PROVIDER_V1, flowsql::ICppOperatorContractProviderV1)
+____INTERFACE(flowsql::IID_CPP_OPERATOR_PLUGIN_REGISTRY, flowsql::ICppOperatorPluginRegistry)
+____INTERFACE(flowsql::IID_CPP_OPERATOR_CONTRACT_PROVIDER, flowsql::ICppOperatorContractProvider)
 END_PLUGIN_REGIST()

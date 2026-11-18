@@ -71,10 +71,10 @@ INTO dataframe.session_metrics
 | --- | --- | --- |
 | `input_namespace` | FROM 通道名 | 区分逻辑输入来源；相同五元组在不同 namespace 中不会合并 |
 | `source_domains` | `'all'` | 默认每个 source_id 对应独立观测域，也可显式合并来源 |
-| `result_mode` | `'periodic_snapshot'` | Basic 周期增量及累计值；`'final'` 仅输出会话终态 |
-| `output_interval_ns` | `30000000000` | Basic 周期宽度，默认 30 秒，范围 10 ms～1 h |
-| `run_mode` | 按来源能力选择 | 有限离线源为 offline，持续采集源为 realtime；显式冲突会失败 |
-| `parameters` | 共享与模块默认配置 | V1 JSON 信封，`core` 放共享配置，模块名放私有配置 |
+| `parameters.core.result_mode` | `'periodic_snapshot'` | Basic 周期增量及累计值；`'final'` 仅输出会话终态 |
+| `parameters.core.output_interval_ns` | `30000000000` | Basic 周期宽度，默认 30 秒，范围 10 ms～1 h |
+| `parameters.core.run_mode` | 按来源能力选择 | 有限离线源为 offline，持续采集源为 realtime；显式冲突会失败 |
+| `parameters` | 共享与模块默认配置 | 当前 JSON 信封，`core` 放共享配置，模块名放私有配置 |
 
 例如，统计 15 秒周期，同时限制活动会话数量：
 
@@ -86,7 +86,7 @@ WITH observing='basic_ipv4',
 INTO dataframe.flow_timeline
 ```
 
-使用 parameters 时，不能再混用顶层共享调优参数；features、observing、input_namespace、source_domains 仍可独立指定。
+WITH 只接受 `features`、`observing`、`input_namespace`、`source_domains` 和 `parameters`。共享调优配置统一放在 `parameters.core`，模块私有配置放在对应模块节点；顶层调优字段会被拒绝。省略 `parameters` 使用当前默认值。
 默认活动会话容量为 100,000，tracked 预算为 256 MiB，pending 预算为 64 MiB；两族共享同一任务总量。
 预算约束任务计费资源，不等同进程 RSS。达到容量或预算限制会明确失败，不会静默驱逐会话或丢弃结果。
 
@@ -145,7 +145,7 @@ TCP 序列号与确认状态的跟踪区间数。它影响传输指标能跟踪�
 | `observed_at` | 结果观察/交付参考时间，具体来源依路径不同，不代替统计周期；见完整字段字典的时间口径 |
 
 字节计数使用报文的 wire_len，单位 byte，重传仍计入观察到的流量。正常 EOF/Stop 排空尾部并输出终态；
-零增量终态用于标记结束，不能当作新的学习事实。`result_mode='final'` 的周期字段为 NULL，累计字段仍有效。
+零增量终态用于标记结束，不能当作新的学习事实。`parameters.core.result_mode="final"` 的周期字段为 NULL，累计字段仍有效。
 Session 和协议指标用状态与 nullable 值表达证据不足，不能把 NULL 解释为零 RTT 或无重传。
 A→B/B→A 是规范化方向，不自动等于客户端/服务端。
 
@@ -271,12 +271,12 @@ INTO mysql.npm
 
 | 关系 | 内容 |
 | --- | --- |
-| `npm_<entity>_history_v<version>` | 运行内全部可见 revision |
-| `npm_<entity>_latest_v<version>` | 运行内每个实体实例的最新 revision |
-| `npm_<entity>_final_v<version>` | `is_final=true` 的终态 |
+| `npm_<entity>_history` | 运行内全部可见 revision |
+| `npm_<entity>_latest` | 运行内每个实体实例的最新 revision |
+| `npm_<entity>_final` | `is_final=true` 的终态 |
 
 ```sql
-SELECT * FROM mysql.npm.npm_session_ipv4_latest_v1
+SELECT * FROM mysql.npm.npm_session_ipv4_latest
 WHERE __npm_run_id='替换为本次响应中的run_id'
 INTO dataframe.latest_sessions
 ```
@@ -312,7 +312,7 @@ POST /api/semantics/v1/describe
       "kind": "database_table",
       "type": "mysql",
       "name": "npm",
-      "table": "npm_dns_transaction_ipv4_final_v1"
+      "table": "npm_dns_transaction_ipv4_final"
     }
   }
 }
@@ -323,7 +323,7 @@ POST /api/semantics/v1/describe
 Arrow 声明替代。读取不会执行 NPM、读取分析行、创建说明版本或更新绑定。
 没有人工保存或运行绑定时，`description.origin=producer_default`，字典和绑定引用为 null；
 `basis.contract_ref`、`component_revision` 以及 `structure.producer_metadata.dictionary_source` 给出静态定义的精确来源。
-已有绑定优先返回已保存说明；点击“保存”才持久化当前对象的补充。内部 `_v1_data` 和 `npm_result_entities` 也有静态说明，
+已有绑定优先返回已保存说明；点击“保存”才持久化当前对象的补充。内部 `_data` 和 `npm_result_entities` 也有静态说明，
 其存储/管理行含义与公开分析视图不同，常规分析仍优先选择 history/latest/final。
 
 运行依据来自任务响应 `contract_checks[].use_ref`。直接使用该精确引用调用
@@ -356,7 +356,7 @@ revision 等值拼接，也不承诺一对一；ICMP 的引用字段不强制建
 不能据失败响应声称已回滚分析结果。`metadata_status=known` 只确认受管状态落库，不能证明字段含义或业务数据质量。
 
 静态说明读取和执行发布依赖经核验的受管目录及通用结构描述接口，不按数据库产品名称分支，也不在 NPM 中查询系统目录。
-新增后端须提供 NPM 托管存储与 `IChannelDatasetDescriptorV1` 结构能力；完成该适配后无需修改 NPM 领域说明或公共定位 Schema。
+新增后端须提供 NPM 托管存储与 `IChannelDatasetDescriptor` 结构能力；完成该适配后无需修改 NPM 领域说明或公共定位 Schema。
 字段保留原生类型，例如 UInt64 在 MySQL 为 BIGINT UNSIGNED、PostgreSQL 为 NUMERIC(20,0)、ClickHouse 为 UInt64；
 视图的可空性以数据库实际元数据为准。尚未实现的后端由结构提供者明确报错。
 
@@ -730,7 +730,7 @@ task_eof；配对/错误事件为 NULL。quote_status=tuple 只表示引用五�
 
 ### 存储附加字段与类型映射
 
-每个实体使用物理表 `npm_<entity>_v1_data`，例如 `npm_basic_ipv4_v1_data`；物理表保存全部分析列
+每个实体使用物理表 `npm_<entity>_data`，例如 `npm_basic_ipv4_data`；物理表保存全部分析列
 和下列前两项系统列，公开查询关系再通过运行目录补充 run_status。
 
 | 字段 | 所在位置 | 含义 |
@@ -742,7 +742,7 @@ task_eof；配对/错误事件为 NULL。quote_status=tuple 只表示引用五�
 SQLite/PostgreSQL 的 run/task 系统列为 TEXT，MySQL 为 VARCHAR(128)，ClickHouse 为 String。
 物理行的逻辑键是 `(run_id, entity identity, revision)`；实体身份为 Basic/Session 的 session_id 或
 协议事件的 entity_instance_id。SQLite/MySQL/PostgreSQL 用主键约束，ClickHouse MergeTree 用对应排序键。
-公开关系名为 `npm_<entity>_history_v1`、`npm_<entity>_latest_v1`、`npm_<entity>_final_v1`，
+公开关系名为 `npm_<entity>_history`、`npm_<entity>_latest`、`npm_<entity>_final`，
 三者读取同一物理结果；latest 取每次运行内各实例最大 revision，final 取 is_final=true。
 
 | 分析 Arrow 类型 | SQLite | MySQL | PostgreSQL | ClickHouse |
@@ -768,7 +768,7 @@ SQLite 的 UInt64 列为 TEXT，在直接 SQL 中作求和或数值比较时要�
 | --- | --- | --- |
 | npm_result_runs | run_id、task_id、input_namespace、status、started_at_ns、completed_at_ns、expires_at_ns、error_code、error_stage、error_message、metadata_status、purge_cursor | 运行身份、状态、错误、保留与回收进度 |
 | npm_result_entities | entity_id、schema_version、module_id、revision_semantics、identity_column、revision_column、observed_at_column、is_final_column、schema_canonical、schema_fingerprint、data_table、history_relation、latest_relation、final_relation | Schema 契约与实体/表/关系映射 |
-| npm_result_progress_v1 | run_id、entity_id、relation_name、epoch、position、period_ns、closed_before_ns | 已提交 Basic 周期结果的发布进度，供持续查询/基线消费使用 |
+| npm_result_progress | run_id、entity_id、relation_name、epoch、position、period_ns、closed_before_ns | 已提交 Basic 周期结果的发布进度，供持续查询/基线消费使用 |
 
 input_namespace 保存于运行目录而非每个分析行；实体 ID、Schema 版本和 IP 族主要由表名、实体目录及
 Schema metadata 表达，当前分析结果没有统一 ip_family 列，ICMP 的 quoted_ip_family 是引用报文信息。
@@ -801,6 +801,11 @@ SQL 响应中的 rows_written、entities 等汇总值也不是报文分析列；
 物理类型及系统列见[数据库消费者](../src/operators/npm_basic/npm_basic_result_consumer.cpp)。
 
 ## 协议解析与共享 TCP 流的边界
+
+扩展模块通过 NPI 的 `IProtocolPipelinePool` 独占租用协议解析管线，使用后调用 `Release` 归还；
+租约有效期间才能使用该管线，容量耗尽时明确失败。接口与租约约束见 [协议管线接口](../src/plugins/npi/iprotocol.h)。
+采集进度由 `SingleInputCaptureProgressTracker` 核验单输入事实，`MultiInputCaptureProgressTracker` 汇总多输入的安全共同进度；
+任一输入存在积压、时间回退或缺少安全进度时暂停共同进度推进。两者承担不同职责，详见 [采集进度](../src/framework/core/capture_progress_tracker.h)。
 
 DNS、HTTP/1、TLS 可复用任务内部的共享有界 TCP 字节流；没有独立的 tcp_stream feature 或结果表。
 共享流仅为命中合法订阅的标签创建状态，同一方向的 payload 保存一份，各消费者独立推进。
@@ -861,3 +866,5 @@ packet/s 表示处理的输入网络数据包数；结果 row/s 取决于模块�
 
 这些比较用于说明实现变化在指定负载上的收益，不构成不同数据库的排名或生产容量承诺。
 实际部署应根据包长、活动会话数、启用模块、周期宽度、数据库延迟与吞吐预算重新测量。
+
+现有托管结果目录必须包含当前完整字段，包括 `npm_result_runs.purge_cursor`。打开结果目录只校验当前结构，不补列或保留旧表名；整理存量数据须先一致备份，在产品外一次性处理表、视图、进度和引用后再启动。

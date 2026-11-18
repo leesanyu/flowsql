@@ -48,16 +48,19 @@ class Runtime {
         const auto addon =
             "operator_db_path=" + (root / "operators.db").string() + ";upload_dir=" + (root / "uploads").string();
         const auto task = "db_path=" + (root / "tasks.db").string();
+        const auto config = "db_path=" + (root / "config.db").string();
         const auto npi = std::string("{\"ldfile\":\"") + PACKET_NPI_CONFIG +
                          "\",\"concurrency\":" + std::to_string(batch_workers) + "}";
         const auto scheduler = "stream_workers=1;batch_workers=" + std::to_string(batch_workers);
-        const char* libraries[] = {"libflowsql_database.so", "libflowsql_builtin.so",       "libflowsql_catalog.so",
-                                   "libflowsql_npi.so",      "libflowsql_scheduler.so",     "libflowsql_binaddon.so",
-                                   "libflowsql_task.so",     "libflowsql_flow_labeling.so", "libflowsql_kafka.so"};
-        const char* options[] = {database.c_str(), nullptr,           catalog.c_str(),
-                                 npi.c_str(),      scheduler.c_str(), addon.c_str(),
-                                 task.c_str(),     nullptr,           kafka_options.c_str()};
-        Check(loader->Load(get_absolute_process_path(), libraries, options, kafka_options.empty() ? 8 : 9) == 0,
+        const char* libraries[] = {
+            "libflowsql_config_channel.so", "libflowsql_database.so", "libflowsql_builtin.so",
+            "libflowsql_catalog.so",        "libflowsql_npi.so",      "libflowsql_scheduler.so",
+            "libflowsql_binaddon.so",       "libflowsql_task.so",     "libflowsql_flow_labeling.so",
+            "libflowsql_kafka.so"};
+        const char* options[] = {config.c_str(), database.c_str(),     nullptr,       catalog.c_str(),
+                                 npi.c_str(),    scheduler.c_str(),    addon.c_str(), task.c_str(),
+                                 nullptr,        kafka_options.c_str()};
+        Check(loader->Load(get_absolute_process_path(), libraries, options, kafka_options.empty() ? 9 : 10) == 0,
               "plugins_load");
         libraries_.active = true;
         Check(loader->StartAll() == 0, "plugins_start");
@@ -68,7 +71,9 @@ class Runtime {
         std::string response;
         Check(host->UploadCppPlugin("npm_basic.so", upload.string(), response) == 0, "npm_upload");
         auto uploaded = Parse(response);
-        Check(host->ActivateCppPlugin(Text(uploaded, "plugin_id"), response) == 0, "npm_activate");
+        const auto activate_rc = host->ActivateCppPlugin(Text(uploaded, "plugin_id"), response);
+        if (activate_rc != 0) std::cerr << "npm_activate rc=" << activate_rc << " response=" << response << '\n';
+        Check(activate_rc == 0, "npm_activate");
     }
     Json Call(const std::string& path, const rapidjson::Value& request, int expected = 0) {
         std::string response;

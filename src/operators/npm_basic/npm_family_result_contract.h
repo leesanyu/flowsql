@@ -57,7 +57,7 @@ struct NpmDnsFamilyResult {
     uint16_t a_port = 0;
     uint16_t b_port = 0;
     uint8_t transport_protocol = 0;
-    NpmDnsUdpResultV1 transaction;
+    NpmDnsUdpResult transaction;
 };
 using NpmDnsResult4 = NpmDnsFamilyResult<network::IPv4Address>;
 using NpmDnsResult6 = NpmDnsFamilyResult<network::IPv6Address>;
@@ -69,7 +69,7 @@ struct NpmHttp1FamilyResult {
     uint64_t observation_domain_id = 0;
     uint16_t a_port = 0;
     uint16_t b_port = 0;
-    NpmHttp1TransactionResultV1 transaction;
+    NpmHttp1TransactionResult transaction;
 };
 using NpmHttp1Result4 = NpmHttp1FamilyResult<network::IPv4Address>;
 using NpmHttp1Result6 = NpmHttp1FamilyResult<network::IPv6Address>;
@@ -81,7 +81,7 @@ struct NpmTlsFamilyResult {
     uint64_t observation_domain_id = 0;
     uint16_t a_port = 0;
     uint16_t b_port = 0;
-    NpmTlsHandshakeResultV1 transaction;
+    NpmTlsHandshakeResult transaction;
 };
 using NpmTlsResult4 = NpmTlsFamilyResult<network::IPv4Address>;
 using NpmTlsResult6 = NpmTlsFamilyResult<network::IPv6Address>;
@@ -149,7 +149,7 @@ struct NpmFamilyPacketView {
     NpmTransportPacketFacts transport;
 };
 struct NpmFamilyInputEvent {
-    NpmInputKindV1 kind = NpmInputKindV1::kTcpPacket;
+    NpmInputKind kind = NpmInputKind::kTcpPacket;
     uint64_t observation_domain_id = 0;
     packet::PacketView packet;
     const packet::PacketLayerFacts* layer = nullptr;
@@ -179,13 +179,13 @@ interface INpmFamilyAnalysisModule {
 };
 interface INpmFamilyProtocolModule {
     virtual ~INpmFamilyProtocolModule() = default;
-    virtual int OnInput(const NpmFamilyInputEvent&, INpmResultEmitterV1&) = 0;
-    virtual int OnSessionSnapshot(const NpmFamilySessionView&, int64_t observed_at_ns, INpmResultEmitterV1&) = 0;
+    virtual int OnInput(const NpmFamilyInputEvent&, INpmResultEmitter&) = 0;
+    virtual int OnSessionSnapshot(const NpmFamilySessionView&, int64_t observed_at_ns, INpmResultEmitter&) = 0;
     virtual int OnSessionEnd(const NpmFamilySessionView&, NpmSessionEndReason, int64_t observed_at_ns,
-                             INpmResultEmitterV1&) = 0;
+                             INpmResultEmitter&) = 0;
     virtual std::optional<int64_t> NextEventDeadlineNs() const = 0;
-    virtual int OnTime(const NpmModuleTimeV1&, INpmResultEmitterV1&) = 0;
-    virtual int Finish(int64_t observed_at_ns, INpmResultEmitterV1&) = 0;
+    virtual int OnTime(const NpmModuleTime&, INpmResultEmitter&) = 0;
+    virtual int Finish(int64_t observed_at_ns, INpmResultEmitter&) = 0;
     // Idempotent; called after in-flight callbacks exit. Cancel/failure emits no normal terminal rows.
     virtual void Abort() noexcept = 0;
 };
@@ -197,8 +197,8 @@ interface INpmFamilyIcmpActiveSessionLookup {
 };
 
 enum class NpmFamilyEntityKind : uint8_t { kBasic, kSession, kDns, kHttp1, kTls, kIcmp };
-NpmEntityDescriptorV1 NpmFamilyEntityDescriptor(NpmFamilyEntityKind kind, packet::AddressFamily family);
-arrow::Status ValidateNpmFamilyEntityRows(const NpmEntityDescriptorV1& entity, const arrow::RecordBatch& rows);
+NpmEntityDescriptor NpmFamilyEntityDescriptor(NpmFamilyEntityKind kind, packet::AddressFamily family);
+arrow::Status ValidateNpmFamilyEntityRows(const NpmEntityDescriptor& entity, const arrow::RecordBatch& rows);
 arrow::Status ValidateNpmFamilyInputEvent(const NpmFamilyInputEvent& input);
 
 }  // namespace flowsql::npm

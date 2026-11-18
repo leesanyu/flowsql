@@ -86,7 +86,7 @@ bool SameKey(const NpmFamilyPublicationKey& a, const NpmFamilyPublicationKey& b)
 }
 arrow::Status ValidateRequest(const NpmFamilyPublicationRequest& request) {
     if ((request.key.entity_id != "basic_ipv4" && request.key.entity_id != "basic_ipv6") ||
-        request.key.relation_name != "npm_" + request.key.entity_id + "_history_v1" || request.key.run_id.empty() ||
+        request.key.relation_name != "npm_" + request.key.entity_id + "_history" || request.key.run_id.empty() ||
         request.period_ns <= 0 || request.closed_before_ns < 0 || request.closed_before_ns % request.period_ns != 0)
         return arrow::Status::Invalid(
             "NPM publication requires a concrete basic history relation/run and period boundary");
@@ -144,7 +144,7 @@ arrow::Result<NpmFamilyDatabaseContract> NpmFamilyDatabaseMapping(NpmFamilyDatab
     contract.backend = backend;
     contract.entity = NpmFamilyEntityDescriptor(kind, family);
     const auto prefix = "npm_" + contract.entity.entity_id;
-    contract.relations = {prefix + "_v1_data", prefix + "_history_v1", prefix + "_latest_v1", prefix + "_final_v1"};
+    contract.relations = {prefix + "_data", prefix + "_history", prefix + "_latest", prefix + "_final"};
     for (const auto& field : contract.entity.schema->fields()) {
         ARROW_ASSIGN_OR_RAISE(auto type, PhysicalType(backend, *field->type()));
         if (backend == NpmFamilyDatabaseBackend::kClickHouse && field->nullable()) type = "Nullable(" + type + ')';
@@ -156,56 +156,56 @@ arrow::Result<NpmFamilyDatabaseContract> NpmFamilyDatabaseMapping(NpmFamilyDatab
     return contract;
 }
 
-DatabaseParameterV1 NpmFamilyAddressParameter(network::IPv4Address address) {
-    DatabaseParameterV1 parameter;
-    parameter.kind = DatabaseParameterKindV1::kUInt64;
+DatabaseParameter NpmFamilyAddressParameter(network::IPv4Address address) {
+    DatabaseParameter parameter;
+    parameter.kind = DatabaseParameterKind::kUInt64;
     parameter.uint64_value = address.ToUInt32();
     return parameter;
 }
-DatabaseParameterV1 NpmFamilyAddressParameter(const network::IPv6Address& address) {
-    DatabaseParameterV1 parameter;
-    parameter.kind = DatabaseParameterKindV1::kBlob;
+DatabaseParameter NpmFamilyAddressParameter(const network::IPv6Address& address) {
+    DatabaseParameter parameter;
+    parameter.kind = DatabaseParameterKind::kBlob;
     parameter.data = address.bytes;
     parameter.size = sizeof(address.bytes);
     return parameter;
 }
 
-arrow::Result<DatabaseParameterV1> NpmFamilyDatabaseParameter(const arrow::Array& values, int64_t row) {
+arrow::Result<DatabaseParameter> NpmFamilyDatabaseParameter(const arrow::Array& values, int64_t row) {
     if (row < 0 || row >= values.length()) return arrow::Status::IndexError("NPM database parameter row");
-    DatabaseParameterV1 parameter;
+    DatabaseParameter parameter;
     if (values.IsNull(row)) return parameter;
     switch (values.type_id()) {
         case arrow::Type::BOOL:
-            parameter.kind = DatabaseParameterKindV1::kInt64;
+            parameter.kind = DatabaseParameterKind::kInt64;
             parameter.int64_value = static_cast<const arrow::BooleanArray&>(values).Value(row);
             break;
         case arrow::Type::UINT8:
-            parameter.kind = DatabaseParameterKindV1::kUInt64;
+            parameter.kind = DatabaseParameterKind::kUInt64;
             parameter.uint64_value = static_cast<const arrow::UInt8Array&>(values).Value(row);
             break;
         case arrow::Type::UINT16:
-            parameter.kind = DatabaseParameterKindV1::kUInt64;
+            parameter.kind = DatabaseParameterKind::kUInt64;
             parameter.uint64_value = static_cast<const arrow::UInt16Array&>(values).Value(row);
             break;
         case arrow::Type::UINT32:
-            parameter.kind = DatabaseParameterKindV1::kUInt64;
+            parameter.kind = DatabaseParameterKind::kUInt64;
             parameter.uint64_value = static_cast<const arrow::UInt32Array&>(values).Value(row);
             break;
         case arrow::Type::UINT64:
-            parameter.kind = DatabaseParameterKindV1::kUInt64;
+            parameter.kind = DatabaseParameterKind::kUInt64;
             parameter.uint64_value = static_cast<const arrow::UInt64Array&>(values).Value(row);
             break;
         case arrow::Type::INT64:
-            parameter.kind = DatabaseParameterKindV1::kInt64;
+            parameter.kind = DatabaseParameterKind::kInt64;
             parameter.int64_value = static_cast<const arrow::Int64Array&>(values).Value(row);
             break;
         case arrow::Type::DOUBLE:
-            parameter.kind = DatabaseParameterKindV1::kDouble;
+            parameter.kind = DatabaseParameterKind::kDouble;
             parameter.double_value = static_cast<const arrow::DoubleArray&>(values).Value(row);
             break;
         case arrow::Type::STRING: {
             const auto bytes = static_cast<const arrow::StringArray&>(values).GetView(row);
-            parameter.kind = DatabaseParameterKindV1::kString;
+            parameter.kind = DatabaseParameterKind::kString;
             parameter.data = bytes.data();
             parameter.size = bytes.size();
             break;
@@ -213,7 +213,7 @@ arrow::Result<DatabaseParameterV1> NpmFamilyDatabaseParameter(const arrow::Array
         case arrow::Type::FIXED_SIZE_BINARY: {
             const auto& binary = static_cast<const arrow::FixedSizeBinaryArray&>(values);
             if (binary.byte_width() != 16) return arrow::Status::Invalid("NPM IPv6 parameter requires 16 bytes");
-            parameter.kind = DatabaseParameterKindV1::kBlob;
+            parameter.kind = DatabaseParameterKind::kBlob;
             parameter.data = binary.GetValue(row);
             parameter.size = 16;
             break;
@@ -271,15 +271,15 @@ arrow::Result<NpmFamilyPublicationCursor> CompleteNpmFamilyPublication(
     return next;
 }
 
-arrow::Result<PublishedDatasetProgressV1> NpmFamilyDatasetProgress(const NpmFamilyPublishedProgress& fact,
-                                                                   const PublishedDatasetRequestV1& request) {
+arrow::Result<PublishedDatasetProgress> NpmFamilyDatasetProgress(const NpmFamilyPublishedProgress& fact,
+                                                                 const PublishedDatasetRequest& request) {
     ARROW_RETURN_NOT_OK(ValidateFact(fact));
     if (request.dataset_id.empty() || request.run_id != fact.publication.key.run_id ||
         request.relation != fact.publication.key.relation_name || !request.npm_period_increment ||
         request.bucket_ns <= 0 || request.bucket_ns % fact.publication.period_ns != 0)
         return arrow::Status::Invalid(
             "NPM downstream publication requires its exact relation/run and compatible buckets");
-    PublishedDatasetProgressV1 progress;
+    PublishedDatasetProgress progress;
     progress.progress = {request.dataset_id, fact.epoch, std::to_string(fact.committed_position),
                          fact.publication.closed_before_ns / request.bucket_ns};
     progress.source_period_ns = fact.publication.period_ns;

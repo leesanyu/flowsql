@@ -50,7 +50,7 @@ Json ApplyRequest(const Json& request, const Value& preview, const std::string& 
 int main() {
     const auto path = test::WorkspacePath("channel-consistency.db");
     DataSemanticsRegistry registry, second;
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     assert(registry.Open(path, &error) == 0 && second.Open(path, &error) == 0);
     Json locator;
     locator.Parse(R"({"kind":"dataframe","name":"sample"})");
@@ -73,7 +73,7 @@ int main() {
     // A fully self-consistent imported snapshot/confirmation still has no server observation authority.
     Json forged(rapidjson::kObjectType);
     auto& a = forged.GetAllocator();
-    Set(forged, "schema_id", "flowsql.data-binding.v2", a);
+    Set(forged, "schema_id", "flowsql.data-binding", a);
     Set(forged, "object_label", "sample", a);
     Set(forged, "dictionary_ref", dictionary_ref, a);
     forged.AddMember("object_key", Copy(source["object_key"], a), a);
@@ -118,7 +118,7 @@ int main() {
     apply["field_map"].CopyFrom(generated["data"]["field_map"], apply.GetAllocator());
     inject();
     Call(service, "apply", apply, "STORAGE_ERROR");
-    DataSemanticsSnapshotV1 snapshot;
+    DataSemanticsSnapshot snapshot;
     assert(registry.Resolve("binding.failed@1", &snapshot, &error) != 0 && error.code == "NOT_FOUND");
     assert(Get(Call(service, "check", request)["data"], "state") == "unbound");
     assert(registry.ObservationTrusted("binding.failed@1", &trusted, &error) == 0 && !trusted);
@@ -154,28 +154,35 @@ int main() {
     first.join();
     another.join();
     assert(passes == 1 && conflicts == 1);
-    // Explicit v1 upgrade retains both its historical declaration and the separate observed structure.
-    source = Snapshot("dataframe", "legacy-id", locator, fields, metadata, "1");
-    Json legacy;
-    legacy.CopyFrom(forged, legacy.GetAllocator());
-    Set(legacy, "schema_id", "flowsql.data-binding.v1", legacy.GetAllocator());
-    legacy.RemoveMember("source_snapshot");
-    legacy.RemoveMember("confirmation");
-    legacy["object_key"].CopyFrom(source["object_key"], legacy.GetAllocator());
-    legacy["declared_schema"].CopyFrom(fields, legacy.GetAllocator());
-    SemanticsSaveRequest old{"binding", "legacy", Encode(legacy)};
-    assert(registry.Save(old, &saved, &error) == 0);
+    // Incomplete bindings are rejected without creating a revision.
+    source = Snapshot("dataframe", "declaration-id", locator, fields, metadata, "1");
+    Json incomplete;
+    incomplete.CopyFrom(forged, incomplete.GetAllocator());
+    incomplete.RemoveMember("source_snapshot");
+    incomplete.RemoveMember("confirmation");
+    incomplete["object_key"].CopyFrom(source["object_key"], incomplete.GetAllocator());
+    incomplete["declared_schema"].CopyFrom(fields, incomplete.GetAllocator());
+    SemanticsSaveRequest declaration{"binding", "declaration", Encode(incomplete)};
+    assert(registry.Save(declaration, &saved, &error) != 0 && error.code == "INVALID_DOCUMENT");
+    assert(registry.Resolve("binding.declaration@1", &snapshot, &error) != 0 && error.code == "NOT_FOUND");
+    // A complete manual declaration remains exactly queryable after a current observed application.
+    incomplete.AddMember("source_snapshot", Copy(source, incomplete.GetAllocator()), incomplete.GetAllocator());
+    incomplete.AddMember("confirmation", Copy(forged["confirmation"], incomplete.GetAllocator()),
+                         incomplete.GetAllocator());
+    Set(incomplete["confirmation"], "source_revision", Get(source, "source_revision"), incomplete.GetAllocator());
+    declaration.document_json = Encode(incomplete);
+    assert(registry.Save(declaration, &saved, &error) == 0);
     preview = Call(service, "preview", request);
-    apply = ApplyRequest(request, preview["data"], "legacy", dictionary_ref, 1);
+    apply = ApplyRequest(request, preview["data"], "declaration", dictionary_ref, 1);
     Call(service, "apply", apply);
-    assert(registry.Resolve("binding.legacy@2", &snapshot, &error) == 0);
-    Json upgraded;
-    upgraded.Parse(snapshot.document_json->c_str());
-    assert(upgraded["declared_schema"] == fields && upgraded.HasMember("source_snapshot"));
-    assert(registry.Resolve("binding.legacy@1", &snapshot, &error) == 0);
+    assert(registry.Resolve("binding.declaration@2", &snapshot, &error) == 0);
+    Json observed;
+    observed.Parse(snapshot.document_json->c_str());
+    assert(observed["declared_schema"].IsNull() && observed["source_snapshot"] == source);
+    assert(registry.Resolve("binding.declaration@1", &snapshot, &error) == 0);
     Json historical;
     historical.Parse(snapshot.document_json->c_str());
-    assert(Get(historical, "schema_id") == "flowsql.data-binding.v1" && !historical.HasMember("source_snapshot"));
+    assert(historical["declared_schema"] == fields && historical["source_snapshot"] == source);
     source = Snapshot("dataframe", "sample-id", locator, fields, metadata, "1");
     // A blocked provider does not hold the registry write lock.
     std::mutex mutex;
@@ -194,10 +201,9 @@ int main() {
         assert(changed.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }));
     }
     auto writer = std::async(std::launch::async, [&] {
-        SemanticsSaveRequest r{"standard", "unrelated",
-                               R"({"schema_id":"flowsql.data-standard.v1","title":"parallel"})"};
+        SemanticsSaveRequest r{"standard", "unrelated", R"({"schema_id":"flowsql.data-standard","title":"parallel"})"};
         SemanticsSaveResult result;
-        DataSemanticsErrorV1 e;
+        DataSemanticsError e;
         return registry.Save(r, &result, &e);
     });
     const bool completed = writer.wait_for(std::chrono::seconds(2)) == std::future_status::ready;

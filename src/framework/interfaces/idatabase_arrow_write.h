@@ -11,8 +11,8 @@ class MemoryPool;
 namespace flowsql {
 
 // Optional synchronous columnar write capability. Existing channel vtables are unchanged.
-interface IDatabaseArrowWriteV1 {
-    virtual ~IDatabaseArrowWriteV1() = default;
+interface IDatabaseArrowWrite {
+    virtual ~IDatabaseArrowWrite() = default;
 
     // Borrow batches and pool only until return. Allocate IPC buffers through the supplied non-null pool.
     // Return 0 only after the INSERT response succeeds; never retry an unknown write automatically.

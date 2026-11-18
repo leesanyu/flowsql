@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include <algorithm>
 #include <cassert>
@@ -189,7 +184,7 @@ void Warmup(IBaselineValueTask* task, const std::string& series_key, int64_t sta
         obs.bucket_id = start_bucket + i;
         obs.value = 100.0;
         obs.sample_count = 1;
-        task->SubmitObservation(obs, RollingSubmitOptions{});
+        task->SubmitObservation(obs, RollingSubmitOptions{}).result;
         task->PredictRolling(series_key, obs.bucket_id);
     }
 }

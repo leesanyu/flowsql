@@ -9,10 +9,10 @@
 #include "kafka_structured.h"
 namespace flowsql::channels::kafka {
 class StructuredReader final : public IBlockStreamChannel,
-                               public IBlockStreamAcknowledgementV1,
-                               public IBlockStreamSchemaV1 {
+                               public IBlockStreamAcknowledgement,
+                               public IBlockStreamSchema {
  public:
-    StructuredReader(std::string name, StructuredConfig config, std::shared_ptr<IKafkaClientSessionV1> session);
+    StructuredReader(std::string name, StructuredConfig config, std::shared_ptr<IKafkaClientSession> session);
     ~StructuredReader() override { Close(); }
     const char* Category() override { return "kafka"; }
     const char* Name() override { return name_.c_str(); }
@@ -34,12 +34,12 @@ class StructuredReader final : public IBlockStreamChannel,
     std::string name_, schema_;
     std::shared_ptr<arrow::Schema> arrow_schema_;
     StructuredConfig config_;
-    std::shared_ptr<IKafkaClientSessionV1> session_;
-    IKafkaConsumerSessionV1* consumer_ = nullptr;
+    std::shared_ptr<IKafkaClientSession> session_;
+    IKafkaConsumerSession* consumer_ = nullptr;
     std::atomic<bool> opened_{false}, cancelled_{false}, terminal_{false};
     int terminal_error_ = 0;
     bool acknowledged_ = false;
     std::shared_ptr<arrow::RecordBatch> outstanding_;
-    std::vector<KafkaOffsetV1> offsets_;
+    std::vector<KafkaOffset> offsets_;
 };
 }  // namespace flowsql::channels::kafka

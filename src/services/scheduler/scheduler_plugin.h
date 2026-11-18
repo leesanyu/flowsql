@@ -138,14 +138,13 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
     std::shared_ptr<IOperator> CreateOperator(const std::string& category, const std::string& name);
     IBlockStreamOperator* FindBlockOperator(const std::string& category, const std::string& name);
     struct BlockTransformProviderRef {
-        IBlockTransformOperatorV1* v1 = nullptr;
-        IBlockTransformOperatorV2* v2 = nullptr;
-        OperatorComponentContractV1 component;
+        IBlockTransformOperator* capability = nullptr;
+        OperatorComponentContract component;
 
-        explicit operator bool() const { return v1 || v2; }
+        explicit operator bool() const { return capability != nullptr; }
     };
     BlockTransformProviderRef FindBlockTransformOperator(const std::string& category, const std::string& name,
-                                                         CppOperatorCapabilityLeaseV1* dynamic_lease, bool* ambiguous,
+                                                         CppOperatorCapabilityLease* dynamic_lease, bool* ambiguous,
                                                          int* traverse_error);
     enum class BlockExecutionTerminal {
         kCompleted,
@@ -165,7 +164,7 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
                              BlockExecutionTerminal* terminal, int64_t* rows_affected, std::string* error);
     int ExecuteBlockTransformPipeline(IBlockStreamChannel* source,
                                       const std::vector<BlockTransformProviderRef>& providers, IDataFrameChannel* sink,
-                                      const BlockTransformManagedSinkBindingV1* managed_sink, const SqlStatement& stmt,
+                                      const BlockTransformManagedSinkBinding* managed_sink, const SqlStatement& stmt,
                                       const std::shared_ptr<const BoundFilterExpr>& source_residual,
                                       BlockExecutionTerminal* terminal, int64_t* rows_affected,
                                       std::string* managed_result_json, std::string* error,
@@ -174,11 +173,11 @@ class SchedulerPlugin : public IPlugin, public IRouterHandle, public ISchedulerC
                                       std::string* contract_checks = nullptr);
     int ExecuteSingleBlockTransformPipeline(
         IBlockStreamChannel* source, BlockTransformProviderRef provider, IDataFrameChannel* sink,
-        const BlockTransformManagedSinkBindingV1* managed_sink, const SqlStatement& stmt,
+        const BlockTransformManagedSinkBinding* managed_sink, const SqlStatement& stmt,
         const std::shared_ptr<const BoundFilterExpr>& source_residual, BlockExecutionTerminal* terminal,
         int64_t* rows_affected, std::string* managed_result_json, std::string* error,
         std::shared_ptr<IDatabaseChannel> database_source = {},
-        std::shared_ptr<IDataFrameChannel> dataframe_source = {}, IResultSinkWriterV1* result_sink = nullptr,
+        std::shared_ptr<IDataFrameChannel> dataframe_source = {}, IResultSinkWriter* result_sink = nullptr,
         std::string* contract_checks = nullptr);
 
     int32_t ExecuteResultSink(IChannel*, const SqlStatement&, const std::shared_ptr<const BoundFilterExpr>&,

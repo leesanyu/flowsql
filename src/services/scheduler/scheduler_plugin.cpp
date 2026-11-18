@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "scheduler_plugin.h"
 
@@ -145,11 +140,12 @@ int SchedulerPlugin::Start() {
         if (op_registry) {
             op_registry->List([&](const char* name) {
                 if (!name || name[0] == '\0') return;
-                if (std::string(name).find('.') != std::string::npos) return;
+                const std::string full_name(name);
+                const auto separator = full_name.find('.');
                 OperatorMeta meta;
-                meta.category = "builtin";
-                meta.name = name;
-                meta.type = "builtin";
+                meta.category = full_name.substr(0, separator);
+                meta.name = full_name.substr(separator + 1);
+                meta.type = IEquals(meta.category, "builtin") ? "builtin" : "cpp";
                 meta.source = "scheduler";
                 meta.position = "data";
                 IOperator* op = op_registry->Create(name);

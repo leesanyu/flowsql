@@ -13,7 +13,7 @@
 #include <rapidjson/schema.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
-#include "data_semantics_api_schema.h"
+#include "compiled_semantics_schema.h"
 
 #include <cerrno>
 #include <charconv>
@@ -210,18 +210,18 @@ void WriteSnapshotMeta(Writer* writer, const ConfigChannelSnapshot& snapshot) {
 
 }  // namespace
 
-int ConfigChannelPlugin::DescribeDatasetSource(const ChannelDatasetRequestV1& request, ChannelDatasetSnapshotV1* out,
-                                               DataSemanticsErrorV1* error) {
+int ConfigChannelPlugin::DescribeDatasetSource(const ChannelDatasetRequest& request, ChannelDatasetSnapshot* out,
+                                               DataSemanticsError* error) {
     using namespace dataset;
     *out = {};
     Json locator;
     locator.Parse(request.locator_json.c_str());
     const auto kind = Get(locator, "kind");
     const std::string provider = kind == "kafka_source" ? "kafka" : kind == "dataframe" ? "dataframe" : "database";
-    IChannelDatasetDescriptorV1* descriptor = nullptr;
+    IChannelDatasetDescriptor* descriptor = nullptr;
     if (querier_)
-        querier_->Traverse(IID_CHANNEL_DATASET_DESCRIPTOR_V1, [&](void* p) {
-            auto* candidate = static_cast<IChannelDatasetDescriptorV1*>(p);
+        querier_->Traverse(IID_CHANNEL_DATASET_DESCRIPTOR, [&](void* p) {
+            auto* candidate = static_cast<IChannelDatasetDescriptor*>(p);
             if (provider == candidate->ProviderId()) {
                 descriptor = candidate;
                 return 1;
@@ -259,21 +259,17 @@ int ConfigChannelPlugin::DescribeDatasetSource(const ChannelDatasetRequestV1& re
     return 0;
 }
 
-int ConfigChannelPlugin::DescribeDataset(const ChannelDatasetRequestV1& request, ChannelDatasetSnapshotV1* out,
-                                         DataSemanticsErrorV1* error) {
+int ConfigChannelPlugin::DescribeDataset(const ChannelDatasetRequest& request, ChannelDatasetSnapshot* out,
+                                         DataSemanticsError* error) {
     using namespace dataset;
     const auto deadline = MetadataNow() + request.timeout_ms;
-    ChannelDatasetSnapshotV1 raw;
+    ChannelDatasetSnapshot raw;
     *out = {};
     if (DescribeDatasetSource(request, &raw, error)) return -1;
     Json source;
     if (!raw.document_json || ParseSemanticsJson(*raw.document_json, &source, error))
         return Fail(error, "SOURCE_UNAVAILABLE", "descriptor returned an invalid source snapshot");
-    Json source_schema;
-    source_schema.Parse(kSemanticsApiSchema);
-    Set(source_schema, "$ref", "#/%24defs/datasetSnapshot", source_schema.GetAllocator());
-    rapidjson::SchemaDocument compiled(source_schema);
-    rapidjson::SchemaValidator validator(compiled);
+    rapidjson::SchemaValidator validator(CompiledSemanticsApiSchema("datasetSnapshot"));
     if (!source.Accept(validator))
         return Fail(error, "SOURCE_UNAVAILABLE", "descriptor returned an invalid source snapshot");
     auto& metadata = source["producer_metadata"];
@@ -286,7 +282,7 @@ int ConfigChannelPlugin::DescribeDataset(const ChannelDatasetRequestV1& request,
         Get(origin, "resource").rfind("/resources/", 0) != 0 || !origin.HasMember("schema_canonical") ||
         !origin["schema_canonical"].IsString() || !source.HasMember("fields") || !source["fields"].IsArray())
         return Fail(error, "SOURCE_UNAVAILABLE", "invalid producer dictionary source");
-    OperatorComponentContractV1 component;
+    OperatorComponentContract component;
     const auto left = deadline - MetadataNow();
     if (left <= 0) return Fail(error, "SOURCE_TIMEOUT", "metadata deadline exceeded");
     if (LookupDescriptionOperator(Get(origin, "operator"), static_cast<uint32_t>(left), &component, error)) return -1;
@@ -298,7 +294,7 @@ int ConfigChannelPlugin::DescribeDataset(const ChannelDatasetRequestV1& request,
         // Exact revisions are immutable. Retain one validated producer contract;
         // every request still checks the current component and physical object.
         if (!producer_contract_ || producer_contract_ref_ != component.contract_ref) {
-            DataSemanticsSnapshotV1 contract;
+            DataSemanticsSnapshot contract;
             if (DataSemanticsRegistry::Resolve(component.contract_ref.c_str(), &contract, error)) return -1;
             auto parsed = std::make_shared<Json>();
             parsed->Parse(contract.document_json->c_str());
@@ -346,14 +342,14 @@ MetadataDescriptionService ConfigChannelPlugin::DescriptionService() {
             return LookupDescriptionOperator(name, ms, out, e);
         });
 }
-int ConfigChannelPlugin::LookupDescriptionOperator(const std::string& name, uint32_t ms,
-                                                   OperatorComponentContractV1* out, DataSemanticsErrorV1* e) {
+int ConfigChannelPlugin::LookupDescriptionOperator(const std::string& name, uint32_t ms, OperatorComponentContract* out,
+                                                   DataSemanticsError* e) {
     using namespace dataset;
     if (!ms) return Fail(e, "SOURCE_TIMEOUT", "metadata deadline exceeded");
     const auto dot = name.find('.');
-    if (auto* catalog =
-            querier_ ? static_cast<IOperatorContractCatalogV1*>(querier_->First(IID_OPERATOR_CONTRACT_CATALOG_V1))
-                     : nullptr) {
+    if (auto* catalog = querier_
+                            ? static_cast<IOperatorContractCatalog*>(querier_->First(IID_OPERATOR_CONTRACT_CATALOG))
+                            : nullptr) {
         const auto rc = catalog->Lookup(name.substr(0, dot).c_str(), name.substr(dot + 1).c_str(), out, e);
         if (rc) return rc;
         return out->component_revision.empty() ? Fail(e, "NOT_FOUND", "operator not found") : 0;
@@ -382,15 +378,15 @@ int ConfigChannelPlugin::LookupDescriptionOperator(const std::string& name, uint
 }
 
 void ConfigChannelPlugin::EnumRoutes(std::function<void(const RouteItem&)> callback) {
-    callback({"POST", "/semantics/v1/describe",
+    callback({"POST", "/semantics/describe",
               [this](const auto&, const auto& req, auto& rsp) { return Describe(req.c_str(), &rsp); }});
-    callback({"POST", "/semantics/v1/channels/save-description",
+    callback({"POST", "/semantics/channels/save-description",
               [this](const auto&, const auto& req, auto& rsp) { return SaveChannel(req.c_str(), &rsp); }});
-    callback({"POST", "/semantics/v1/operators/save-description",
+    callback({"POST", "/semantics/operators/save-description",
               [this](const auto&, const auto& req, auto& rsp) { return SaveOperator(req.c_str(), &rsp); }});
     for (const char* operation : {"describe", "preview", "check", "apply"}) {
         const std::string op(operation);
-        callback({"POST", "/semantics/v1/channels/" + op, [this, op](const auto&, const auto& request, auto& response) {
+        callback({"POST", "/semantics/channels/" + op, [this, op](const auto&, const auto& request, auto& response) {
                       ChannelDictionaryService service(*this, [this](const auto& req, auto* out, auto* error) {
                           return DescribeDataset(req, out, error);
                       });
@@ -401,7 +397,7 @@ void ConfigChannelPlugin::EnumRoutes(std::function<void(const RouteItem&)> callb
     for (const char* operation :
          {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export"}) {
         const std::string op(operation);
-        callback({"POST", "/semantics/v1/" + op, [this, op](const auto&, const auto& request, auto& response) {
+        callback({"POST", "/semantics/" + op, [this, op](const auto&, const auto& request, auto& response) {
                       return DataSemanticsRegistry::Control(op, request, response);
                   }});
     }

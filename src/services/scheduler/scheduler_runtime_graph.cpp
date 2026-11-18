@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "scheduler_plugin.h"
 
@@ -109,9 +104,6 @@ std::string BuildOperatorName(const SqlStatement& stmt) {
             oss << stmt.operators[i].category << "." << stmt.operators[i].name;
         }
         return oss.str();
-    }
-    if (!stmt.op_category.empty() && !stmt.op_name.empty()) {
-        return stmt.op_category + "." + stmt.op_name;
     }
     return "transfer";
 }
@@ -387,7 +379,6 @@ int32_t SchedulerPlugin::HandleRuntimeGraphQuery(const std::string&, const std::
             view.sink = "unknown.sink";
         } else {
             view.sources = stmt.sources;
-            if (view.sources.empty() && !stmt.source.empty()) view.sources.push_back(stmt.source);
             if (view.sources.empty()) view.sources.push_back("unknown.source");
             view.operator_name = BuildOperatorName(stmt);
             view.sink = stmt.dest.empty() ? "unknown.sink" : stmt.dest;

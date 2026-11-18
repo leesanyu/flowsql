@@ -47,7 +47,7 @@ const PacketInput* Input(const PacketSourceConfig& config, uint32_t id) {
 }
 arrow::Status Invalid() { return arrow::Status::Invalid("INVALID_PACKET_ENVELOPE"); }
 // No allocation proportional to wire counts or raw bytes until this scan succeeds.
-arrow::Status Preflight(const PacketSourceConfig& c, const KafkaMessageV1& m) {
+arrow::Status Preflight(const PacketSourceConfig& c, const KafkaMessage& m) {
     const auto& b = m.value;
     if (m.value_is_null || m.key_is_null || m.key != c.stream_id || m.key.size() > c.max_message_bytes ||
         b.size() > c.max_message_bytes - m.key.size() || b.size() < 56 || b.compare(0, 4, "FSPK") ||
@@ -94,7 +94,7 @@ PacketSinkConfig ParsePacketSinkConfig(const rapidjson::Value& v) {
     try {
         Keys(v, {"encoding", "stream_id", "max_message_bytes", "queue_max_messages", "queue_max_bytes",
                  "delivery_timeout_ms"});
-        Require(String(v, "encoding") == "flowsql_packet_v1");
+        Require(String(v, "encoding") == "flowsql_packet");
         PacketSinkConfig c;
         c.stream_id = String(v, "stream_id");
         Require(std::regex_match(c.stream_id, std::regex("[A-Za-z0-9_.-]{1,64}")));
@@ -114,9 +114,9 @@ PacketSinkConfig ParsePacketSinkConfig(const rapidjson::Value& v) {
     }
 }
 
-void PacketSinkCodec::Open(const CaptureSourceSetV2& sources, const std::shared_ptr<arrow::Schema>& schema) {
+void PacketSinkCodec::Open(const CaptureSourceSet& sources, const std::shared_ptr<arrow::Schema>& schema) {
     if (generation_ || !schema || !schema->Equals(*packet::PacketFamilySchema(), true) ||
-        ValidateCaptureSourceSetV2(sources) != CaptureDescriptionErrorV1::kNone || sources.inputs.size() > 32 ||
+        ValidateCaptureSourceSet(sources) != CaptureDescriptionError::kNone || sources.inputs.size() > 32 ||
         !sources.inputs[0].observation_domain_id || sources.limits.max_packets_per_batch > 4096 ||
         sources.limits.max_bytes_per_batch > 16777216)
         throw std::invalid_argument("INVALID_PACKET_CAPTURE");
@@ -132,15 +132,14 @@ void PacketSinkCodec::Open(const CaptureSourceSetV2& sources, const std::shared_
     generation_ = sources.inputs[0].generation;
     for (const auto& input : sources.inputs) {
         wire_.inputs.push_back({input.source_id, input.queue_id, input.source_name});
-        trackers_.emplace(input.source_id, CaptureProgressTrackerV1(input));
+        trackers_.emplace(input.source_id, SingleInputCaptureProgressTracker(input));
     }
     for (size_t i = 0; i < sources_.inputs.size(); ++i)
         sources_.inputs[i].source_name = wire_.inputs[i].source_name.c_str();
 }
-arrow::Result<KafkaMessageV1> PacketSinkCodec::Encode(const CapturePollEventV2& event,
-                                                      const std::array<uint8_t, 16>& epoch, uint64_t sequence,
-                                                      const std::function<bool()>& interrupted) {
-    if (!generation_ || event.struct_size < sizeof(CapturePollEventV2) || event.contract_version != 2 ||
+arrow::Result<KafkaMessage> PacketSinkCodec::Encode(const CapturePollEvent& event, const std::array<uint8_t, 16>& epoch,
+                                                    uint64_t sequence, const std::function<bool()>& interrupted) {
+    if (!generation_ || event.struct_size < sizeof(CapturePollEvent) || event.contract_version != 2 ||
         (event.block.kind != BlockPollEvent::kData && event.block.kind != BlockPollEvent::kTimeout) ||
         event.block.err || (event.block.kind == BlockPollEvent::kTimeout && event.block.batch))
         return Invalid();
@@ -185,7 +184,7 @@ arrow::Result<KafkaMessageV1> PacketSinkCodec::Encode(const CapturePollEventV2& 
         auto it = next.find(fact.source_id);
         if (it == next.end() ||
             it->second.Observe(fact, fact.packet_observed ? std::optional<int64_t>(fact.capture_time_ns) : std::nullopt)
-                    .error != CaptureProgressErrorV1::kNone)
+                    .error != CaptureProgressError::kNone)
             return Invalid();
     }
     trackers_ = std::move(next);
@@ -196,7 +195,7 @@ arrow::Result<KafkaMessageV1> PacketSinkCodec::Encode(const CapturePollEventV2& 
 PacketSourceConfig ParsePacketSourceConfig(const rapidjson::Value& v) {
     Keys(v, {"encoding", "stream_id", "observation_domain_id", "inputs", "offset_reset", "commit_policy",
              "max_packets_per_batch", "max_bytes_per_batch", "max_message_bytes", "max_wait_ms"});
-    Require(String(v, "encoding") == "flowsql_packet_v1");
+    Require(String(v, "encoding") == "flowsql_packet");
     PacketSourceConfig c;
     c.stream_id = String(v, "stream_id");
     Require(std::regex_match(c.stream_id, std::regex("[A-Za-z0-9_.-]{1,64}")));
@@ -240,7 +239,7 @@ PacketSourceConfig ParsePacketSourceConfig(const rapidjson::Value& v) {
     return c;
 }
 
-arrow::Result<PacketEnvelope> DecodePacket(const PacketSourceConfig& c, const KafkaMessageV1& m) {
+arrow::Result<PacketEnvelope> DecodePacket(const PacketSourceConfig& c, const KafkaMessage& m) {
     ARROW_RETURN_NOT_OK(Preflight(c, m));
     const auto& b = m.value;
     PacketEnvelope e;
@@ -264,20 +263,20 @@ arrow::Result<PacketEnvelope> DecodePacket(const PacketSourceConfig& c, const Ka
         e.packets.push_back(std::move(row));
     }
     for (uint64_t i = 0; i < Get(b, 52, 4); ++i, at += 28) {
-        CaptureProgressV1 fact;
+        CaptureProgress fact;
         fact.source_id = Get(b, at, 4);
         fact.queue_id = Get(b, at + 4, 4);
         fact.fact_sequence = Get(b, at + 8, 8);
         fact.capture_time_ns = Get(b, at + 16, 8);
         fact.packet_observed = Get(b, at + 24, 1) & 1;
         fact.source_idle_confirmed = Get(b, at + 24, 1) & 2;
-        fact.backlog = static_cast<CaptureBacklogV1>(Get(b, at + 25, 1));
+        fact.backlog = static_cast<CaptureBacklog>(Get(b, at + 25, 1));
         e.progress.push_back(fact);
     }
     return e;
 }
 
-arrow::Result<KafkaMessageV1> EncodePacket(const PacketSourceConfig& c, const PacketEnvelope& e) {
+arrow::Result<KafkaMessage> EncodePacket(const PacketSourceConfig& c, const PacketEnvelope& e) {
     if (e.packets.size() > 4096 || e.packets.size() > c.max_packets_per_batch || e.progress.size() > 32)
         return Invalid();
     uint64_t size = 56 + e.progress.size() * 28;
@@ -289,7 +288,7 @@ arrow::Result<KafkaMessageV1> EncodePacket(const PacketSourceConfig& c, const Pa
         if (raw > c.max_bytes_per_batch || size + c.stream_id.size() > c.max_message_bytes) return Invalid();
     }
     if (size + c.stream_id.size() > c.max_message_bytes) return Invalid();
-    KafkaMessageV1 m;
+    KafkaMessage m;
     m.key = c.stream_id;
     m.key_is_null = false;
     auto& b = m.value;

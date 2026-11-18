@@ -101,9 +101,9 @@ class PcapFileChannel final : public IBlockStreamChannel {
 class PcapFilePlugin final : public IPlugin,
                              public IBlockStreamFactory,
                              public IBlockStreamManager,
-                             public IBlockStreamReaderFactoryV1,
-                             public IFilterDomainResolverV1,
-                             public IFilterPushdownV1 {
+                             public IBlockStreamReaderFactory,
+                             public IFilterDomainResolver,
+                             public IFilterPushdown {
  public:
     int Option(const char* arg) override;
     int Load(IQuerier* querier) override;
@@ -119,10 +119,10 @@ class PcapFilePlugin final : public IPlugin,
     void QueryChannels(
         std::function<void(const std::string&, const std::string&, const std::string&, const std::string&)> callback)
         override;
-    int CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** reader) override;
+    int CreateReader(const BlockStreamReaderConfig& config, IBlockStreamChannel** reader) override;
     void ReleaseReader(IBlockStreamChannel* reader) override;
-    int Resolve(const FilterDomainResolveRequestV1& request, FilterDomainResolveResultV1* result) const override;
-    int EvaluatePushdown(const FilterPushdownRequestV1& request, FilterPushdownResultV1* result) const override;
+    int Resolve(const FilterDomainResolveRequest& request, FilterDomainResolveResult* result) const override;
+    int EvaluatePushdown(const FilterPushdownRequest& request, FilterPushdownResult* result) const override;
 
  private:
     struct ReaderSession {

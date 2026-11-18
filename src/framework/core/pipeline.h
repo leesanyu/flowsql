@@ -68,7 +68,7 @@ class BlockFilterStage {
 
     /** Produce exactly one data block, including when filtering leaves zero rows. */
     FilterEvalError ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
-                                 BlockTransformOutputV1* output, std::string* error) const;
+                                 BlockTransformOutput* output, std::string* error) const;
 
     bool IsOpen() const { return opened_; }
 
@@ -135,15 +135,15 @@ class BlockTransformRunControl final {
 struct BlockTransformPipelineConfig {
     IBlockStreamChannel* source = nullptr;
     std::shared_ptr<arrow::Schema> source_schema;
-    IBlockTransformTaskV1* transform = nullptr;
-    // Optional time interface of the same execution task as transform. Null preserves V1 behavior.
-    IBlockTransformTimeDrivenTaskV1* time_transform = nullptr;
+    IBlockTransformTask* transform = nullptr;
+    // Optional time interface of the same execution task as transform. Tasks without this capability have no deadlines.
+    IBlockTransformTimeDrivenTask* time_transform = nullptr;
     // Present only for a task-exclusive capture reader and the same execution transform task.
-    IBlockTransformCaptureFactTaskV2* capture_fact_task = nullptr;
-    IBlockTransformInputProgressTaskV1* input_progress_task = nullptr;
+    IBlockTransformCaptureFactTask* capture_fact_task = nullptr;
+    IBlockTransformInputProgressTask* input_progress_task = nullptr;
     std::shared_ptr<const BoundFilterExpr> source_residual;
     std::shared_ptr<const BoundFilterExpr> transform_residual;
-    std::function<int(const BlockTransformOutputV1&)> output_consumer;
+    std::function<int(const BlockTransformOutput&)> output_consumer;
     // Optional independent result sink: validate even an empty output and wake in-flight delivery on cancel.
     std::function<int(const std::shared_ptr<arrow::Schema>&)> output_open;
     std::function<void()> output_cancel;
@@ -166,34 +166,34 @@ struct BlockTransformPipelineResult {
 };
 
 /** Synchronous transform chain with optional, stage-aligned time capabilities. */
-class SynchronousBlockTransformChainTask final : public IBlockTransformTaskV2 {
+class SynchronousBlockTransformChainTask final : public IBlockTransformTask, public IBlockTransformTimeDrivenTask {
  public:
-    SynchronousBlockTransformChainTask(std::vector<IBlockTransformTaskV1*> tasks,
-                                       std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks,
+    SynchronousBlockTransformChainTask(std::vector<IBlockTransformTask*> tasks,
+                                       std::vector<IBlockTransformTimeDrivenTask*> time_tasks,
                                        std::vector<std::shared_ptr<arrow::Schema>> expected_output_schemas,
                                        const std::vector<std::shared_ptr<const BoundFilterExpr>>& residuals);
 
     int Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_ptr<arrow::Schema>* output_schema) override;
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
-                     std::vector<BlockTransformOutputV1>* outputs) override;
-    int Flush(std::vector<BlockTransformOutputV1>* outputs) override;
+                     std::vector<BlockTransformOutput>* outputs) override;
+    int Flush(std::vector<BlockTransformOutput>* outputs) override;
     void Cancel() override;
     std::string LastError() const override;
 
-    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override;
-    int OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* outputs) override;
+    int GetTimeDriveState(BlockTransformTimeDriveState* state) override;
+    int OnTime(const BlockTransformTimeEvent& event, std::vector<BlockTransformOutput>* outputs) override;
 
  private:
-    int PropagateFrom(size_t first_stage, std::vector<BlockTransformOutputV1> inputs,
-                      std::vector<BlockTransformOutputV1>* outputs, bool* stopped);
-    int FilterStageOutputs(size_t stage, const std::vector<BlockTransformOutputV1>& inputs,
-                           std::vector<BlockTransformOutputV1>* outputs);
-    int QueryTimeState(size_t stage, BlockTransformTimeDriveStateV1* state);
+    int PropagateFrom(size_t first_stage, std::vector<BlockTransformOutput> inputs,
+                      std::vector<BlockTransformOutput>* outputs, bool* stopped);
+    int FilterStageOutputs(size_t stage, const std::vector<BlockTransformOutput>& inputs,
+                           std::vector<BlockTransformOutput>* outputs);
+    int QueryTimeState(size_t stage, BlockTransformTimeDriveState* state);
     int SetStageError(size_t stage, std::string detail, int rc);
     std::string TaskError(size_t stage) const;
 
-    std::vector<IBlockTransformTaskV1*> tasks_;
-    std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks_;
+    std::vector<IBlockTransformTask*> tasks_;
+    std::vector<IBlockTransformTimeDrivenTask*> time_tasks_;
     std::vector<std::shared_ptr<arrow::Schema>> expected_output_schemas_;
     std::vector<BlockFilterStage> filters_;
     bool open_attempted_ = false;

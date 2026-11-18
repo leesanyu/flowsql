@@ -20,7 +20,7 @@ std::string Lower(std::string value) {
 std::string LogicalKey(const arrow::RecordBatch& batch, int64_t row, SchemaKind kind) {
     std::string identity;
     if (kind == SchemaKind::kResults) {
-        identity = "baseline_results_v1";
+        identity = "baseline_results";
         for (const auto& field : ResultKeyFields(true, true)) {
             const auto scalar = batch.GetColumnByName(field)->GetScalar(row).ValueOrDie();
             const auto value = scalar->ToString();
@@ -43,8 +43,8 @@ std::string LogicalKey(const arrow::RecordBatch& batch, int64_t row, SchemaKind 
     }
     return key;
 }
-DatabaseAtomicStatusV1 DatabaseIdentity(IDatabaseAtomicSessionV1& session, const std::string& backend,
-                                        std::string* identity, std::string* schema) {
+DatabaseAtomicStatus DatabaseIdentity(IDatabaseAtomicSession& session, const std::string& backend,
+                                      std::string* identity, std::string* schema) {
     std::shared_ptr<arrow::RecordBatch> batch;
     const auto sql = backend == "sqlite"  ? "PRAGMA database_list"
                      : backend == "mysql" ? "SELECT @@hostname,@@port,DATABASE()"
@@ -53,17 +53,17 @@ DatabaseAtomicStatusV1 DatabaseIdentity(IDatabaseAtomicSessionV1& session, const
                                             "current_database(),current_schema()";
     auto status = ReadAtomicBatch(session, sql, {}, &batch);
     if (!status.ok()) return status;
-    if (!batch || !batch->num_rows()) return {DatabaseAtomicCodeV1::kError, "database identity unavailable"};
+    if (!batch || !batch->num_rows()) return {DatabaseAtomicCode::kError, "database identity unavailable"};
     if (backend == "sqlite") {
         for (int64_t row = 0; row < batch->num_rows(); ++row)
             if (Cell(*batch, 1, row) == "main") {
                 const auto path = Cell(*batch, 2, row);
-                if (path.empty()) return {DatabaseAtomicCodeV1::kUnsupported, "anonymous SQLite identity unavailable"};
+                if (path.empty()) return {DatabaseAtomicCode::kUnsupported, "anonymous SQLite identity unavailable"};
                 *identity = std::filesystem::weakly_canonical(path).string();
                 *schema = "main";
                 return {};
             }
-        return {DatabaseAtomicCodeV1::kError, "SQLite main database missing"};
+        return {DatabaseAtomicCode::kError, "SQLite main database missing"};
     }
     identity->clear();
     // MySQL schema names select databases independently of a connection's default database.
@@ -75,13 +75,13 @@ DatabaseAtomicStatusV1 DatabaseIdentity(IDatabaseAtomicSessionV1& session, const
     *schema = Cell(*batch, backend == "mysql" ? 2 : 3, 0);
     return {};
 }
-DatabaseParameterV1 Parameter(const arrow::Scalar& scalar) {
+DatabaseParameter Parameter(const arrow::Scalar& scalar) {
     if (!scalar.is_valid) return {};
-    DatabaseParameterV1 p;
+    DatabaseParameter p;
     if (scalar.type->id() == arrow::Type::STRING || scalar.type->id() == arrow::Type::BINARY) {
         const auto& value = static_cast<const arrow::BaseBinaryScalar&>(scalar);
-        p.kind = scalar.type->id() == arrow::Type::STRING ? DatabaseParameterKindV1::kString
-                                                          : DatabaseParameterKindV1::kBlob;
+        p.kind =
+            scalar.type->id() == arrow::Type::STRING ? DatabaseParameterKind::kString : DatabaseParameterKind::kBlob;
         p.data = value.value->data();
         p.size = value.value->size();
     } else if (scalar.type->id() == arrow::Type::INT64)
@@ -91,10 +91,10 @@ DatabaseParameterV1 Parameter(const arrow::Scalar& scalar) {
     else if (scalar.type->id() == arrow::Type::UINT32)
         p = IntParameter(static_cast<const arrow::UInt32Scalar&>(scalar).value);
     else if (scalar.type->id() == arrow::Type::UINT64) {
-        p.kind = DatabaseParameterKindV1::kUInt64;
+        p.kind = DatabaseParameterKind::kUInt64;
         p.uint64_value = static_cast<const arrow::UInt64Scalar&>(scalar).value;
     } else if (scalar.type->id() == arrow::Type::DOUBLE) {
-        p.kind = DatabaseParameterKindV1::kDouble;
+        p.kind = DatabaseParameterKind::kDouble;
         p.double_value = static_cast<const arrow::DoubleScalar&>(scalar).value;
     } else if (scalar.type->id() == arrow::Type::BOOL)
         p = IntParameter(static_cast<const arrow::BooleanScalar&>(scalar).value);
@@ -133,13 +133,13 @@ int ModelOutputStore::Open(const ConfigSnapshot& config, std::shared_ptr<IDataba
             return std::isalnum(c) || c == '_' || c == '-';
         }))
         return Fail("invalid model target table");
-    auto* target = dynamic_cast<IDatabaseAtomicTargetV1*>(channel.get());
+    auto* target = dynamic_cast<IDatabaseAtomicTarget*>(channel.get());
     if (!target) return Fail("model target lacks atomic session capability");
     table_ = std::move(table);
     max_bytes_ = config.config.read.max_pending_bytes;
-    DatabaseAtomicSessionOptionsV1 options;
+    DatabaseAtomicSessionOptions options;
     options.operation_timeout_ms = config.config.persistence.operation_timeout_ms;
-    std::shared_ptr<IDatabaseAtomicSessionV1> session;
+    std::shared_ptr<IDatabaseAtomicSession> session;
     auto status = target->AcquireAtomicSession(options, &session);
     if (!status.ok()) return Fail(status.message);
     auto owner = std::make_shared<SessionOwner>();
@@ -173,8 +173,8 @@ int ModelOutputStore::Open(const ConfigSnapshot& config, std::shared_ptr<IDataba
         return -1;
     }
     const auto commit = session->Commit();
-    if (!ValidDatabaseCommitResultV1(commit) || commit.outcome != DatabaseCommitOutcomeV1::kCommitted) {
-        if (commit.outcome == DatabaseCommitOutcomeV1::kUnknown) state_ = "unknown";
+    if (!ValidDatabaseCommitResult(commit) || commit.outcome != DatabaseCommitOutcome::kCommitted) {
+        if (commit.outcome == DatabaseCommitOutcome::kUnknown) state_ = "unknown";
         return Fail("model target schema commit: " + commit.status.message);
     }
     return 0;
@@ -183,7 +183,7 @@ int ModelOutputStore::ValidateSchema() {
     auto owner = std::atomic_load(&owner_);
     auto session = owner ? owner->session : nullptr;
     std::shared_ptr<arrow::RecordBatch> batch;
-    DatabaseAtomicStatusV1 status;
+    DatabaseAtomicStatus status;
     if (backend_ == "sqlite")
         status = ReadAtomicBatch(*session, "PRAGMA table_info(" + Quote(table_) + ")", {}, &batch);
     else
@@ -237,9 +237,9 @@ int ModelOutputStore::ValidateSchema() {
 }
 int ModelOutputStore::ValidateRelations(IDatabaseChannel* source, const std::vector<Dataset>& datasets) {
     if (!source || backend_ != source->Category()) return 0;
-    auto* target = dynamic_cast<IDatabaseAtomicTargetV1*>(source);
+    auto* target = dynamic_cast<IDatabaseAtomicTarget*>(source);
     if (!target) return Fail("source database identity capability unavailable");
-    std::shared_ptr<IDatabaseAtomicSessionV1> session;
+    std::shared_ptr<IDatabaseAtomicSession> session;
     auto status = target->AcquireAtomicSession({}, &session);
     if (!status.ok()) return Fail(status.message);
     status = session->Begin();
@@ -300,7 +300,7 @@ int ModelOutputStore::Insert(const std::shared_ptr<arrow::RecordBatch>& batch) {
             auto status = session->ExecutePrepared(erase.c_str(), &parameter, 1, &affected);
             if (!status.ok()) return Fail(status.message);
             std::vector<std::shared_ptr<arrow::Scalar>> scalars;
-            std::vector<DatabaseParameterV1> values{parameter};
+            std::vector<DatabaseParameter> values{parameter};
             for (const auto& column : batch->columns()) {
                 auto scalar = column->GetScalar(row);
                 if (!scalar.ok()) throw std::runtime_error(scalar.status().ToString());
@@ -363,8 +363,8 @@ int ModelOutputStore::Write(const std::vector<std::shared_ptr<arrow::RecordBatch
         return rollback();
     }
     const auto commit = session->Commit();
-    if (!ValidDatabaseCommitResultV1(commit) || commit.outcome != DatabaseCommitOutcomeV1::kCommitted) {
-        state_ = commit.outcome == DatabaseCommitOutcomeV1::kUnknown ? "unknown" : "failed";
+    if (!ValidDatabaseCommitResult(commit) || commit.outcome != DatabaseCommitOutcome::kCommitted) {
+        state_ = commit.outcome == DatabaseCommitOutcome::kUnknown ? "unknown" : "failed";
         if (model) model->state_ = state_;
         return Fail("output commit: " + commit.status.message);
     }

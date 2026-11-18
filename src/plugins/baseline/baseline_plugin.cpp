@@ -27,13 +27,13 @@ namespace baseline {
 
 namespace {
 
-class BaselineTaskStateControl final : public IBaselineTaskStateControlV1 {
+class BaselineTaskStateControl final : public IBaselineTaskStateControl {
  public:
     explicit BaselineTaskStateControl(std::shared_ptr<BaselineTaskBase> task) : task_(std::move(task)) {}
-    BaselineStatus ReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope) override {
+    BaselineStatus ReleaseIdentity(std::string_view key, BaselineStateReleaseScope scope) override {
         return task_->ReleaseIdentity(key, scope);
     }
-    std::pair<BaselineStatus, BaselineStateUsageV1> QueryUsage() const override { return task_->QueryStateUsage(); }
+    std::pair<BaselineStatus, BaselineStateUsage> QueryUsage() const override { return task_->QueryStateUsage(); }
     const BaselineTaskBase* Task() const { return task_.get(); }
 
  private:
@@ -132,8 +132,8 @@ int BaselinePlugin::Unload() {
 
 int BaselinePlugin::Start() { return error::OK; }
 
-std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControlV1>> BaselinePlugin::Bind(
-    std::shared_ptr<IBaselineTask> task, const BaselineStateLimitsV1& limits) {
+std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControl>> BaselinePlugin::Bind(
+    std::shared_ptr<IBaselineTask> task, const BaselineStateLimits& limits) {
     auto implementation = std::dynamic_pointer_cast<BaselineTaskBase>(task);
     if (!task_registry_ || !implementation || !task_registry_->Owns(implementation.get())) {
         return {BaselineStatus::kInvalidArgument, nullptr};
@@ -144,12 +144,12 @@ std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControlV1>> Baseline
     return {BaselineStatus::kOk, std::move(control)};
 }
 
-std::pair<BaselineStatus, std::shared_ptr<IBaselineCheckpointV1>> BaselinePlugin::Bind(
-    std::shared_ptr<IBaselineTask> task, std::shared_ptr<IBaselineTaskStateControlV1> state_control,
-    const BaselineCheckpointBindingV1& binding) {
+std::pair<BaselineStatus, std::shared_ptr<IBaselineCheckpoint>> BaselinePlugin::Bind(
+    std::shared_ptr<IBaselineTask> task, std::shared_ptr<IBaselineTaskStateControl> state_control,
+    const BaselineCheckpointBinding& binding) {
     auto implementation = std::dynamic_pointer_cast<BaselineTaskBase>(task);
     auto control = std::dynamic_pointer_cast<BaselineTaskStateControl>(state_control);
-    if (!ValidBaselineCheckpointBindingV1(binding) || !task_registry_ || !implementation || !control ||
+    if (!ValidBaselineCheckpointBinding(binding) || !task_registry_ || !implementation || !control ||
         control->Task() != implementation.get() || !task_registry_->Owns(implementation.get()))
         return {BaselineStatus::kInvalidArgument, nullptr};
     auto handle =
@@ -288,6 +288,6 @@ BaselineSerializationResult BaselinePlugin::QueryServiceSnapshot(BaselineSeriali
 BEGIN_PLUGIN_REGIST(flowsql::baseline::BaselinePlugin)
 ____INTERFACE(flowsql::IID_PLUGIN, flowsql::IPlugin)
 ____INTERFACE(flowsql::IID_BASELINE_SERVICE, flowsql::IBaselineService)
-____INTERFACE(flowsql::IID_BASELINE_STATE_CONTROL_SERVICE_V1, flowsql::IBaselineStateControlServiceV1)
-____INTERFACE(flowsql::IID_BASELINE_CHECKPOINT_SERVICE_V1, flowsql::IBaselineCheckpointServiceV1)
+____INTERFACE(flowsql::IID_BASELINE_STATE_CONTROL_SERVICE, flowsql::IBaselineStateControlService)
+____INTERFACE(flowsql::IID_BASELINE_CHECKPOINT_SERVICE, flowsql::IBaselineCheckpointService)
 END_PLUGIN_REGIST()

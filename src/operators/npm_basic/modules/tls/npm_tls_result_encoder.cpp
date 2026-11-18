@@ -29,17 +29,17 @@ bool Append(Builder& builder, const std::optional<Value>& value) {
     return value ? builder.Append(*value).ok() : builder.AppendNull().ok();
 }
 
-bool ValidRow(const NpmTlsHandshakeResultV1& row) {
+bool ValidRow(const NpmTlsHandshakeResult& row) {
     const auto& handshake = row.handshake;
     if (!handshake.entity_instance_id || !handshake.session_id ||
         (handshake.client_direction != NpmPacketDirection::kAToB &&
          handshake.client_direction != NpmPacketDirection::kBToA) ||
-        handshake.hello_retry_count > 1 || handshake.phase != NpmTlsHandshakePhaseV1::kClosed)
+        handshake.hello_retry_count > 1 || handshake.phase != NpmTlsHandshakePhase::kClosed)
         return false;
-    if (row.outcome == NpmTlsOutcomeV1::kFatalAlertObserved)
-        return row.incomplete_reason == NpmTlsIncompleteReasonV1::kNone && row.alert_level == 2 &&
+    if (row.outcome == NpmTlsOutcome::kFatalAlertObserved)
+        return row.incomplete_reason == NpmTlsIncompleteReason::kNone && row.alert_level == 2 &&
                row.alert_description.has_value();
-    return row.incomplete_reason != NpmTlsIncompleteReasonV1::kNone && !row.alert_level && !row.alert_description;
+    return row.incomplete_reason != NpmTlsIncompleteReason::kNone && !row.alert_level && !row.alert_description;
 }
 
 class BuildCharge final {
@@ -62,9 +62,8 @@ class BuildCharge final {
 }  // namespace
 
 template <typename Address>
-int EmitNpmTlsHandshakeV1(const NpmTlsFamilyResult<Address>& family_result,
-                          const std::shared_ptr<INpmTaskBudget>& budget, INpmResultEmitterV1& emitter,
-                          arrow::MemoryPool* pool) {
+int EmitNpmTlsHandshake(const NpmTlsFamilyResult<Address>& family_result, const std::shared_ptr<INpmTaskBudget>& budget,
+                        INpmResultEmitter& emitter, arrow::MemoryPool* pool) {
     const auto& result = family_result.transaction;
     const auto& session = family_result;
     if (!budget || !ValidRow(result)) return EINVAL;
@@ -78,9 +77,9 @@ int EmitNpmTlsHandshakeV1(const NpmTlsFamilyResult<Address>& family_result,
         std::optional<std::string> alpn_json;
         if (client && !client->offered_alpn.empty()) {
             std::string json;
-            const auto encoded = EncodeNpmTlsAlpnJsonV1(client->offered_alpn, &json);
-            if (encoded == NpmTlsHelloErrorV1::kAllocationFailed) return ENOMEM;
-            if (encoded != NpmTlsHelloErrorV1::kNone) return EINVAL;
+            const auto encoded = EncodeNpmTlsAlpnJson(client->offered_alpn, &json);
+            if (encoded == NpmTlsHelloError::kAllocationFailed) return ENOMEM;
+            if (encoded != NpmTlsHelloError::kNone) return EINVAL;
             alpn_json = std::move(json);
         }
         const std::optional<bool> offered_tls13 =
@@ -93,17 +92,17 @@ int EmitNpmTlsHandshakeV1(const NpmTlsFamilyResult<Address>& family_result,
         std::optional<std::string> selected_alpn;
         if (server && selected_version != 0x0304 && server->selected_alpn) {
             std::string json;
-            const auto encoded = EncodeNpmTlsAlpnJsonV1({*server->selected_alpn}, &json);
-            if (encoded == NpmTlsHelloErrorV1::kAllocationFailed) return ENOMEM;
-            if (encoded != NpmTlsHelloErrorV1::kNone) return EINVAL;
+            const auto encoded = EncodeNpmTlsAlpnJson({*server->selected_alpn}, &json);
+            if (encoded == NpmTlsHelloError::kAllocationFailed) return ENOMEM;
+            if (encoded != NpmTlsHelloError::kNone) return EINVAL;
             selected_alpn = json.substr(1, json.size() - 2);  // One JSON string, without the array brackets.
         }
         const std::optional<int64_t> client_at = client ? client->complete_at_ns : std::nullopt;
         const std::optional<int64_t> server_at = server ? server->complete_at_ns : std::nullopt;
         const std::optional<std::string_view> reason =
-            result.incomplete_reason == NpmTlsIncompleteReasonV1::kNone
+            result.incomplete_reason == NpmTlsIncompleteReason::kNone
                 ? std::nullopt
-                : std::optional<std::string_view>(NpmTlsIncompleteReasonNameV1(result.incomplete_reason));
+                : std::optional<std::string_view>(NpmTlsIncompleteReasonName(result.incomplete_reason));
         if (!pool) pool = arrow::default_memory_pool();
         arrow::UInt64Builder entity_id(pool), revision(pool), session_id(pool), domain_id(pool);
         arrow::Int64Builder observed_at(pool), client_time(pool), server_time(pool), latency(pool);
@@ -116,8 +115,7 @@ int EmitNpmTlsHandshakeV1(const NpmTlsFamilyResult<Address>& family_result,
             !Append(observed_at, result.observed_at_ns) || !Append(is_final, true) ||
             !Append(session_id, result.handshake.session_id) || !Append(domain_id, session.observation_domain_id) ||
             !Append(a_ip, session.a_ip) || !Append(b_ip, session.b_ip) || !Append(a_port, session.a_port) ||
-            !Append(b_port, session.b_port) ||
-            !Append(outcome, std::string_view(NpmTlsOutcomeNameV1(result.outcome))) ||
+            !Append(b_port, session.b_port) || !Append(outcome, std::string_view(NpmTlsOutcomeName(result.outcome))) ||
             !Append(retry_count, handshake.hello_retry_count) || !Append(incomplete_reason, reason) ||
             !Append(direction, static_cast<uint8_t>(handshake.client_direction)) || !Append(client_time, client_at) ||
             !Append(server_time, server_at) || !Append(latency, result.server_hello_latency_ns) ||
@@ -160,17 +158,16 @@ int EmitNpmTlsHandshakeV1(const NpmTlsFamilyResult<Address>& family_result,
             columns.push_back(std::move(column));
         }
         auto batch = arrow::RecordBatch::Make(
-            NpmTlsHandshakeEntityDescriptorV1(NpmAddressArrowBuilder<Address>::family).schema, 1, std::move(columns));
-        return emitter.Emit(NpmTlsHandshakeEntityDescriptorV1(NpmAddressArrowBuilder<Address>::family).entity_id,
-                            *batch);
+            NpmTlsHandshakeEntityDescriptor(NpmAddressArrowBuilder<Address>::family).schema, 1, std::move(columns));
+        return emitter.Emit(NpmTlsHandshakeEntityDescriptor(NpmAddressArrowBuilder<Address>::family).entity_id, *batch);
     } catch (const std::bad_alloc&) {
         return ENOMEM;
     }
 }
 
-template int EmitNpmTlsHandshakeV1(const NpmTlsResult4&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitterV1&,
-                                   arrow::MemoryPool*);
-template int EmitNpmTlsHandshakeV1(const NpmTlsResult6&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitterV1&,
-                                   arrow::MemoryPool*);
+template int EmitNpmTlsHandshake(const NpmTlsResult4&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitter&,
+                                 arrow::MemoryPool*);
+template int EmitNpmTlsHandshake(const NpmTlsResult6&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitter&,
+                                 arrow::MemoryPool*);
 
 }  // namespace flowsql::npm

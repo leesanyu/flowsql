@@ -15,9 +15,9 @@
 using namespace flowsql;
 using namespace flowsql::baseliner;
 namespace {
-int PublishForRun(flowsql::npm::INpmFamilyProgressConsumer* publisher, const flowsql::npm::NpmResultContextV1& context,
+int PublishForRun(flowsql::npm::INpmFamilyProgressConsumer* publisher, const flowsql::npm::NpmResultContext& context,
                   flowsql::npm::NpmFamilyPublicationRequest request) {
-    request.key = {"basic_ipv4", "npm_basic_ipv4_history_v1", context.run_id};
+    request.key = {"basic_ipv4", "npm_basic_ipv4_history", context.run_id};
     flowsql::npm::NpmFamilyPublishedProgress confirmed;
     return publisher->PublishProgress(request, &confirmed);
 }
@@ -46,7 +46,7 @@ ConfigSnapshot Config(const std::string& source, const std::string& run, int64_t
     c.config.read.poll_interval_ms = 1;
     Dataset d;
     d.id = "basic";
-    d.table = "npm_basic_ipv4_history_v1";
+    d.table = "npm_basic_ipv4_history";
     d.scope.run_ids = {run};
     d.row_semantics = "npm_period_increment";
     d.bucket_column = "period_start_ns";
@@ -63,19 +63,19 @@ ConfigSnapshot Config(const std::string& source, const std::string& run, int64_t
     c.config.datasets = {d};
     return c;
 }
-BlockInputProgressV1 Boundary(PollInput& input, std::vector<double>* values = nullptr) {
+BlockInputProgress Boundary(PollInput& input, std::vector<double>* values = nullptr) {
     for (int i = 0; i < 100; ++i) {
         auto event = input.PollBlock(10);
         if (event.kind == BlockPollEvent::kTimeout) continue;
         Check(event.kind == BlockPollEvent::kData, input.LastError());
-        BlockInputProgressV1 before;
+        BlockInputProgress before;
         assert(input.ReadInputProgress(&before) != 0);
         if (event.batch->num_rows() && values) {
             auto array = std::static_pointer_cast<arrow::DoubleArray>(event.batch->GetColumnByName("value"));
             for (int64_t row = 0; row < array->length(); ++row) values->push_back(array->Value(row));
         }
         Check(input.ReleaseBlock(event.batch) == 0, "release");
-        BlockInputProgressV1 after;
+        BlockInputProgress after;
         Check(input.ReadInputProgress(&after) == 0, "released progress");
         if (!event.batch->num_rows()) return after;
     }
@@ -87,11 +87,11 @@ struct GenericFacts {
     int reads = 0;
     int fail_after = 0;
 };
-class GenericProgress final : public IDatabasePublishedProgressReaderV1 {
+class GenericProgress final : public IDatabasePublishedProgressReader {
  public:
     explicit GenericProgress(std::shared_ptr<GenericFacts> facts) : facts_(std::move(facts)) {}
-    int ReadProgress(const PublishedDatasetRequestV1& request, const std::string& position,
-                     PublishedDatasetProgressV1* output) override {
+    int ReadProgress(const PublishedDatasetRequest& request, const std::string& position,
+                     PublishedDatasetProgress* output) override {
         *output = {};
         if (cancelled_ || (facts_->fail_after && ++facts_->reads > facts_->fail_after)) return -1;
         if (!position.empty() && position != "opaque-" + std::to_string(facts_->generation)) return -1;
@@ -107,9 +107,7 @@ class GenericProgress final : public IDatabasePublishedProgressReaderV1 {
     std::atomic<bool> cancelled_{false};
 };
 // A normal business table is accepted only through its producer's explicit publication capability.
-class GenericSource final : public IDatabaseChannel,
-                            public IDatabaseSnapshotSourceV1,
-                            public IDatabasePublishedSourceV1 {
+class GenericSource final : public IDatabaseChannel, public IDatabaseSnapshotSource, public IDatabasePublishedSource {
  public:
     explicit GenericSource(std::shared_ptr<IDatabaseChannel> source) : source_(std::move(source)) {}
     std::shared_ptr<GenericFacts> facts = std::make_shared<GenericFacts>();
@@ -130,12 +128,12 @@ class GenericSource final : public IDatabaseChannel,
     int ExecuteQueryArrow(const char*, std::vector<std::shared_ptr<arrow::RecordBatch>>*) override { return -1; }
     int WriteArrowBatches(const char*, const std::vector<std::shared_ptr<arrow::RecordBatch>>&) override { return -1; }
     int ExecuteSql(const char*) override { return -1; }
-    int CreateSnapshotSession(const DatabaseSnapshotOptionsV1& options,
-                              std::shared_ptr<IDatabaseSnapshotSessionV1>* output) override {
-        return dynamic_cast<IDatabaseSnapshotSourceV1*>(source_.get())->CreateSnapshotSession(options, output);
+    int CreateSnapshotSession(const DatabaseSnapshotOptions& options,
+                              std::shared_ptr<IDatabaseSnapshotSession>* output) override {
+        return dynamic_cast<IDatabaseSnapshotSource*>(source_.get())->CreateSnapshotSession(options, output);
     }
-    int CreatePublishedProgressReader(const DatabaseSnapshotOptionsV1&,
-                                      std::shared_ptr<IDatabasePublishedProgressReaderV1>* output) override {
+    int CreatePublishedProgressReader(const DatabaseSnapshotOptions&,
+                                      std::shared_ptr<IDatabasePublishedProgressReader>* output) override {
         *output = std::make_shared<GenericProgress>(facts);
         return 0;
     }
@@ -188,7 +186,7 @@ void TestGeneric(database::DatabasePlugin& plugin) {
         source->facts->reads = 0;
         source->facts->fail_after = 2;
         assert(lost.PollBlock(0).kind == BlockPollEvent::kError);  // fail within a bucket's pages before any output
-        BlockInputProgressV1 p;
+        BlockInputProgress p;
         assert(lost.ReadInputProgress(&p) != 0);
         source->facts->fail_after = 0;
     }
@@ -208,11 +206,11 @@ void Test(database::DatabasePlugin& plugin, const std::string& category, const s
     auto source = plugin.AcquireChannel(category.c_str(), name.c_str());
     Check(source && source->IsConnected(), "required source unavailable: " + category);
     const auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
-    npm::NpmResultContextV1 context{"baseline-t3", "baseliner-t3-" + category + "-" + std::to_string(stamp)};
-    auto entity = npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
-    auto entity6 = npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv6);
+    npm::NpmResultContext context{"baseline-t3", "baseliner-t3-" + category + "-" + std::to_string(stamp)};
+    auto entity = npm::NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
+    auto entity6 = npm::NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv6);
     auto factory = npm::MakeNpmDatabaseResultConsumerFactory(source.get(), "netadapter.baseliner-t3");
-    std::unique_ptr<npm::INpmManagedResultConsumerV1> consumer;
+    std::unique_ptr<npm::INpmManagedResultConsumer> consumer;
     const int created = factory->Create(context, {entity, entity6}, std::make_shared<Budget>(), &consumer);
     Check(created == 0, category + ": " + factory->LastError());
     auto* publisher = dynamic_cast<npm::INpmFamilyProgressConsumer*>(consumer.get());
@@ -222,7 +220,7 @@ void Test(database::DatabasePlugin& plugin, const std::string& category, const s
         p.period_ns = 30 * second;
         p.closed_before_ns = closed * second;
         Check(PublishForRun(publisher, context, p) == 0, "publish");
-        p.key = {entity6.entity_id, "npm_basic_ipv6_history_v1", context.run_id};
+        p.key = {entity6.entity_id, "npm_basic_ipv6_history", context.run_id};
         npm::NpmFamilyPublishedProgress confirmed;
         Check(publisher->PublishProgress(p, &confirmed) == 0, "publish empty IPv6 family");
         assert(confirmed.publication.closed_before_ns == p.closed_before_ns && confirmed.epoch == context.run_id);
@@ -252,7 +250,7 @@ void Test(database::DatabasePlugin& plugin, const std::string& category, const s
     publish(30);
     {
         auto family6 = Config(category + "." + name, context.run_id);
-        family6.config.datasets.front().table = "npm_basic_ipv6_history_v1";
+        family6.config.datasets.front().table = "npm_basic_ipv6_history";
         PollInput empty_family;
         Check(empty_family.Initialize(family6, source, family6.config.source) == 0, empty_family.LastError());
         auto boundary = Boundary(empty_family);

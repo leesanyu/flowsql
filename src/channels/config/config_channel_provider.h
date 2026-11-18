@@ -54,7 +54,7 @@ struct ConfigRevisionListItem {
     std::string change_note;
 };
 
-class ConfigChannelProvider : public IConfigChannelRegistryV1 {
+class ConfigChannelProvider : public IConfigChannelRegistry {
  public:
     ~ConfigChannelProvider() override;
     ConfigChannelProvider(const ConfigChannelProvider&) = delete;

@@ -7,22 +7,22 @@
 #include <cstring>
 #include <limits>
 namespace flowsql::baseliner {
-DatabaseParameterV1 TextParameter(const std::string& text) {
-    DatabaseParameterV1 p;
-    p.kind = DatabaseParameterKindV1::kString;
+DatabaseParameter TextParameter(const std::string& text) {
+    DatabaseParameter p;
+    p.kind = DatabaseParameterKind::kString;
     p.data = text.data();
     p.size = text.size();
     return p;
 }
-DatabaseParameterV1 IntParameter(int64_t value) {
-    DatabaseParameterV1 p;
-    p.kind = DatabaseParameterKindV1::kInt64;
+DatabaseParameter IntParameter(int64_t value) {
+    DatabaseParameter p;
+    p.kind = DatabaseParameterKind::kInt64;
     p.int64_value = value;
     return p;
 }
-DatabaseAtomicStatusV1 ReadAtomicBatch(IDatabaseAtomicSessionV1& session, const std::string& sql,
-                                       const std::vector<DatabaseParameterV1>& p,
-                                       std::shared_ptr<arrow::RecordBatch>* out) {
+DatabaseAtomicStatus ReadAtomicBatch(IDatabaseAtomicSession& session, const std::string& sql,
+                                     const std::vector<DatabaseParameter>& p,
+                                     std::shared_ptr<arrow::RecordBatch>* out) {
     out->reset();
     IBatchReader* raw = nullptr;
     auto s = session.CreateReader(sql.c_str(), p.data(), p.size(), &raw);
@@ -33,11 +33,11 @@ DatabaseAtomicStatusV1 ReadAtomicBatch(IDatabaseAtomicSessionV1& session, const 
     });
     const uint8_t* data = nullptr;
     size_t size = 0;
-    if (raw->GetSchema(&data, &size) != 0) return {DatabaseAtomicCodeV1::kError, "atomic schema read"};
+    if (raw->GetSchema(&data, &size) != 0) return {DatabaseAtomicCode::kError, "atomic schema read"};
     arrow::io::BufferReader schema_reader(arrow::Buffer::Wrap(data, size));
     arrow::ipc::DictionaryMemo memo;
     auto schema = arrow::ipc::ReadSchema(&schema_reader, &memo);
-    if (!schema.ok()) return {DatabaseAtomicCodeV1::kError, schema.status().ToString()};
+    if (!schema.ok()) return {DatabaseAtomicCode::kError, schema.status().ToString()};
     int rc = raw->Next(&data, &size);
     if (rc == 1) {
         auto empty = arrow::RecordBatch::MakeEmpty(*schema);
@@ -46,19 +46,19 @@ DatabaseAtomicStatusV1 ReadAtomicBatch(IDatabaseAtomicSessionV1& session, const 
             return {};
         }
     }
-    if (rc != 0) return {DatabaseAtomicCodeV1::kError, raw->GetLastError()};
+    if (rc != 0) return {DatabaseAtomicCode::kError, raw->GetLastError()};
     arrow::io::BufferReader batch_reader(arrow::Buffer::Wrap(data, size));
     auto batch = arrow::ipc::ReadRecordBatch(*schema, &memo, arrow::ipc::IpcReadOptions::Defaults(), &batch_reader);
-    if (!batch.ok()) return {DatabaseAtomicCodeV1::kError, batch.status().ToString()};
+    if (!batch.ok()) return {DatabaseAtomicCode::kError, batch.status().ToString()};
     // The native reader buffers own this IPC. Copy decoded arrays before reader destruction.
     auto copied = arrow::ipc::SerializeRecordBatch(**batch, arrow::ipc::IpcWriteOptions::Defaults());
-    if (!copied.ok()) return {DatabaseAtomicCodeV1::kError, copied.status().ToString()};
+    if (!copied.ok()) return {DatabaseAtomicCode::kError, copied.status().ToString()};
     auto buffer = arrow::AllocateBuffer((*copied)->size());
-    if (!buffer.ok()) return {DatabaseAtomicCodeV1::kError, buffer.status().ToString()};
+    if (!buffer.ok()) return {DatabaseAtomicCode::kError, buffer.status().ToString()};
     memcpy((*buffer)->mutable_data(), (*copied)->data(), (*copied)->size());
     arrow::io::BufferReader owned(std::shared_ptr<arrow::Buffer>(std::move(*buffer)));
     auto decoded = arrow::ipc::ReadRecordBatch(*schema, &memo, arrow::ipc::IpcReadOptions::Defaults(), &owned);
-    if (!decoded.ok()) return {DatabaseAtomicCodeV1::kError, decoded.status().ToString()};
+    if (!decoded.ok()) return {DatabaseAtomicCode::kError, decoded.status().ToString()};
     *out = *decoded;
     return {};
 }
@@ -68,8 +68,8 @@ int WriterFence::Fail(std::string e) {
     failed_ = true;
     return -1;
 }
-int WriterFence::Acquire(std::shared_ptr<IDatabaseAtomicSessionV1> session, const std::string& backend,
-                         std::string task, std::string owner, std::string fingerprint, int64_t lease_ms) {
+int WriterFence::Acquire(std::shared_ptr<IDatabaseAtomicSession> session, const std::string& backend, std::string task,
+                         std::string owner, std::string fingerprint, int64_t lease_ms) {
     if (session_ || !session || task.empty() || owner.empty() || lease_ms <= 0) return Fail("invalid writer binding");
     session_ = std::move(session);
     task_ = std::move(task);
@@ -100,8 +100,8 @@ int WriterFence::Acquire(std::shared_ptr<IDatabaseAtomicSessionV1> session, cons
     std::string insert = backend == "mysql" ? "INSERT IGNORE INTO" : "INSERT INTO";
     insert += " baseline_tasks VALUES(?,?,?,1,0,?)";
     if (backend != "mysql") insert += " ON CONFLICT(task_key) DO NOTHING";
-    std::vector<DatabaseParameterV1> p = {TextParameter(task_), TextParameter(fingerprint), TextParameter(owner_),
-                                          IntParameter(now + lease_ms_)};
+    std::vector<DatabaseParameter> p = {TextParameter(task_), TextParameter(fingerprint), TextParameter(owner_),
+                                        IntParameter(now + lease_ms_)};
     status = s.ExecutePrepared(insert.c_str(), p.data(), p.size(), &n);
     if (!status.ok()) {
         s.Rollback();
@@ -143,9 +143,9 @@ int WriterFence::Change(bool publish) {
         s.Rollback();
         return Fail("writer clock/generation overflow");
     }
-    auto p = std::vector<DatabaseParameterV1>{IntParameter(now + lease_ms_), TextParameter(task_),
-                                              TextParameter(owner_),         IntParameter(epoch_),
-                                              IntParameter(generation_),     IntParameter(now)};
+    auto p =
+        std::vector<DatabaseParameter>{IntParameter(now + lease_ms_), TextParameter(task_),      TextParameter(owner_),
+                                       IntParameter(epoch_),          IntParameter(generation_), IntParameter(now)};
     uint64_t n = 0;
     std::string sql = "UPDATE baseline_tasks SET lease_deadline=?";
     if (publish) sql += ",current_generation=current_generation+1";
@@ -164,8 +164,8 @@ int WriterFence::Change(bool publish) {
 }
 int WriterFence::Renew() { return Change(false); }
 int WriterFence::Stage() { return Change(true); }
-int WriterFence::Confirm(const DatabaseCommitResultV1& result) {
-    if (!staged_ || !ValidDatabaseCommitResultV1(result)) return Fail("invalid commit result");
+int WriterFence::Confirm(const DatabaseCommitResult& result) {
+    if (!staged_ || !ValidDatabaseCommitResult(result)) return Fail("invalid commit result");
     staged_ = false;
     if (!result.status.ok()) return Fail(result.status.message);
     ++generation_;
@@ -176,8 +176,7 @@ void WriterFence::Release() {
     if (staged_) session_->Rollback();
     if (!failed_ && !staged_) {
         if (session_->Begin().ok()) {
-            auto p =
-                std::vector<DatabaseParameterV1>{TextParameter(task_), TextParameter(owner_), IntParameter(epoch_)};
+            auto p = std::vector<DatabaseParameter>{TextParameter(task_), TextParameter(owner_), IntParameter(epoch_)};
             uint64_t n = 0;
             auto s = session_->ExecutePrepared(
                 "UPDATE baseline_tasks SET lease_deadline=0 WHERE task_key=? AND owner_run=? AND writer_epoch=?",

@@ -38,12 +38,12 @@ int main(int argc, char** argv) {
     assert(runtime.loader->Load(flowsql::get_absolute_process_path(), libraries, pointers, provider ? 4 : 3) == 0);
     assert(runtime.loader->StartAll() == 0);
     auto* registry =
-        static_cast<flowsql::IDataSemanticsRegistryV1*>(runtime.loader->First(flowsql::IID_DATA_SEMANTICS_REGISTRY_V1));
+        static_cast<flowsql::IDataSemanticsRegistry*>(runtime.loader->First(flowsql::IID_DATA_SEMANTICS_REGISTRY));
     assert(!provider || registry);
     std::string reference;
     while (std::getline(std::cin, reference) && reference != "quit") {
-        flowsql::DataSemanticsSnapshotV1 snapshot;
-        flowsql::DataSemanticsErrorV1 error;
+        flowsql::DataSemanticsSnapshot snapshot;
+        flowsql::DataSemanticsError error;
         rapidjson::Document result(rapidjson::kObjectType);
         auto& a = result.GetAllocator();
         const int rc = registry ? registry->Resolve(reference.c_str(), &snapshot, &error) : -1;

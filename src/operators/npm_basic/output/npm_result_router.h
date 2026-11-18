@@ -19,8 +19,8 @@ std::shared_ptr<arrow::MemoryPool> MakeNpmResultMemoryPool(std::shared_ptr<INpmT
 class NpmResultRouter final {
  public:
     using Invoke = std::function<int(const std::function<int()>&)>;
-    NpmResultRouter(std::vector<NpmEntityDescriptorV1> entities, std::string observing, NpmResultContextV1 context,
-                    std::shared_ptr<INpmTaskBudget> budget, std::unique_ptr<INpmResultConsumerV1> consumer,
+    NpmResultRouter(std::vector<NpmEntityDescriptor> entities, std::string observing, NpmResultContext context,
+                    std::shared_ptr<INpmTaskBudget> budget, std::unique_ptr<INpmResultConsumer> consumer,
                     Invoke invoke);
     ~NpmResultRouter();
     int Emit(std::string_view module, std::string_view entity, const arrow::RecordBatch& rows);
@@ -35,20 +35,20 @@ class NpmResultRouter final {
     size_t pending_results() const noexcept { return pending_rows_; }
     arrow::MemoryPool* pool() const { return pool_.get(); }
     const std::string& LastError() const { return error_; }
-    const NpmResultContextV1& Context() const { return context_; }
+    const NpmResultContext& Context() const { return context_; }
     const NpmResultDeliveryPlan& DeliveryPlan() const { return delivery_plan_; }
     const std::shared_ptr<INpmTaskBudget>& Budget() const { return budget_; }
     int Status() const noexcept;
 
  private:
     int Fail(int code, std::string message);
-    std::vector<NpmEntityDescriptorV1> entities_;
+    std::vector<NpmEntityDescriptor> entities_;
     std::string observing_;
-    NpmResultContextV1 context_;
+    NpmResultContext context_;
     const NpmResultDeliveryPlan delivery_plan_;
     std::shared_ptr<INpmTaskBudget> budget_;
     std::shared_ptr<arrow::MemoryPool> pool_;
-    std::unique_ptr<INpmResultConsumerV1> consumer_;
+    std::unique_ptr<INpmResultConsumer> consumer_;
     Invoke invoke_;
     std::unique_ptr<arrow::RecordBatchBuilder> pending_;
     size_t pending_rows_ = 0;
@@ -60,5 +60,5 @@ class NpmResultRouter final {
     std::atomic<bool> failure_finalized_{false};
 };
 
-NpmResultContextV1 MakeNpmResultContext(std::string task_id);
+NpmResultContext MakeNpmResultContext(std::string task_id);
 }  // namespace flowsql::npm

@@ -40,7 +40,7 @@ def main(host):
                 def semantics(op, data):
                     key = op.replace('/', '_')
                     validate(key + 'Request', data)
-                    result = route('/semantics/v1/' + op, data)
+                    result = route('/semantics/' + op, data)
                     validate(key + 'Response', result)
                     return result['data']
 

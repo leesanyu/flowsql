@@ -78,7 +78,7 @@ auto MakeLazy(const fs::path& path, Gate& gate) {
         [&](auto& input, const auto& name, const auto& check) { return gate.Load(input, name, check); });
 }
 auto Request() {
-    DataFrameSnapshotRequestV1 request;
+    DataFrameSnapshotRequest request;
     request.max_bytes = 1024 * 1024;
     request.deadline = std::chrono::steady_clock::now() + 2s;
     request.cancelled = std::make_shared<std::atomic_bool>(false);
@@ -191,7 +191,7 @@ void Management(const fs::path& root) {
     catalog::CatalogPlugin plugin;
     plugin.Option(("data_dir=" + path.string() + ";operator_db_path=" + (root / "manage.db").string()).c_str());
     assert(plugin.Start() == 0);
-    std::vector<DataFrameSourceV1> sources;
+    std::vector<DataFrameSource> sources;
     std::string error;
     plugin.List(&sources, &error);
     std::string source_id;
@@ -299,7 +299,7 @@ int main(int argc, char** argv) {
         assert(std::string(item->Schema()) == "null");
     });
     assert(count == 2);
-    std::vector<DataFrameSourceV1> sources;
+    std::vector<DataFrameSource> sources;
     std::string error;
     assert(plugin.List(&sources, &error) == 0 && sources.size() == 2);
     const auto listing = Route(plugin, "/channels/dataframe");
@@ -309,7 +309,7 @@ int main(int argc, char** argv) {
         assert(item["rows"].IsNull() && item["schema"].IsNull());
         assert(std::string(item["load_state"].GetString()) == "unloaded");
     }
-    Route(plugin, "/channels/dataframe/exploration/v1/sources");
+    Route(plugin, "/channels/dataframe/exploration/sources");
     alignas(inotify_event) char events[8192];
     const auto bytes = read(watcher, events, sizeof(events));
     for (ssize_t offset = 0; offset < bytes;) {

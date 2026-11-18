@@ -268,7 +268,7 @@ target_include_directories(fixture_description_cpp PRIVATE ${CMAKE_SOURCE_DIR})
 add_thirddepen(fixture_description_cpp arrow rapidjson)
 target_link_libraries(fixture_description_cpp flowsql_common OpenSSL::Crypto)
 set_target_properties(fixture_description_cpp PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
-add_dependencies(test_operator_contract_host fixture_description_cpp fixture_cpp_operator_v2)
+add_dependencies(test_operator_contract_host fixture_description_cpp fixture_cpp_operator_capabilities)
 add_test(NAME test_metadata_operator_browser COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_metadata_operator_browser.py $<TARGET_FILE:test_operator_contract_host> ${FLOWSQL_SEMANTICS_NODE} $<TARGET_FILE:fixture_description_cpp>)
 set_tests_properties(test_metadata_operator_browser PROPERTIES TIMEOUT 300 RESOURCE_LOCK "semantics_http;visualization_browser")

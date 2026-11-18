@@ -18,22 +18,22 @@ struct Deployment {
     std::map<std::string, std::string> files, environments;
     std::filesystem::path runtime_directory;
 };
-class Client final : public IKafkaClientSessionV1, public IKafkaConsumerSessionV1, public IKafkaProducerSessionV1 {
+class Client final : public IKafkaClientSession, public IKafkaConsumerSession, public IKafkaProducerSession {
  public:
     Client(Binding binding, const Deployment& deployment);
     ~Client() override;
-    const KafkaBindingSnapshotV1& Snapshot() const override { return binding_.snapshot; }
+    const KafkaBindingSnapshot& Snapshot() const override { return binding_.snapshot; }
     int Probe(uint32_t timeout_ms, std::string* result) override;
     void Cancel() override;
     int QueryInterface(const Guid&, void** capability) override;
     static Json Capabilities();
     const std::string& SourceOptions() const { return binding_.source_options_json; }
     const std::string& SinkOptions() const { return binding_.sink_options_json; }
-    int Produce(const std::vector<KafkaProduceMessageV1>&, uint32_t, KafkaDeliveryV1*) override;
+    int Produce(const std::vector<KafkaProduceMessage>&, uint32_t, KafkaDelivery*) override;
     int Drain(uint32_t) override;
     int StartConsumer(const char* reset, uint32_t max_message_bytes) override;
-    int PollMessage(uint32_t timeout_ms, KafkaMessageV1* message) override;
-    int CommitOffsets(const std::vector<KafkaOffsetV1>& offsets, uint32_t timeout_ms) override;
+    int PollMessage(uint32_t timeout_ms, KafkaMessage* message) override;
+    int CommitOffsets(const std::vector<KafkaOffset>& offsets, uint32_t timeout_ms) override;
 
  private:
     Binding binding_;

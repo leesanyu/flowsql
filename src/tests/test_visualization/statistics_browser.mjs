@@ -23,7 +23,7 @@ try {
       const query = browser.workflows.at(-1).workflow.workflow.find((s) => s.type === 'view').query[0]
       assert.deepEqual(query.groupBy, [{field:'f0',unit,asFieldKey:'f0'}])
       assert.equal(query.measures[0].agg, 'distinctCount')
-      const response = await fetch(direct + '/api/visualization/v1/compute', {method:'POST',headers:{'Content-Type':'application/json'},
+      const response = await fetch(direct + '/api/visualization/compute', {method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({...browser.workflows.at(-1),request_id:crypto.randomUUID()})})
       assert.equal(response.status,200)
       const data = await response.json()

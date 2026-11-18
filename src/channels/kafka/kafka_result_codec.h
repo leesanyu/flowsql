@@ -18,7 +18,7 @@ class ResultCodec {
     ResultCodec(SinkConfig config, std::string publication_id, std::string task_id);
     void Open(const std::shared_ptr<arrow::Schema>& schema);
     void Validate(const arrow::RecordBatch& batch) const;
-    KafkaProduceMessageV1 Row(const arrow::RecordBatch& batch, int64_t row, uint64_t ordinal) const;
+    KafkaProduceMessage Row(const arrow::RecordBatch& batch, int64_t row, uint64_t ordinal) const;
     const std::string& Fingerprint() const { return fingerprint_; }
 
  private:

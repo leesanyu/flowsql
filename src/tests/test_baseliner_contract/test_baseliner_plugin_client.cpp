@@ -1,6 +1,6 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
-// This translation unit uses only the pre-V1 task API and never links a concrete Baseline implementation.
+// Exercise the current task contract through a real plugin without linking its implementation.
 #include <common/iplugin.h>
 #include <dlfcn.h>
 #include <framework/interfaces/ibaseline_service.h>
@@ -19,7 +19,7 @@ struct Library final : IRegister, IQuerier {
         auto reg = reinterpret_cast<Register>(dlsym(handle, "pluginregist"));
         assert(reg);
         plugin = reg(this, nullptr);
-        assert(plugin && plugin->Load(this) == 0 && plugin->Start() == 0);
+        assert(plugin && plugin->Option(nullptr) == 0 && plugin->Load(this) == 0 && plugin->Start() == 0);
     }
     ~Library() {
         plugin->Stop();
@@ -45,13 +45,14 @@ int main() {
     auto task =
         service
             ->CreateValueTask(
-                R"({"schema_version":1,"task_id":"legacy","task_name":"legacy","task_kind":"value","feature_id":"v","feature_type":"value_basic","profile":"default","clock_spec":{"bucket_seconds":60,"timezone":"UTC"},"calendar_ref":{"calendar_id":"cn-holiday","calendar_version":"2026.1"}})",
+                R"({"schema_version":1,"task_id":"plugin-client","task_name":"plugin-client","task_kind":"value","feature_id":"v","feature_type":"value_basic","profile":"default","clock_spec":{"bucket_seconds":60,"timezone":"UTC"},"calendar_ref":{"calendar_id":"cn-holiday","calendar_version":"2026.1"}})",
                 BaselineSerializationFormat::kJson)
             .second;
     assert(task);
     for (int64_t t = 0; t < 8; ++t) {
         auto r = task->SubmitObservation({"s", t, 100. + t, 1}, {});
-        assert(r.status == BaselineStatus::kOk);
+        assert(r.result.status == BaselineStatus::kOk);
+        assert(r.readiness == (t == 0 ? BaselineEvaluationReadiness::kColdStart : BaselineEvaluationReadiness::kReady));
     }
     assert(task->PredictRolling("s", 8).status == BaselineStatus::kOk);
     assert(task->QuerySeriesSnapshot("s", BaselineSerializationFormat::kJson).first == BaselineStatus::kOk);

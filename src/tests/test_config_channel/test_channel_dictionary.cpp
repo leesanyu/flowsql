@@ -16,7 +16,7 @@ int main() {
     assert(fd >= 0);
     close(fd);
     DataSemanticsRegistry registry;
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     assert(registry.Open(file, &error) == 0);
     Json locator;
     locator.Parse(R"({"kind":"dataframe","name":"requests"})");
@@ -59,7 +59,7 @@ int main() {
     assert(preview["data"]["dictionary"]["fields"][1]["unit"]["state"] == "unknown");
     auto unbound = call("check", req);
     assert(unbound["data"]["state"] == "unbound");
-    DataSemanticsSnapshotV1 absent;
+    DataSemanticsSnapshot absent;
     assert(registry.BindingLookup("dataframe", "persistent-id", &absent, &error) != 0 && error.code == "NOT_FOUND");
     Json dictionary;
     dictionary.CopyFrom(preview["data"]["dictionary"], dictionary.GetAllocator());
@@ -115,7 +115,7 @@ int main() {
     assert(Get(newer["data"], "exact_reference") == "binding.requests@2");
     assert(Get(call("check", req)["data"], "state") == "matched");
     assert(!call("apply", apply)["data"]["created_revision"].GetBool());
-    DataSemanticsSnapshotV1 old;
+    DataSemanticsSnapshot old;
     assert(registry.Resolve(first_binding.c_str(), &old, &error) == 0);
     assert(old.document_json->find("dictionary.requests@1") != std::string::npos);
     // Explicit rename reuses the field ID and its manual semantics.
@@ -188,13 +188,13 @@ int main() {
     // A same-schema replacement does not inherit the old object's binding.
     source = Snapshot("dataframe", "replacement-id", locator, fields, metadata, "1");
     assert(Get(call("check", req)["data"], "state") == "unbound");
-    // v1 remains readable, v2 survives restore and is not silently rewritten by checking.
+    // Current complete bindings survive restore without being rewritten by checking.
     registry.Close();
     assert(registry.Open(file, &error) == 0);
     assert(registry.Resolve("binding.requests@2", &old, &error) == 0);
     Json restored;
     restored.Parse(old.document_json->c_str());
-    assert(restored["schema_id"] == "flowsql.data-binding.v2");
+    assert(restored["schema_id"] == "flowsql.data-binding");
     std::string response;
     assert(service.Control("describe", R"({"locator":{"kind":"dataframe","name":"x"},"timeout_ms":0})", response) != 0);
     source["schema_fingerprint"].SetString("forged", source.GetAllocator());

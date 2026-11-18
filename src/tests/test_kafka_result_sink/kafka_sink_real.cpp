@@ -115,7 +115,7 @@ class Broker {
         rd_kafka_metadata_destroy(m);
         return found;
     }
-    std::vector<KafkaProduceMessageV1> Consume(const std::string& topic, const std::string& group) {
+    std::vector<KafkaProduceMessage> Consume(const std::string& topic, const std::string& group) {
         auto* c = rd_kafka_conf_new();
         Set(c, "bootstrap.servers", servers_);
         Set(c, "group.id", group);
@@ -137,7 +137,7 @@ class Broker {
         rd_kafka_topic_partition_list_add(assignment, topic.c_str(), 0)->offset = 0;
         Check(rd_kafka_assign(consumer, assignment) == 0, "fixture_assign");
         rd_kafka_topic_partition_list_destroy(assignment);
-        std::vector<KafkaProduceMessageV1> out;
+        std::vector<KafkaProduceMessage> out;
         auto deadline = Clock::now() + std::chrono::seconds(10);
         while (out.size() < uint64_t(high) && Clock::now() < deadline) {
             auto* message = rd_kafka_consumer_poll(consumer, 100);
@@ -164,8 +164,8 @@ class Runtime {
     bool loaded_ = false;
 
  public:
-    IResultSinkFactoryV1* factory = nullptr;
-    IKafkaConnectionServiceV1* sessions = nullptr;
+    IResultSinkFactory* factory = nullptr;
+    IKafkaConnectionService* sessions = nullptr;
     Runtime(const rapidjson::Value& profile, const std::string& workspace) {
         const auto root = std::filesystem::path(workspace);
         std::ofstream(root / "key", std::ios::binary).write("12345678901234567890123456789012", 32);
@@ -181,15 +181,16 @@ class Runtime {
         auto kafka = Encode(opts);
         auto catalog =
             "data_dir=" + (root / "frames").string() + ";operator_db_path=" + (root / "operators.db").string();
-        const char* libs[] = {"libflowsql_kafka.so", "libflowsql_builtin.so", "libflowsql_catalog.so",
-                              "libflowsql_scheduler.so"};
-        const char* configs[] = {kafka.c_str(), nullptr, catalog.c_str(), "batch_workers=1"};
-        Check(loader_->Load(get_absolute_process_path(), libs, configs, 4) == 0, "runtime_load");
+        const char* libs[] = {"libflowsql_config_channel.so", "libflowsql_kafka.so", "libflowsql_builtin.so",
+                              "libflowsql_catalog.so", "libflowsql_scheduler.so"};
+        const std::string semantics_option = "db_path=" + (root / "semantics.db").string();
+        const char* configs[] = {semantics_option.c_str(), kafka.c_str(), nullptr, catalog.c_str(), "batch_workers=1"};
+        Check(loader_->Load(get_absolute_process_path(), libs, configs, 5) == 0, "runtime_load");
         loaded_ = true;
         Check(loader_->StartAll() == 0, "runtime_start");
         Call("/channels/kafka/connections/add", profile["connection"]);
-        factory = static_cast<IResultSinkFactoryV1*>(loader_->First(IID_RESULT_SINK_FACTORY_V1));
-        sessions = static_cast<IKafkaConnectionServiceV1*>(loader_->First(IID_KAFKA_CONNECTION_SERVICE_V1));
+        factory = static_cast<IResultSinkFactory*>(loader_->First(IID_RESULT_SINK_FACTORY));
+        sessions = static_cast<IKafkaConnectionService*>(loader_->First(IID_KAFKA_CONNECTION_SERVICE));
         Check(factory && sessions, "factory_discovery");
     }
     ~Runtime() {
@@ -223,8 +224,8 @@ class Runtime {
         j["payload_options"]["sink"].AddMember("max_message_bytes", message_limit, a);
         Call("/channels/kafka/channels/add", j);
     }
-    std::unique_ptr<IResultSinkWriterV1> Writer(const char* name) {
-        std::unique_ptr<IResultSinkWriterV1> w;
+    std::unique_ptr<IResultSinkWriter> Writer(const char* name) {
+        std::unique_ptr<IResultSinkWriter> w;
         Check(factory->CreateWriter({1, std::string("kafka.") + name, "real-acceptance"}, &w) == 0 && w,
               "create_writer");
         return w;
@@ -259,7 +260,7 @@ std::shared_ptr<arrow::RecordBatch> Batch(int n = 3, size_t width = 32) {
                        arrow::field("message", arrow::utf8())}),
         n, {id.Finish().ValueOrDie(), rev.Finish().ValueOrDie(), text.Finish().ValueOrDie()});
 }
-void Balanced(const ResultSinkReportV1& r) {
+void Balanced(const ResultSinkReport& r) {
     Check(r.input_rows == r.confirmed_rows + r.not_sent_rows + r.unknown_rows, "report_conservation");
 }
 double Cpu(const rusage& r) {

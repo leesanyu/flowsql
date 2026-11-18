@@ -20,7 +20,7 @@ const confirm=async()=>{await idle();const items=await ev('[...document.querySel
 const supplement=async name=>{await set('通道字典名称','ui.'+name);await set('通道绑定名称','ui.'+name);await set('通道字典标题',name+' 字典');await ev('document.querySelector("[data-channel-field=\\"0\\"]").open=true');await set('定义状态','declared','[data-channel-field="0"] ');await set('定义','人工字段说明','[data-channel-field="0"] ');await set('标准版本状态','declared','[data-channel-field="0"] ');await set('标准版本','standard.ui.channel@1','[data-channel-field="0"] ');await confirm();await click('保存字典并应用');await text('绑定已应用：binding.ui.'+name+'@1')}
 try {
   await send('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false})
-  await api('save',{kind:'standard',name:'ui.channel',expected_current_revision:0,document:{schema_id:'flowsql.data-standard.v1',title:'标准',definition:{state:'declared',origin:'manual',value:'字段标准'}}})
+  await api('save',{kind:'standard',name:'ui.channel',expected_current_revision:0,document:{schema_id:'flowsql.data-standard',title:'标准',definition:{state:'declared',origin:'manual',value:'字段标准'}}})
   await enter('dataframe');await text('pending');await click('显式加载 DataFrame 结构');await supplement('frame')
   assert.equal((await api('channels/check',{locator:frame})).state,'matched')
   assert.equal((await api('resolve',{exact_reference:'dictionary.ui.frame@1'})).document.fields[0].standard_refs.value[0],'standard.ui.channel@1')

@@ -30,7 +30,7 @@ class __attribute__((visibility("default"))) BuiltinRegistryPlugin : public IPlu
 
  private:
     IQuerier* querier_ = nullptr;
-    OperatorComponentContractV1 passthrough_contract_;
+    OperatorComponentContract passthrough_contract_;
 };
 
 }  // namespace builtin

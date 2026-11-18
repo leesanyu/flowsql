@@ -21,13 +21,13 @@ using namespace flowsql;
 // Test-only native value oracle; it uses the same read-only interface on every
 // backend and preserves narrow integers/NULL without the DataFrame JSON view.
 dataset::Json NativeQuery(IDatabaseChannel* database, const std::string& sql) {
-    auto* source = dynamic_cast<IDatabaseExplorationSourceV1*>(database);
+    auto* source = dynamic_cast<IDatabaseExplorationSource*>(database);
     assert(source);
-    DatabaseSnapshotOptionsV1 options;
+    DatabaseSnapshotOptions options;
     options.consistent_transaction = false;
-    std::shared_ptr<IDatabaseExplorationSessionV1> session;
+    std::shared_ptr<IDatabaseExplorationSession> session;
     assert(source->CreateExplorationSession(options, &session) == 0 && session);
-    ExplorationResultV1 result;
+    ExplorationResult result;
     const auto rc = session->Query(sql.c_str(), nullptr, 0, 10000, 16 * 1024 * 1024, &result);
     if (rc) std::cerr << session->QueryError() << '\n';
     assert(rc == 0);
@@ -47,7 +47,7 @@ dataset::Json NativeQuery(IDatabaseChannel* database, const std::string& sql) {
                                      return {};
                                  else if constexpr (std::is_same_v<T, std::string>)
                                      return dataset::Value(value.c_str(), value.size(), a);
-                                 else if constexpr (std::is_same_v<T, ExplorationDecimalV1>)
+                                 else if constexpr (std::is_same_v<T, ExplorationDecimal>)
                                      return dataset::Value(value.text.c_str(), a);
                                  else if constexpr (std::is_same_v<T, std::vector<uint8_t>>) {
                                      dataset::Value bytes(rapidjson::kArrayType);

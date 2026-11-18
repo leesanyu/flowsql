@@ -14,8 +14,8 @@ namespace flowsql::database {
 class IDbSnapshotSession {
  public:
     virtual ~IDbSnapshotSession() = default;
-    virtual int BeginSnapshot(const DatabaseSnapshotOptionsV1& options) = 0;
-    virtual int SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+    virtual int BeginSnapshot(const DatabaseSnapshotOptions& options) = 0;
+    virtual int SnapshotPage(const char* sql, const DatabaseParameter* parameters, size_t count,
                              std::shared_ptr<arrow::Schema> expected, uint32_t rows, uint64_t bytes,
                              std::shared_ptr<arrow::RecordBatch>* output) = 0;
     virtual void CancelSnapshot() = 0;

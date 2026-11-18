@@ -31,12 +31,12 @@ std::string Hash(const std::string& value) {
     for (auto byte : digest) output << std::hex << std::setfill('0') << std::setw(2) << int(byte);
     return output.str();
 }
-std::string FieldJson(const FieldV1& field) {
+std::string FieldJson(const Field& field) {
     return "{\"field_id\":" + JsonString(field.id) + ",\"label\":" + JsonString(field.name) +
            ",\"type\":" + JsonString(field.type) + ",\"native_type\":" + JsonString(field.native_type) +
            ",\"nullable\":" + (field.nullable ? "true}" : "false}");
 }
-std::string FieldsJson(const std::vector<FieldV1>& fields) {
+std::string FieldsJson(const std::vector<Field>& fields) {
     std::string json = "[";
     for (const auto& field : fields) {
         if (json.size() > 1) json += ',';
@@ -44,7 +44,7 @@ std::string FieldsJson(const std::vector<FieldV1>& fields) {
     }
     return json + ']';
 }
-std::string Revision(const SourceSchemaV1& source) { return Hash(FieldsJson(source.fields)); }
+std::string Revision(const SourceSchema& source) { return Hash(FieldsJson(source.fields)); }
 // Browser-facing type classes; nested and binary fields stay unsupported instead of being coerced.
 std::string ArrowFieldType(const std::shared_ptr<arrow::DataType>& type) {
     switch (type->id()) {
@@ -73,11 +73,11 @@ std::string ArrowFieldType(const std::shared_ptr<arrow::DataType>& type) {
             return "unsupported";
     }
 }
-std::string StringCell(const ExplorationValueV1& cell) {
+std::string StringCell(const ExplorationValue& cell) {
     if (auto value = std::get_if<std::string>(&cell)) return *value;
     throw QueryFailure("DATABASE_ERROR", "数据表元信息无效");
 }
-int64_t IntCell(const ExplorationValueV1& cell) {
+int64_t IntCell(const ExplorationValue& cell) {
     if (auto value = std::get_if<int64_t>(&cell)) return *value;
     throw QueryFailure("DATABASE_ERROR", "数据表元信息无效");
 }
@@ -126,12 +126,12 @@ std::string Text(const rapidjson::Value& value, const char* key) {
 }
 }  // namespace
 
-bool ExplorationService::Init(IQuerier* querier, QueryLimitsV1 limits, std::string dataframe_upstream,
+bool ExplorationService::Init(IQuerier* querier, QueryLimits limits, std::string dataframe_upstream,
                               std::string dataframe_shared_dir) {
     limits_ = limits;
     if (querier) {
         factory_ = static_cast<IDatabaseFactory*>(querier->First(IID_DATABASE_FACTORY));
-        leases_ = static_cast<IDatabaseChannelLeaseProviderV1*>(querier->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1));
+        leases_ = static_cast<IDatabaseChannelLeaseProvider*>(querier->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER));
     }
     // A configured but unusable data plane keeps the database path available and reports the reason.
     if (!dataframe_upstream.empty() || !dataframe_shared_dir.empty())
@@ -156,20 +156,20 @@ std::shared_ptr<IDatabaseChannel> ExplorationService::Lease(const std::string& d
     if (!lease) throw QueryFailure("SOURCE_UNAVAILABLE", "数据库通道不可用");
     return lease;
 }
-std::shared_ptr<IDatabaseExplorationSessionV1> ExplorationService::Session(
+std::shared_ptr<IDatabaseExplorationSession> ExplorationService::Session(
     const std::shared_ptr<IDatabaseChannel>& lease) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (stopping_ || sessions_count_ >= limits_.max_active) throw QueryFailure("BUSY", "数据库会话繁忙");
-    auto* source = dynamic_cast<IDatabaseExplorationSourceV1*>(lease.get());
-    std::shared_ptr<IDatabaseExplorationSessionV1> session;
-    DatabaseSnapshotOptionsV1 options;
+    auto* source = dynamic_cast<IDatabaseExplorationSource*>(lease.get());
+    std::shared_ptr<IDatabaseExplorationSession> session;
+    DatabaseSnapshotOptions options;
     options.operation_timeout_ms = limits_.timeout_ms;
     if (!source || source->CreateExplorationSession(options, &session))
         throw QueryFailure("SOURCE_UNAVAILABLE", "无法创建数据库只读会话");
     ++sessions_count_;
     auto* pointer = session.get();
-    std::shared_ptr<IDatabaseExplorationSessionV1> owned(
-        pointer, [this, session = std::move(session), lease](IDatabaseExplorationSessionV1*) mutable {
+    std::shared_ptr<IDatabaseExplorationSession> owned(
+        pointer, [this, session = std::move(session), lease](IDatabaseExplorationSession*) mutable {
             session.reset();
             std::lock_guard<std::mutex> guard(mutex_);
             --sessions_count_;
@@ -179,10 +179,10 @@ std::shared_ptr<IDatabaseExplorationSessionV1> ExplorationService::Session(
     sessions_.push_back(owned);
     return owned;
 }
-ExplorationResultV1 ExplorationService::Query(IDatabaseExplorationSessionV1& session, const std::string& sql,
-                                              const std::vector<ExplorationValueV1>& values) {
+ExplorationResult ExplorationService::Query(IDatabaseExplorationSession& session, const std::string& sql,
+                                            const std::vector<ExplorationValue>& values) {
     auto parameters = BindValues(values);
-    ExplorationResultV1 result;
+    ExplorationResult result;
     if (session.Query(sql.c_str(), parameters.data(), parameters.size(), limits_.max_rows + 1, limits_.max_bytes,
                       &result)) {
         const auto code = session.QueryError();
@@ -260,7 +260,7 @@ ExplorationService::Source ExplorationService::FindSource(const std::string& id)
     if (found != sources_.end()) return found->second;
     throw QueryFailure("SOURCE_UNAVAILABLE", "数据源不存在，请刷新列表");
 }
-SourceSchemaV1 ExplorationService::Schema(IDatabaseExplorationSessionV1& session, const Source& source) {
+SourceSchema ExplorationService::Schema(IDatabaseExplorationSession& session, const Source& source) {
     auto rows =
         source.dialect == "sqlite"
             ? Query(session, "SELECT cid,name,type,\"notnull\",pk FROM pragma_table_info(?) ORDER BY cid",
@@ -281,7 +281,7 @@ SourceSchemaV1 ExplorationService::Schema(IDatabaseExplorationSessionV1& session
                     "SELECT ordinal_position-1,column_name,column_type,CASE WHEN is_nullable='YES' THEN 0 ELSE 1 END,0 "
                     "FROM information_schema.columns WHERE table_schema=? AND table_name=? ORDER BY ordinal_position",
                     {source.schema, source.table});
-    SourceSchemaV1 schema{source.table, {}, source.dialect, source.schema};
+    SourceSchema schema{source.table, {}, source.dialect, source.schema};
     for (const auto& row : rows.rows) {
         auto native = StringCell(row[2]);
         std::string upper = native;
@@ -338,7 +338,7 @@ SourceSchemaV1 ExplorationService::Schema(IDatabaseExplorationSessionV1& session
 
 void ExplorationService::Routes(httplib::Server& server) {
     server.set_payload_max_length(1024 * 1024);
-    server.Get("/api/visualization/v1/sources", [this](const auto&, auto& response) {
+    server.Get("/api/visualization/sources", [this](const auto&, auto& response) {
         try {
             std::string body = "{\"sources\":[";
             for (const auto& source : Sources()) {
@@ -357,7 +357,7 @@ void ExplorationService::Routes(httplib::Server& server) {
         }
     });
     server.Get(
-        R"(/api/visualization/v1/sources/([a-f0-9]{32}|[a-f0-9]{64}))", [this](const auto& request, auto& response) {
+        R"(/api/visualization/sources/([a-f0-9]{32}|[a-f0-9]{64}))", [this](const auto& request, auto& response) {
             try {
                 const auto source = FindSource(request.matches[1]);
                 if (source.dataframe) {
@@ -399,9 +399,9 @@ void ExplorationService::Routes(httplib::Server& server) {
                 Error(response, error);
             }
         });
-    server.Post("/api/visualization/v1/snapshots/acquire",
+    server.Post("/api/visualization/snapshots/acquire",
                 [this](const auto& request, auto& response) { AcquireSnapshot(request, response); });
-    server.Post("/api/visualization/v1/snapshots/renew", [this](const auto& request, auto& response) {
+    server.Post("/api/visualization/snapshots/renew", [this](const auto& request, auto& response) {
         try {
             const auto document = Parse(request.body);
             const auto snapshot_id = Text(document, "snapshot_id");
@@ -415,7 +415,7 @@ void ExplorationService::Routes(httplib::Server& server) {
             Error(response, error);
         }
     });
-    server.Post("/api/visualization/v1/snapshots/release", [this](const auto& request, auto& response) {
+    server.Post("/api/visualization/snapshots/release", [this](const auto& request, auto& response) {
         try {
             const auto document = Parse(request.body);
             const auto snapshot_id = Text(document, "snapshot_id");
@@ -426,9 +426,9 @@ void ExplorationService::Routes(httplib::Server& server) {
             Error(response, error);
         }
     });
-    server.Post("/api/visualization/v1/compute",
+    server.Post("/api/visualization/compute",
                 [this](const auto& request, auto& response) { Compute(request, response); });
-    server.Post("/api/visualization/v1/cancel", [this](const auto& request, auto& response) {
+    server.Post("/api/visualization/cancel", [this](const auto& request, auto& response) {
         try {
             const auto document = Parse(request.body);
             const auto id = Text(document, "request_id");
@@ -513,10 +513,10 @@ void ExplorationService::Compute(const httplib::Request& request, httplib::Respo
         auto result = Query(*session, plan.sql, plan.parameters);
         if (result.rows.size() > limits_.max_rows)
             throw QueryFailure("RESULT_LIMIT", "结果超限，请增加过滤或明确选择受限明细");
-        std::vector<NumericDisplayV1> displays;
+        std::vector<NumericDisplay> displays;
         std::vector<int> display_index(result.columns.size(), -1);
         for (size_t i = 0; i < result.columns.size(); ++i) {
-            NumericDisplayV1 display;
+            NumericDisplay display;
             display.field_id = result.columns[i].name;
             auto native = plan.fields[i].native_type;
             bool decimal = false, native_mean = false;
@@ -529,8 +529,7 @@ void ExplorationService::Compute(const httplib::Request& request, httplib::Respo
             std::transform(native.begin(), native.end(), native.begin(),
                            [](unsigned char c) { return std::toupper(c); });
             decimal = native.find("DECIMAL") != std::string::npos || native.find("NUMERIC") != std::string::npos;
-            for (const auto& row : result.rows)
-                decimal = decimal || std::holds_alternative<ExplorationDecimalV1>(row[i]);
+            for (const auto& row : result.rows) decimal = decimal || std::holds_alternative<ExplorationDecimal>(row[i]);
             if (!decimal) continue;
             if (native_mean) {
                 display.origin = "native_decimal_mean";
@@ -540,7 +539,7 @@ void ExplorationService::Compute(const httplib::Request& request, httplib::Respo
                 for (const auto& row : result.rows) {
                     if (std::holds_alternative<std::monostate>(row[i]))
                         display.exact_values.emplace_back(std::monostate{});
-                    else if (auto value = std::get_if<ExplorationDecimalV1>(&row[i]))
+                    else if (auto value = std::get_if<ExplorationDecimal>(&row[i]))
                         display.exact_values.emplace_back(value->text);
                     else if (auto value = std::get_if<int64_t>(&row[i]))
                         display.exact_values.emplace_back(std::to_string(*value));
@@ -582,7 +581,7 @@ void ExplorationService::Compute(const httplib::Request& request, httplib::Respo
                     if (plan.fields[i].type == "number" || plan.fields[i].type == "boolean")
                         throw QueryFailure("UNSUPPORTED_TYPE", "SQLite 混合存储类型不能定量绘图");
                     body += JsonString(*value);
-                } else if (auto value = std::get_if<ExplorationDecimalV1>(&cell)) {
+                } else if (auto value = std::get_if<ExplorationDecimal>(&cell)) {
                     const auto number = DecimalForDisplay(value->text);
                     if (!number.exact) displays[display_index[i]].mode = "approximate";
                     std::ostringstream text;
@@ -671,7 +670,7 @@ void ExplorationService::AcquireSnapshot(const httplib::Request& request, httpli
             active_.at(id).acquire_cancel = cancellation;
             registered = true;
         }
-        DataFrameSnapshotInfoV1 snapshot;
+        DataFrameSnapshotInfo snapshot;
         std::string failure;
         if (!dataframes_.Acquire(id, source_id, 256ULL * 1024 * 1024, cancellation, limits_.timeout_ms, &snapshot,
                                  &failure)) {
@@ -723,7 +722,7 @@ void ExplorationService::ComputeDataFrame(const httplib::Request& request, const
         const auto snapshot_id = Text(document, "snapshot_id");
         if (snapshot_id.empty()) throw QueryFailure("INVALID_WORKFLOW", "DataFrame 计算必须绑定快照");
         std::shared_ptr<arrow::RecordBatch> batch;
-        DataFrameSnapshotInfoV1 meta;
+        DataFrameSnapshotInfo meta;
         if (!dataframes_.Lookup(snapshot_id, &batch, &meta))
             throw QueryFailure("SNAPSHOT_EXPIRED", "快照已过期，请重新获取");
         if (meta.source_id != source_id || meta.schema_revision != Text(document, "schema_revision"))
@@ -782,7 +781,7 @@ void ExplorationService::ComputeDataFrame(const httplib::Request& request, const
                     body += number.str();
                 } else if (auto value = std::get_if<std::string>(&cell)) {
                     body += JsonString(*value);
-                } else if (auto value = std::get_if<ExplorationDecimalV1>(&cell)) {
+                } else if (auto value = std::get_if<ExplorationDecimal>(&cell)) {
                     // Exact decimal text remains available through numeric_display below.
                     const auto number = DecimalForDisplay(value->text);
                     std::ostringstream text;
@@ -826,7 +825,7 @@ void ExplorationService::ComputeDataFrame(const httplib::Request& request, const
 }
 
 void ExplorationService::Stop() {
-    std::vector<std::shared_ptr<IDatabaseExplorationSessionV1>> sessions;
+    std::vector<std::shared_ptr<IDatabaseExplorationSession>> sessions;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stopping_ = true;

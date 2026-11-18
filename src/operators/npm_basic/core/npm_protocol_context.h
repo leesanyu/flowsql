@@ -47,10 +47,10 @@ class NpmProtocolContext final {
     const char* ResolveProtocolName(uint16_t protocol_id, uint16_t protocol_sub_id) const;
 
  private:
-    NpmProtocolContext(IProtocolPipelinePoolV1* pool, IProtocol* protocol, protocol::IDictionary* dictionary,
+    NpmProtocolContext(IProtocolPipelinePool* pool, IProtocol* protocol, protocol::IDictionary* dictionary,
                        int32_t pipeno);
 
-    IProtocolPipelinePoolV1* pool_ = nullptr;
+    IProtocolPipelinePool* pool_ = nullptr;
     protocol::IDictionary* dictionary_ = nullptr;
     int32_t pipeno_ = -1;
     protocol::NpiPacketProtocolIdentifier identifier_;

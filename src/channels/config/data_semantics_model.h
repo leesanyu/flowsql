@@ -17,16 +17,16 @@ struct SemanticsIdentity {
     std::string kind, name;
     uint64_t revision = 0;
 };
-int SemanticsFail(DataSemanticsErrorV1* error, const std::string& code, const std::string& message,
+int SemanticsFail(DataSemanticsError* error, const std::string& code, const std::string& message,
                   const std::string& path = "");
 bool SemanticsName(const std::string& name);
 bool ParseSemanticsReference(const std::string& text, SemanticsIdentity* out);
 std::string SemanticsJson(const rapidjson::Value& value);
-int ParseSemanticsJson(const std::string& text, rapidjson::Document* out, DataSemanticsErrorV1* error);
+int ParseSemanticsJson(const std::string& text, rapidjson::Document* out, DataSemanticsError* error);
 int NormalizeSemantics(const std::string& kind, const std::string& content, rapidjson::Document* out,
-                       std::vector<SemanticsReference>* references, DataSemanticsErrorV1* error);
+                       std::vector<SemanticsReference>* references, DataSemanticsError* error);
 int CheckSemanticsBinding(const rapidjson::Value& binding, const rapidjson::Value& dictionary,
-                          std::string* structure_check, DataSemanticsErrorV1* error);
+                          std::string* structure_check, DataSemanticsError* error);
 rapidjson::Document SemanticsGaps(const rapidjson::Value& value);
 const char* SemanticsDocumentSchema();
 }  // namespace flowsql::channels::config

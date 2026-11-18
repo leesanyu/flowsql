@@ -13,8 +13,8 @@
 #include <vector>
 
 namespace npm = flowsql::npm;
-using Kind = npm::NpmTcpStreamEventKindV1;
-using EndReason = npm::NpmTcpStreamEndReasonV1;
+using Kind = npm::NpmTcpStreamEventKind;
+using EndReason = npm::NpmTcpStreamEndReason;
 using Error = npm::NpmTcpStreamError;
 
 namespace {
@@ -41,12 +41,12 @@ class Budget final : public npm::INpmTaskBudget {
 };
 
 struct SavedEvent {
-    npm::NpmTcpStreamEventV1 facts;
+    npm::NpmTcpStreamEvent facts;
     std::string bytes;
 };
 class Sink final : public npm::INpmTcpStreamEventSink {
  public:
-    int Emit(const npm::NpmTcpStreamEventV1& event) override {
+    int Emit(const npm::NpmTcpStreamEvent& event) override {
         if (++attempts == fail_at) return EIO;
         assert(event.begin == next && event.end >= event.begin);
         SavedEvent saved{event, {}};
@@ -111,7 +111,7 @@ void TestOrderedRetransmissionAndOwnedBytes() {
         npm::NpmTcpStreamDirection stream({}, budget);
         Sink sink;
         assert(Push(stream, sink, 100, {}, 0, kSyn) == Error::kNone);
-        assert(stream.Origin() == npm::NpmTcpStreamOriginV1::kSyn && sink.events.empty());
+        assert(stream.Origin() == npm::NpmTcpStreamOrigin::kSyn && sink.events.empty());
         assert(Push(stream, sink, 101, "ABC", 1) == Error::kNone);
         assert(Push(stream, sink, 106, "FG", 2) == Error::kNone);
         assert(Push(stream, sink, 106, "xx", 3) == Error::kNone);
@@ -135,15 +135,15 @@ void TestOverlapAndMidstream() {
     npm::NpmTcpStreamDirection stream({}, budget);
     Sink sink;
     assert(Push(stream, sink, 0xf0000000) == Error::kNone);  // Pure ACK does not anchor a stream.
-    assert(stream.Origin() == npm::NpmTcpStreamOriginV1::kUnknown && sink.events.empty());
+    assert(stream.Origin() == npm::NpmTcpStreamOrigin::kUnknown && sink.events.empty());
     assert(Push(stream, sink, 101, "ABCDE", 10) == Error::kNone);
-    assert(stream.Origin() == npm::NpmTcpStreamOriginV1::kMidstream);
+    assert(stream.Origin() == npm::NpmTcpStreamOrigin::kMidstream);
     assert(Push(stream, sink, 103, "CxyFG", 20) == Error::kNone);
     assert(sink.Data() == "ABCDEFG" && sink.events.back().facts.captured_at_ns == 20);
     assert(Push(stream, sink, 98, "oldABCDEFGH", 30) == Error::kNone);
     assert(sink.Data() == "ABCDEFGH");
     assert(Push(stream, sink, 97, {}, 40, kSyn) == Error::kNone);
-    assert(stream.Origin() == npm::NpmTcpStreamOriginV1::kMidstream);
+    assert(stream.Origin() == npm::NpmTcpStreamOrigin::kMidstream);
     Eof(stream, sink);
 
     npm::NpmTcpStreamDirection pending({}, budget);
@@ -169,7 +169,7 @@ void TestWrapAndAmbiguity() {
     assert(stream.Ended() && sink.events.back().facts.end_reason == EndReason::kFin);
     assert(sink.next == 5);
 
-    npm::NpmTcpStreamConfigV1 config;
+    npm::NpmTcpStreamConfig config;
     config.gap_timeout_ns = 0;
     npm::NpmTcpStreamDirection laps(config, budget);
     Sink out;
@@ -197,7 +197,7 @@ void TestWrapAndAmbiguity() {
 
 void TestTruncationAndWatermarks() {
     auto budget = std::make_shared<Budget>();
-    npm::NpmTcpStreamConfigV1 config;
+    npm::NpmTcpStreamConfig config;
     config.gap_timeout_ns = 10;
     npm::NpmTcpStreamDirection stream(config, budget);
     Sink sink;
@@ -219,7 +219,7 @@ void TestTruncationAndWatermarks() {
     assert(out.Data() == "ABCFG" && out.Count(Kind::kGap) == 1);
     const auto& gap = out.events[1].facts;
     assert(gap.begin == 3 && gap.end == 5 && gap.includes_capture_truncation);
-    assert(gap.gap_reason == npm::NpmTcpStreamGapReasonV1::kWaitExpired);
+    assert(gap.gap_reason == npm::NpmTcpStreamGapReason::kWaitExpired);
     const auto count = out.events.size();
     assert(Push(missing, out, 103, "DE", 111) == Error::kNone && out.events.size() == count);
     Eof(missing, out);
@@ -247,7 +247,7 @@ void TestTruncationAndWatermarks() {
 
 void TestFinResetAndSessionTermination() {
     auto budget = std::make_shared<Budget>();
-    npm::NpmTcpStreamConfigV1 config;
+    npm::NpmTcpStreamConfig config;
     config.gap_timeout_ns = 10;
     npm::NpmTcpStreamDirection ab(config, budget), ba(config, budget);
     Sink forward, reverse;
@@ -276,7 +276,7 @@ void TestFinResetAndSessionTermination() {
     assert(Push(reset, rst, 104, "D", 1, kRst) == Error::kNone);
     assert(rst.Data() == "D" && rst.Count(Kind::kGap) == 1 && reset.Ended());
     assert(rst.events.back().facts.end_reason == EndReason::kReset);
-    assert(rst.events[0].facts.gap_reason == npm::NpmTcpStreamGapReasonV1::kTermination);
+    assert(rst.events[0].facts.gap_reason == npm::NpmTcpStreamGapReason::kTermination);
     for (const auto reason : {npm::NpmSessionEndReason::kClosed, npm::NpmSessionEndReason::kIdleTimeout,
                               npm::NpmSessionEndReason::kTupleReuse, npm::NpmSessionEndReason::kEof}) {
         npm::NpmTcpStreamDirection old(config, budget);
@@ -293,13 +293,12 @@ void TestFinResetAndSessionTermination() {
     npm::NpmTcpStreamDirection empty(config, budget);
     Sink no_data;
     assert(Push(empty, no_data, 100, {}, 0, kRst) == Error::kNone);
-    assert(no_data.Count(Kind::kEnd) == 1 && no_data.next == 0 &&
-           empty.Origin() == npm::NpmTcpStreamOriginV1::kUnknown);
+    assert(no_data.Count(Kind::kEnd) == 1 && no_data.next == 0 && empty.Origin() == npm::NpmTcpStreamOrigin::kUnknown);
 }
 
 void TestTruncationMarksOnlyMissingBytesAndKeepsFirstDeadline() {
     auto budget = std::make_shared<Budget>();
-    npm::NpmTcpStreamConfigV1 config;
+    npm::NpmTcpStreamConfig config;
     config.gap_timeout_ns = 10;
     npm::NpmTcpStreamDirection stream(config, budget);
     Sink out;
@@ -326,7 +325,7 @@ void TestTruncationMarksOnlyMissingBytesAndKeepsFirstDeadline() {
 
 void TestBoundedFailuresAndAbort() {
     auto budget = std::make_shared<Budget>();
-    npm::NpmTcpStreamConfigV1 config;
+    npm::NpmTcpStreamConfig config;
     config.max_buffered_bytes_per_direction = 65536;
     {
         npm::NpmTcpStreamDirection stream(config, budget);
@@ -393,7 +392,7 @@ void TestWindowFinAndInvalidBoundaries() {
     assert(Push(conflict, sequence, 103, {}, 1, kFin) == Error::kNone);
     assert(sequence.events.back().facts.end_reason == EndReason::kSequenceAmbiguous && sequence.Data() == "ABCDE");
 
-    npm::NpmTcpStreamConfigV1 config;
+    npm::NpmTcpStreamConfig config;
     config.gap_timeout_ns = 10;
     npm::NpmTcpStreamDirection first_proof(config, budget);
     Sink capture;

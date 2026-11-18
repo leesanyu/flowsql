@@ -9,9 +9,6 @@
 #include <framework/interfaces/idataframe_channel.h>
 #include <fstream>
 #endif
-#ifndef FIXTURE_ABI
-#define FIXTURE_ABI 1
-#endif
 #ifndef FIXTURE_NAME
 #define FIXTURE_NAME "echo"
 #endif
@@ -19,7 +16,7 @@ namespace {
 class Operator : public flowsql::IOperator
 #ifndef FIXTURE_EXECUTION
     ,
-                 public flowsql::IOperatorConfigAdapterV1
+                 public flowsql::IOperatorConfigAdapter
 #endif
 {
  public:
@@ -28,7 +25,7 @@ class Operator : public flowsql::IOperator
     std::string Description() override { return "Contract registration fixture"; }
     flowsql::OperatorPosition Position() override { return flowsql::OperatorPosition::DATA; }
 #ifndef FIXTURE_EXECUTION
-    int ResolveInvocation(const char*, std::string* out, flowsql::DataSemanticsErrorV1* error) override {
+    int ResolveInvocation(const char*, std::string* out, flowsql::DataSemanticsError* error) override {
         if (error) *error = {};
         if (!out) return -1;
         *out = R"({"effective_parameters":{"factor":7},"inputs":[],"config_refs":[]})";
@@ -59,21 +56,18 @@ class Operator : public flowsql::IOperator
 #endif
 };
 }  // namespace
-extern "C" int flowsql_abi_version() { return FIXTURE_ABI; }
+extern "C" int flowsql_abi_version() { return flowsql::kCppOperatorPluginAbiVersion; }
 extern "C" int flowsql_operator_count() { return 1; }
-extern "C" flowsql::IOperator* flowsql_create_operator(int index) { return index == 0 ? new Operator : nullptr; }
-extern "C" void flowsql_destroy_operator(flowsql::IOperator* op) { delete op; }
-extern "C" int flowsql_describe_operator(int index, flowsql::CppOperatorDescriptorV2* d) {
-    if (index || !d || d->struct_size != flowsql::kCppOperatorDescriptorV2Size) return -1;
-    *d = {flowsql::kCppOperatorDescriptorV2Size, "contractdemo", FIXTURE_NAME, "Contract fixture",
-          flowsql::IID_OPERATOR};
+extern "C" int flowsql_describe_operator(int index, flowsql::CppOperatorDescriptor* d) {
+    if (index || !d || d->struct_size != flowsql::kCppOperatorDescriptorSize) return -1;
+    *d = {flowsql::kCppOperatorDescriptorSize, "contractdemo", FIXTURE_NAME, "Contract fixture", flowsql::IID_OPERATOR};
     return 0;
 }
 extern "C" void* flowsql_create_operator_capability(int index, flowsql::IQuerier*) {
     return index == 0 ? static_cast<flowsql::IOperator*>(new Operator) : nullptr;
 }
 extern "C" void flowsql_destroy_operator_capability(int, void* p) { delete static_cast<flowsql::IOperator*>(p); }
-extern "C" const char* flowsql_operator_data_contract_v1(int index) {
+extern "C" const char* flowsql_operator_data_contract(int index) {
     if (index) return nullptr;
 #if defined(FIXTURE_TOO_LONG)
     static const std::string too_long(8 * 1024 * 1024 + 1, 'x');
@@ -85,7 +79,7 @@ extern "C" const char* flowsql_operator_data_contract_v1(int index) {
 #elif defined(FIXTURE_REFERENCE)
     return "{\"contract_ref\":\"operator_contract.contractdemo." FIXTURE_NAME "@1\"}";
 #elif defined(FIXTURE_EXECUTION)
-    return R"({"schema_id":"flowsql.operator-data-contract.v1","title":"Actual input fixture",
+    return R"({"schema_id":"flowsql.operator-data-contract","title":"Actual input fixture",
       "operator":{"category":"contractdemo","name":"execution","version":"1"},
       "configuration":{"invocation_schema":{"type":"object","additionalProperties":true},"affects":{}},
       "inputs":[{"port_id":"left","min_count":1,"max_count":1,"shape":"dataframe","roles":[
@@ -94,7 +88,7 @@ extern "C" const char* flowsql_operator_data_contract_v1(int index) {
         {"role_id":"measure","required":true,"types":[{"system":"arrow","name":"int64","parameters":{}}],"nullable":null,"semantic_requirements":{},"selector":{"kind":"parameter","key":"column"}}]}],
       "outputs":[{"port_id":"output","shape":"dataframe","mode":"derived","rules":[{"kind":"copy","source_port":"left","all_fields":true}]}],"limitations":[]})";
 #else
-    return "{\"schema_id\":\"flowsql.operator-data-contract.v1\",\"title\":\"C++ fixture\","
+    return "{\"schema_id\":\"flowsql.operator-data-contract\",\"title\":\"C++ fixture\","
            "\"operator\":{\"category\":\"contractdemo\",\"name\":\"" FIXTURE_NAME
            "\",\"version\":\"1\"},"
            "\"configuration\":{\"invocation_schema\":{\"type\":\"object\"},\"affects\":{}},"

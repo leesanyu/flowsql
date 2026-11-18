@@ -20,7 +20,7 @@ std::string Publication() {
     return id;
 }
 }  // namespace
-ResultWriter::ResultWriter(SinkConfig c, ResultSinkContextV1 context, std::shared_ptr<IKafkaClientSessionV1> session)
+ResultWriter::ResultWriter(SinkConfig c, ResultSinkContext context, std::shared_ptr<IKafkaClientSession> session)
     : config_(std::move(c)), context_(std::move(context)), session_(std::move(session)) {
     report_.publication_id = Publication();
     report_.state = "created";
@@ -61,9 +61,9 @@ int ResultWriter::Open(std::shared_ptr<arrow::Schema> schema) {
         return Fail(EINVAL, e.what(), "sink_open");
     }
     void* capability = nullptr;
-    int rc = session_->QueryInterface(IID_KAFKA_PRODUCER_SESSION_V1, &capability);
+    int rc = session_->QueryInterface(IID_KAFKA_PRODUCER_SESSION, &capability);
     if (rc || !capability) return Fail(rc ? rc : ENOTSUP, "PRODUCER_UNAVAILABLE", "sink_open");
-    producer_ = static_cast<IKafkaProducerSessionV1*>(capability);
+    producer_ = static_cast<IKafkaProducerSession*>(capability);
     // This verifies authentication/Topic metadata without any probe publication.
     std::string probe;
     rc = session_->Probe(std::min(config_.delivery_timeout_ms, 30000u), &probe);
@@ -92,13 +92,13 @@ int ResultWriter::Write(const std::shared_ptr<arrow::RecordBatch>& batch) {
     try {
         codec_->Validate(*batch);
         int64_t row = 0;
-        std::optional<KafkaProduceMessageV1> pending;
+        std::optional<KafkaProduceMessage> pending;
         while (row < batch->num_rows() || pending) {
             if (cancelled_ || Clock::now() >= deadline) {
                 remainder();
                 return Fail(cancelled_ ? ECANCELED : ETIMEDOUT, "SINK_TIMEOUT", "sink_deliver");
             }
-            std::vector<KafkaProduceMessageV1> window;
+            std::vector<KafkaProduceMessage> window;
             size_t bytes = 0;
             while (window.size() < config_.queue_max_messages && (row < batch->num_rows() || pending)) {
                 auto message = pending ? std::move(*pending) : codec_->Row(*batch, row, ordinal + row);
@@ -121,7 +121,7 @@ int ResultWriter::Write(const std::shared_ptr<arrow::RecordBatch>& batch) {
                 remainder();
                 return Fail(cancelled_ ? ECANCELED : ETIMEDOUT, "SINK_TIMEOUT", "sink_deliver");
             }
-            KafkaDeliveryV1 delivery;
+            KafkaDelivery delivery;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 report_.stage = "sink_deliver";
@@ -174,18 +174,18 @@ void ResultWriter::Cancel() {
         report_.code = "CANCELLED";
     }
 }
-ResultSinkReportV1 ResultWriter::Report() const {
+ResultSinkReport ResultWriter::Report() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return report_;
 }
-int Plugin::CreateWriter(const ResultSinkContextV1& context, std::unique_ptr<IResultSinkWriterV1>* out) {
+int Plugin::CreateWriter(const ResultSinkContext& context, std::unique_ptr<IResultSinkWriter>* out) {
     if (!out) return EINVAL;
     out->reset();
     if (context.target.rfind("kafka.", 0) != 0) return ENOTSUP;
     if (context.contract_version != 1 || context.target.size() <= 6 || context.target.find('.', 6) != std::string::npos)
         return EINVAL;
     const auto name = context.target.substr(6);
-    KafkaChannelDescriptionV1 description;
+    KafkaChannelDescription description;
     int rc = DescribeChannel(name.c_str(), &description);
     if (rc) return rc;
     try {
@@ -195,11 +195,11 @@ int Plugin::CreateWriter(const ResultSinkContextV1& context, std::unique_ptr<IRe
     }
     if (description.role == "source") return EINVAL;
     if (!description.sink_adapter_available) return ENOTSUP;
-    IKafkaClientSessionV1* raw = nullptr;
+    IKafkaClientSession* raw = nullptr;
     std::string error;
     rc = OpenSession(name.c_str(), "sink", &raw, &error);
     if (rc) return rc;
-    std::shared_ptr<IKafkaClientSessionV1> session(raw, [this](auto* p) { ReleaseSession(p); });
+    std::shared_ptr<IKafkaClientSession> session(raw, [this](auto* p) { ReleaseSession(p); });
     try {
         auto* client = static_cast<Client*>(raw);
         auto config = ParseSinkConfig(Parse(client->SinkOptions()));

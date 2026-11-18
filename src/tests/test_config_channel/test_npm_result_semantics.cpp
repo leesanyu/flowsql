@@ -18,7 +18,7 @@
 #include <filesystem>
 #include <iostream>
 
-extern "C" const char* flowsql_operator_data_contract_v1(int index);
+extern "C" const char* flowsql_operator_data_contract(int index);
 extern "C" void* flowsql_create_operator_capability(int index, flowsql::IQuerier* querier);
 extern "C" void flowsql_destroy_operator_capability(int index, void* capability);
 using namespace flowsql;
@@ -26,15 +26,15 @@ using namespace flowsql::dataset;
 namespace {
 // A metadata provider can expose another database type without changing the
 // publisher or public protocol. This fixture uses real SQLite catalog facts.
-class ExtensibleDatasetProvider final : public IChannelDatasetDescriptorV1 {
+class ExtensibleDatasetProvider final : public IChannelDatasetDescriptor {
  public:
     explicit ExtensibleDatasetProvider(PluginLoader* loader) : loader_(loader) {}
     const char* ProviderId() const override { return "database"; }
-    int Describe(const ChannelDatasetRequestV1& request, ChannelDatasetSnapshotV1* out,
-                 DataSemanticsErrorV1* error) override {
-        IChannelDatasetDescriptorV1* provider = nullptr;
-        loader_->Traverse(IID_CHANNEL_DATASET_DESCRIPTOR_V1, [&](void* value) {
-            auto* candidate = static_cast<IChannelDatasetDescriptorV1*>(value);
+    int Describe(const ChannelDatasetRequest& request, ChannelDatasetSnapshot* out,
+                 DataSemanticsError* error) override {
+        IChannelDatasetDescriptor* provider = nullptr;
+        loader_->Traverse(IID_CHANNEL_DATASET_DESCRIPTOR, [&](void* value) {
+            auto* candidate = static_cast<IChannelDatasetDescriptor*>(value);
             if (candidate != this && std::string(candidate->ProviderId()) == "database") provider = candidate;
             return provider ? 1 : 0;
         });
@@ -56,30 +56,30 @@ class ExtensibleDatasetProvider final : public IChannelDatasetDescriptorV1 {
  private:
     PluginLoader* loader_;
 };
-class StaticContractCatalog final : public IOperatorContractCatalogV1 {
+class StaticContractCatalog final : public IOperatorContractCatalog {
  public:
-    OperatorComponentContractV1 component;
-    int Prepare(const std::vector<OperatorContractDeclarationV1>&, std::vector<PreparedOperatorContractV1>*,
-                DataSemanticsErrorV1*) override {
+    OperatorComponentContract component;
+    int Prepare(const std::vector<OperatorContractDeclaration>&, std::vector<PreparedOperatorContract>*,
+                DataSemanticsError*) override {
         assert(false);
         return -1;
     }
-    int Commit(const std::vector<PreparedOperatorContractV1>&, DataSemanticsErrorV1*) override {
+    int Commit(const std::vector<PreparedOperatorContract>&, DataSemanticsError*) override {
         assert(false);
         return -1;
     }
-    int Lookup(const char* category, const char* name, OperatorComponentContractV1* out,
-               DataSemanticsErrorV1* error) override {
+    int Lookup(const char* category, const char* name, OperatorComponentContract* out,
+               DataSemanticsError* error) override {
         if (component.category != category || component.name != name)
             return Fail(error, "NOT_FOUND", "fixture contract not found");
         *out = component;
         return 0;
     }
 };
-class ControlledServices final : public IQuerier, public IOperatorDataContractV1 {
+class ControlledServices final : public IQuerier, public IOperatorDataContract {
  public:
     explicit ControlledServices(IQuerier* base)
-        : base_(base), service_(static_cast<IOperatorDataContractV1*>(base->First(IID_OPERATOR_DATA_CONTRACT_V1))) {}
+        : base_(base), service_(static_cast<IOperatorDataContract*>(base->First(IID_OPERATOR_DATA_CONTRACT))) {}
     bool fail_records = false;
     bool hide_control = false;
     int Traverse(const Guid& id, fntraverse visitor) override {
@@ -88,17 +88,17 @@ class ControlledServices final : public IQuerier, public IOperatorDataContractV1
                    : base_->Traverse(id, std::move(visitor));
     }
     void* First(const Guid& id) override {
-        return std::memcmp(&id, &IID_OPERATOR_DATA_CONTRACT_V1, sizeof(Guid)) == 0
-                   ? static_cast<IOperatorDataContractV1*>(this)
+        return std::memcmp(&id, &IID_OPERATOR_DATA_CONTRACT, sizeof(Guid)) == 0
+                   ? static_cast<IOperatorDataContract*>(this)
                    : base_->First(id);
     }
-    int Resolve(const char* ref, OperatorContractSnapshotV1* out, DataSemanticsErrorV1* error) override {
+    int Resolve(const char* ref, OperatorContractSnapshot* out, DataSemanticsError* error) override {
         return service_->Resolve(ref, out, error);
     }
-    int CheckAndDerive(const char* request, std::string* out, DataSemanticsErrorV1* error) override {
+    int CheckAndDerive(const char* request, std::string* out, DataSemanticsError* error) override {
         return service_->CheckAndDerive(request, out, error);
     }
-    int RecordUse(const char* request, OperatorContractSnapshotV1* out, DataSemanticsErrorV1* error) override {
+    int RecordUse(const char* request, OperatorContractSnapshot* out, DataSemanticsError* error) override {
         if (fail_records) {
             *out = {};
             return Fail(error, "STORAGE_ERROR", "injected observation storage failure");
@@ -108,12 +108,12 @@ class ControlledServices final : public IQuerier, public IOperatorDataContractV1
 
  private:
     IQuerier* base_;
-    IOperatorDataContractV1* service_;
+    IOperatorDataContract* service_;
 };
 
 Json Call(IQuerier* querier, const char* operation, const Value& request) {
     Json response;
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     const auto rc = contracts::Control(querier, operation, request, &response, &error);
     if (rc) std::cerr << operation << ": " << error.code << " " << error.field_path << " " << error.message << '\n';
     assert(rc == 0);
@@ -147,8 +147,8 @@ int main() {
         assert(loader->Load(".", libraries, options, 3) == 0);
         // The registry selects the last matching provider. Install the fixture
         // after the real provider so its extension type reaches this adapter.
-        loader->Regist(IID_CHANNEL_DATASET_DESCRIPTOR_V1, &metadata);
-        loader->Regist(IID_OPERATOR_CONTRACT_CATALOG_V1, &static_catalog);
+        loader->Regist(IID_CHANNEL_DATASET_DESCRIPTOR, &metadata);
+        loader->Regist(IID_OPERATOR_CONTRACT_CATALOG, &static_catalog);
         assert(loader->StartAll() == 0);
         struct Owner {
             PluginLoader* loader;
@@ -176,34 +176,34 @@ int main() {
             continue;
         }
         Json contract, declaration(rapidjson::kObjectType);
-        contract.Parse(flowsql_operator_data_contract_v1(0));
+        contract.Parse(flowsql_operator_data_contract(0));
         auto& ca = declaration.GetAllocator();
         Set(declaration, "kind", "operator_contract", ca);
         Set(declaration, "name", "npm.basic", ca);
         declaration.AddMember("expected_current_revision", uint64_t{0}, ca)
             .AddMember("document", Copy(contract, ca), ca);
         const auto declared = Call(loader, "save", declaration);
-        OperatorComponentContractV1 component;
+        OperatorComponentContract component;
         component.category = "npm";
         component.name = "basic";
         component.operator_version = Get(contract["operator"], "version");
         component.component_revision = Hash("real npm metadata publication fixture");
         component.contract_ref = Get(declared["data"], "exact_reference");
         component.contract_state = "declared";
-        DataSemanticsErrorV1 error;
+        DataSemanticsError error;
         // Author definitions and existing managed objects are sufficient: no
         // operator task, packet processing, or publication may be required.
         static_catalog.component = component;
         assert(databases->AddChannel(("type=sqlite;name=static;path=" + root + "/static.db").c_str()) == 0);
         auto* static_database = databases->Get("sqlite", "static");
-        std::vector<npm::NpmEntityDescriptorV1> static_entities;
+        std::vector<npm::NpmEntityDescriptor> static_entities;
         for (auto kind :
              {npm::NpmFamilyEntityKind::kBasic, npm::NpmFamilyEntityKind::kSession, npm::NpmFamilyEntityKind::kDns,
               npm::NpmFamilyEntityKind::kHttp1, npm::NpmFamilyEntityKind::kTls, npm::NpmFamilyEntityKind::kIcmp})
             for (auto family : {packet::AddressFamily::kIPv4, packet::AddressFamily::kIPv6})
                 static_entities.push_back(npm::NpmFamilyEntityDescriptor(kind, family));
         auto static_factory = npm::MakeNpmDatabaseResultConsumerFactory(static_database, "pcapfile.static");
-        std::unique_ptr<npm::INpmManagedResultConsumerV1> static_consumer;
+        std::unique_ptr<npm::INpmManagedResultConsumer> static_consumer;
         auto static_budget = std::make_shared<npm::NpmTaskBudget>(npm::NpmAnalysisConfig{});
         assert(static_factory->Create({"existing-fixture", "existing-run"}, static_entities, static_budget,
                                       &static_consumer) == 0);
@@ -218,7 +218,7 @@ int main() {
         for (const auto& entity : static_entities)
             for (const char* view : {"history", "latest", "final", "data"}) {
                 const auto suffix =
-                    entity.entity_id + (std::string(view) == "data" ? "_v1_data" : "_" + std::string(view) + "_v1");
+                    entity.entity_id + (std::string(view) == "data" ? "_data" : "_" + std::string(view));
                 Set(static_locator, "table", "npm_" + suffix, static_locator.GetAllocator());
                 const auto value = Describe(loader, static_locator);
                 const auto& data = value["data"];
@@ -242,7 +242,7 @@ int main() {
         assert(static_count == 50 && Call(loader, "list", empty) == metadata_before);
         std::cout << "PASS: 50 existing empty NPM objects expose static defaults without executing a task or metadata "
                      "writes\n";
-        Set(static_locator, "table", "npm_dns_transaction_ipv4_final_v1", static_locator.GetAllocator());
+        Set(static_locator, "table", "npm_dns_transaction_ipv4_final", static_locator.GetAllocator());
         Set(static_locator, "type", "extension_db", static_locator.GetAllocator());
         const auto extension_default = Describe(loader, static_locator);
         assert(extension_default["data"]["description"]["origin"] == "producer_default");
@@ -250,9 +250,8 @@ int main() {
         const auto original_default = Describe(loader, static_locator);
         Json updated_contract;
         updated_contract.CopyFrom(contract, updated_contract.GetAllocator());
-        auto& updated_definition =
-            updated_contract["resources"]["managed_dictionaries"]["dns_transaction_ipv4_final_v1"]["dictionary"]
-                            ["fields"][0]["definition"];
+        auto& updated_definition = updated_contract["resources"]["managed_dictionaries"]["dns_transaction_ipv4_final"]
+                                                   ["dictionary"]["fields"][0]["definition"];
         Set(updated_definition, "value", "新版运行身份说明", updated_contract.GetAllocator());
         declaration["expected_current_revision"].SetUint64(1);
         declaration["document"].CopyFrom(updated_contract, ca);
@@ -297,13 +296,13 @@ int main() {
         const auto after_publication = Describe(loader, static_locator);
         for (const auto& field : after_publication["data"]["description"]["document"]["fields"].GetArray())
             if (Get(field, "name") == "latency_ns") assert(field["definition"]["value"] == "静态说明上的人工补充");
-        assert(static_database->ExecuteSql("CREATE TABLE npm_unmanaged AS SELECT * FROM npm_basic_ipv4_final_v1") == 0);
+        assert(static_database->ExecuteSql("CREATE TABLE npm_unmanaged AS SELECT * FROM npm_basic_ipv4_final") == 0);
         Set(static_locator, "table", "npm_unmanaged", static_locator.GetAllocator());
         const auto unrelated = Describe(loader, static_locator);
         assert(unrelated["data"]["description"]["state"] == "missing");
         assert(static_database->ExecuteSql("UPDATE npm_result_entities SET schema_canonical=schema_canonical || 'x' "
                                            "WHERE entity_id='basic_ipv4'") >= 0);
-        Set(static_locator, "table", "npm_basic_ipv4_final_v1", static_locator.GetAllocator());
+        Set(static_locator, "table", "npm_basic_ipv4_final", static_locator.GetAllocator());
         Json invalid_request(rapidjson::kObjectType), invalid_target(rapidjson::kObjectType), rejected;
         auto& ia = invalid_request.GetAllocator();
         Set(invalid_target, "kind", "channel", ia);
@@ -317,8 +316,8 @@ int main() {
                 "WHERE entity_id='basic_ipv4'") >= 0);
         {
             auto factory = npm::MakeNpmDatabaseResultConsumerFactory(database, "pcapfile.fixture");
-            std::unique_ptr<npm::INpmManagedResultConsumerV1> consumer;
-            const std::vector<npm::NpmEntityDescriptorV1> entities{
+            std::unique_ptr<npm::INpmManagedResultConsumer> consumer;
+            const std::vector<npm::NpmEntityDescriptor> entities{
                 npm::NpmFamilyEntityDescriptor(npm::NpmFamilyEntityKind::kDns, packet::AddressFamily::kIPv4),
                 npm::NpmFamilyEntityDescriptor(npm::NpmFamilyEntityKind::kDns, packet::AddressFamily::kIPv6)};
             auto budget = std::make_shared<npm::NpmTaskBudget>(npm::NpmAnalysisConfig{});
@@ -327,7 +326,7 @@ int main() {
             actual = consumer->ResultJson();
         }
         std::string context;
-        auto publish = [&](const OperatorComponentContractV1& selected) {
+        auto publish = [&](const OperatorComponentContract& selected) {
             const auto rc = npm::PublishNpmResultSemantics(loader, selected, "sqlite", "result", "pcapfile.fixture",
                                                            actual, &context, &error);
             if (rc) std::cerr << error.code << " " << error.field_path << " " << error.message << '\n';
@@ -350,6 +349,13 @@ int main() {
             }
         persisted.Parse(context.c_str());
         assert(persisted["entities"].Size() == 2 && persisted["run_id"] == "run-fixture");
+        Json repeated(rapidjson::kObjectType);
+        repeated.AddMember("locator", Copy(persisted["run_catalog"]["locator"], repeated.GetAllocator()),
+                           repeated.GetAllocator());
+        const auto repeat_preview = Call(loader, "channels/preview", repeated);
+        assert(repeat_preview["data"]["source_snapshot"]["identity_state"] == "unknown");
+        assert(repeat_preview["data"]["state"] == "needs_confirmation");
+        assert(Call(loader, "channels/check", repeated)["data"]["state"] == "matched");
         const auto first = context;
         assert(publish(component) == 0 && context == first);
         for (const auto& entity : persisted["entities"].GetArray()) {
@@ -387,6 +393,8 @@ int main() {
         assert(changed["data"]["description"]["document"]["description"]["value"] == "人工补充用途");
         for (const auto& field : changed["data"]["description"]["document"]["fields"].GetArray())
             if (Get(field, "name") == "latency_ns") assert(field["definition"]["value"] == "人工核验的延迟解释");
+        const auto manually_updated = context;
+        assert(publish(component) == 0 && context == manually_updated);
         persisted.Parse(context.c_str());
         const auto before_read = Call(loader, "list", Json(rapidjson::kObjectType));
         Describe(loader, relation["locator"]);
@@ -395,36 +403,33 @@ int main() {
         std::set<std::string> task_runs;
         for (int scenario : {0, 1, 2, 3}) {
             ControlledServices services(loader);
-            auto* capability =
-                static_cast<IBlockTransformOperatorV2*>(flowsql_create_operator_capability(1, &services));
+            auto* capability = static_cast<IBlockTransformOperator*>(flowsql_create_operator_capability(0, &services));
             assert(capability);
-            const auto release = [](IBlockTransformOperatorV2* value) {
-                flowsql_destroy_operator_capability(1, value);
-            };
-            std::unique_ptr<IBlockTransformOperatorV2, decltype(release)> provider(capability, release);
+            const auto release = [](IBlockTransformOperator* value) { flowsql_destroy_operator_capability(0, value); };
+            std::unique_ptr<IBlockTransformOperator, decltype(release)> provider(capability, release);
             const std::string parameters = R"({"observing":"basic_ipv4"})";
             const std::string plan = R"({"version":1,"root":null})";
-            BlockTransformTaskConfigV2 config{kBlockTransformTaskConfigV2Size, kBlockTransformContractVersionV2,
-                                              "real-task", parameters.c_str(), plan.c_str()};
-            IBlockTransformTaskV2* created = nullptr;
+            BlockTransformTaskConfig config{kBlockTransformTaskConfigSize, kBlockTransformContractVersion, "real-task",
+                                            parameters.c_str(), plan.c_str()};
+            IBlockTransformTask* created = nullptr;
             assert(provider->CreateTask(config, &created) == 0);
-            const auto release_task = [&](IBlockTransformTaskV2* value) { provider->ReleaseTask(value); };
-            std::unique_ptr<IBlockTransformTaskV2, decltype(release_task)> task(created, release_task);
-            assert(dynamic_cast<IOperatorConfigAdapterV1*>(task.get()) && "task must freeze actual invocation facts");
+            const auto release_task = [&](IBlockTransformTask* value) { provider->ReleaseTask(value); };
+            std::unique_ptr<IBlockTransformTask, decltype(release_task)> task(created, release_task);
+            assert(dynamic_cast<IOperatorConfigAdapter*>(task.get()) && "task must freeze actual invocation facts");
             auto state = std::make_shared<contracts::BlockInvocation>();
             state->querier = &services;
             state->invocation.component = component;
             state->parameters.Parse(parameters.c_str());
             Set(state->context, "source", "pcapfile.fixture", state->context.GetAllocator());
             state->context.AddMember("managed_output", true, state->context.GetAllocator());
-            auto* input = dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get());
+            auto* input = dynamic_cast<IBlockTransformInputSourceTask*>(task.get());
             assert(input && input->BindInputSource("pcapfile.fixture") == 0);
             if (!database->IsOpened()) assert(database->Open() == 0);
-            auto* sink = dynamic_cast<IBlockTransformManagedSinkTaskV1*>(task.get());
+            auto* sink = dynamic_cast<IBlockTransformManagedSinkTask*>(task.get());
             assert(sink);
-            BlockTransformManagedSinkBindingV1 binding{};
+            BlockTransformManagedSinkBinding binding{};
             binding.struct_size = sizeof(binding);
-            binding.contract_version = kBlockTransformManagedSinkContractVersionV1;
+            binding.contract_version = kBlockTransformManagedSinkContractVersion;
             binding.sink_channel = database;
             binding.target = "sqlite.result";
             binding.category = "sqlite";
@@ -432,7 +437,7 @@ int main() {
             binding.relation = "";
             assert(sink->BindManagedSink(binding) == 0);
             services.hide_control = scenario == 3;
-            contracts::CheckedBlockTask checked(task.get(), dynamic_cast<IOperatorConfigAdapterV1*>(provider.get()),
+            contracts::CheckedBlockTask checked(task.get(), dynamic_cast<IOperatorConfigAdapter*>(provider.get()),
                                                 state);
             std::shared_ptr<arrow::Schema> output;
             const int open_rc = checked.Open(packet::PacketSchema(), &output);
@@ -452,11 +457,11 @@ int main() {
             changed_component.Parse(
                 R"({"operator":{"contract_ref":"operator_contract.npm.basic@1","component_revision":"wrong"},"execution_context":{}})");
             std::string rejected;
-            DataSemanticsErrorV1 rejected_error;
-            assert(dynamic_cast<IOperatorConfigAdapterV1*>(task.get())
+            DataSemanticsError rejected_error;
+            assert(dynamic_cast<IOperatorConfigAdapter*>(task.get())
                            ->ResolveInvocation(Encode(changed_component).c_str(), &rejected, &rejected_error) != 0 &&
                    rejected.empty() && rejected_error.code == "COMPONENT_CHANGED");
-            std::vector<BlockTransformOutputV1> batches;
+            std::vector<BlockTransformOutput> batches;
             if (scenario == 2) {
                 checked.Cancel();
                 Json cancelled;

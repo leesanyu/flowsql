@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include <cassert>
 #include <algorithm>
@@ -516,7 +511,7 @@ void TrainRollingRange(IBaselineValueTask* task,
                        std::size_t end) {
     for (std::size_t i = begin; i < end; ++i) {
         const RollingBaselineResult result =
-            task->SubmitObservation(ToObservation(points[i]), RollingSubmitOptions{});
+            task->SubmitObservation(ToObservation(points[i]), RollingSubmitOptions{}).result;
         if (result.status != BaselineStatus::kOk) {
             std::cerr << "rolling train failed at " << points[i].timestamp
                       << ", status=" << static_cast<int>(result.status) << "\n";
@@ -677,8 +672,7 @@ bool WriteWeek4ComparisonAndTrainRolling(const std::filesystem::path& path,
                       << point.timestamp << "\n";
             return false;
         }
-        const RollingBaselineResult rr =
-            task->SubmitObservation(ToObservation(point), RollingSubmitOptions{});
+        const RollingBaselineResult rr = task->SubmitObservation(ToObservation(point), RollingSubmitOptions{}).result;
         if (bp.status != BaselineStatus::kOk || rr.status != BaselineStatus::kOk) {
             std::cerr << "week4 prediction failed at " << point.timestamp << "\n";
             return false;
@@ -954,8 +948,7 @@ bool WriteWeek4RollingPredictAndTrainComparison(
                       << rp.baseline_lower << ',' << rp.baseline_upper << ','
                       << std::fabs(forecast_rz) << '\n';
 
-        const RollingBaselineResult rr =
-            task->SubmitObservation(ToObservation(point), RollingSubmitOptions{});
+        const RollingBaselineResult rr = task->SubmitObservation(ToObservation(point), RollingSubmitOptions{}).result;
         if (rr.status != BaselineStatus::kOk) {
             std::cerr << "week4 rolling update failed at " << point.timestamp
                       << ", status=" << static_cast<int>(rr.status) << "\n";
@@ -1023,7 +1016,7 @@ bool WriteTransitionLearning(const std::filesystem::path& path,
     for (std::size_t i = begin; i < end; ++i) {
         const LinkPoint& point = points[i];
         const RollingBaselineResult result =
-            task->SubmitObservation(ToObservation(point), RollingSubmitOptions{});
+            task->SubmitObservation(ToObservation(point), RollingSubmitOptions{}).result;
         if (result.status != BaselineStatus::kOk) {
             std::cerr << "transition update failed at " << point.timestamp
                       << ", status=" << static_cast<int>(result.status) << "\n";
@@ -1089,7 +1082,7 @@ bool WriteRollingWalkForwardDetection(const std::filesystem::path& path,
     for (std::size_t i = begin; i < end; ++i) {
         const LinkPoint& point = points[i];
         const RollingBaselineResult result =
-            task->SubmitObservation(ToObservation(point), RollingSubmitOptions{});
+            task->SubmitObservation(ToObservation(point), RollingSubmitOptions{}).result;
         if (result.status != BaselineStatus::kOk) {
             std::cerr << "rolling walk-forward failed at " << point.timestamp
                       << ", status=" << static_cast<int>(result.status) << "\n";
@@ -1136,7 +1129,7 @@ bool WritePostShiftTraining(const std::filesystem::path& path,
     for (std::size_t i = begin; i < end; ++i) {
         const LinkPoint& point = points[i];
         const RollingBaselineResult result =
-            task->SubmitObservation(ToObservation(point), RollingSubmitOptions{});
+            task->SubmitObservation(ToObservation(point), RollingSubmitOptions{}).result;
         if (result.status != BaselineStatus::kOk) {
             std::cerr << "post-shift rolling train failed at " << point.timestamp
                       << ", status=" << static_cast<int>(result.status) << "\n";

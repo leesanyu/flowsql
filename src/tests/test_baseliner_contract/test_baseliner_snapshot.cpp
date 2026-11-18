@@ -300,17 +300,17 @@ void Test(database::DatabasePlugin& plugin, const std::string& category, const s
             assert(!r.LastError().empty());
     }
     {
-        auto* cap = dynamic_cast<IDatabaseSnapshotSourceV1*>(source.get());
+        auto* cap = dynamic_cast<IDatabaseSnapshotSource*>(source.get());
         assert(cap);
-        DatabaseSnapshotOptionsV1 options;
+        DatabaseSnapshotOptions options;
         options.consistent_transaction = category != "clickhouse";
-        std::shared_ptr<IDatabaseSnapshotSessionV1> session;
+        std::shared_ptr<IDatabaseSnapshotSession> session;
         assert(cap->CreateSnapshotSession(options, &session) == 0);
         std::shared_ptr<arrow::RecordBatch> p;
         auto schema = arrow::schema({arrow::field("id", arrow::uint64())});
         const auto sql = "SELECT id FROM " + table + " WHERE id=? LIMIT 1";
-        DatabaseParameterV1 param;
-        param.kind = DatabaseParameterKindV1::kUInt64;
+        DatabaseParameter param;
+        param.kind = DatabaseParameterKind::kUInt64;
         param.uint64_value = UINT64_MAX;
         Check(session->ReadPage(sql.c_str(), &param, 1, schema, 1, 1024, &p) == 0, session->LastError());
         assert(p->num_rows() == 1);
@@ -357,11 +357,11 @@ void Test(database::DatabasePlugin& plugin, const std::string& category, const s
                 "error_code Nullable(Int64),error_stage Nullable(String),error_message Nullable(String),"
                 "metadata_status String,purge_cursor Nullable(String)) ENGINE=MergeTree ORDER BY run_id";
         Check(source->ExecuteSql(runs_ddl.c_str()) >= 0, source->GetLastError());
-        auto* commands = dynamic_cast<IDatabasePreparedCommandV1*>(source.get());
+        auto* commands = dynamic_cast<IDatabasePreparedCommand*>(source.get());
         assert(commands);
         auto stringparam = [](const std::string& v) {
-            DatabaseParameterV1 p;
-            p.kind = DatabaseParameterKindV1::kString;
+            DatabaseParameter p;
+            p.kind = DatabaseParameterKind::kString;
             p.data = v.data();
             p.size = v.size();
             return p;
@@ -373,14 +373,14 @@ void Test(database::DatabasePlugin& plugin, const std::string& category, const s
             const std::string status =
                 std::string(state) == "expired" || std::string(state) == "unknown" ? "completed" : state;
             const std::string metadata = std::string(state) == "unknown" ? "unknown" : "known";
-            DatabaseParameterV1 started;
-            started.kind = DatabaseParameterKindV1::kInt64;
-            DatabaseParameterV1 expiry;
+            DatabaseParameter started;
+            started.kind = DatabaseParameterKind::kInt64;
+            DatabaseParameter expiry;
             if (std::string(state) == "expired") {
-                expiry.kind = DatabaseParameterKindV1::kInt64;
+                expiry.kind = DatabaseParameterKind::kInt64;
                 expiry.int64_value = 1;
             }
-            DatabaseParameterV1 params[] = {
+            DatabaseParameter params[] = {
                 stringparam(run), stringparam(table),   stringparam(table), stringparam(status), started,
                 expiry,           stringparam(metadata)};
             Check(commands->ExecutePrepared("INSERT INTO "

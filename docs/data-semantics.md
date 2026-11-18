@@ -13,7 +13,7 @@ NPM 的静态领域字典随作者契约提供；已有 SQLite/MySQL/PostgreSQL/
 ## 入口与持久化
 
 完成[标准构建及启动](../README.md#快速开始)后，从 Web 顶栏选择“通道管理”或“算子管理”。
-原“标准与字典”顶栏入口已移除，旧 `/semantics` 路由及精确历史链接仍可直接访问，供兼容和高级维护使用。
+原“标准与字典”顶栏入口已移除，`/semantics` 路由及精确历史链接用于高级维护。
 默认 Web 地址为 `http://127.0.0.1:8081`。现有单/多进程配置加载 `libflowsql_config_channel.so`，
 经 Web → Gateway → Router → Config 提供控制 API。
 
@@ -61,7 +61,7 @@ DataFrame 首次加载期间显示进度，完成前不能编辑或保存；加�
 
 当前浏览器会话会按对象保留说明草稿，切换对象不会混用。会话草稿不能代替服务端保存或备份。
 结构 pending 时可参考已保存说明，待显式加载并刷新后才开放字段保存。
-旧版浏览器草稿会完整保留，并提示先按旧协议保存，再进入新表单；高级语义和原来源不会因界面精简丢失。
+浏览器草稿使用当前 editor_changes 格式；清理既有格式前先导出备份，在产品外一次性整理。高级语义和来源由完整字典保存。
 “技术详情（最近读取结果）”默认折叠，可复制完整 describe JSON；其中不含未保存草稿，刷新读取结果后才更新。
 页面使用中文提示加载、来源变化、冲突和部分成功；下表状态值供 HTTP 客户端及技术详情对照。
 
@@ -78,7 +78,7 @@ DataFrame 首次加载期间显示进度，完成前不能编辑或保存；加�
 受支持的 Arrow timestamp/duration 单位和时区、数据库原生日期时间类别，以及明确生产者声明可提供预填。
 预填与读取不写存储，不把普通整数识别为时间；未识别类型与有歧义的数据库 TIME 不作推断。
 保存使用既有 `time_semantics` 的嵌套语义值和 `{code,label}` 单位，时间字段只保留一个单位编辑入口；矛盾输入会被拒绝。
-NPM 新时间点声明统一使用 `1970-01-01T00:00:00Z`；已有字典中的 `Unix epoch` 作为相同基准读取，查看和修改普通说明不会改写其原声明或历史。
+Unix 时间点声明统一使用 `1970-01-01T00:00:00Z`；普通说明编辑保留既有完整语义，自定义基准不视为 Unix 基准。
 时间列只展示类型及简短基准/已有时区，业务时间含义在字段说明编辑区展示；正文已包含相同文字时不再重复。完整结构在技术详情中查看。
 已有人工/导入声明优先保留，与来源事实冲突时提示核对。确实无法映射到简化模式的定义显示“当前时间定义暂不支持编辑”，可展开人可读摘要；不显示为新时间类型，也不默认为非时间。
 此时单位和时间定义只读，普通说明仍可编辑保存，原时间语义保持；需要调整这类定义时使用完整字典接口。
@@ -186,7 +186,7 @@ python3 examples/metadata_description/client.py \
 ### 简化保存 HTTP 输入
 
 `POST /api/semantics/v1/channels/save-description` 沿用 describe 返回的 `locator`、`basis` 和必要的 `confirmations`。
-新客户端可提交 `editor_changes`，与旧 `changes` 恰好选择一种；响应及来源/版本核对规则不变。输入契约见服务发布的 `api.schema.json` 与 `openapi.json`。
+请求必须提交 `editor_changes`，响应及来源/版本核对规则保持。输入契约见服务发布的 `api.schema.json` 与 `openapi.json`。
 
 ```json
 {
@@ -204,11 +204,11 @@ python3 examples/metadata_description/client.py \
 `relations` 省略保留原集合，数组替换集合，`[]` 为明确移除；每项为 `{dictionary_ref,field_map}`，field_map 使用“源字段名 → 目标 field_id”。
 目标引用必须包含精确版本，目标字段来自该版本读取结果；包含未修改关系才能在替换集合时保留它们。
 `describe.context.editor_fields` 提供只读的类型适用模式、来源单位/时间事实及冲突提示；有效已保存声明仍来自 `description.document`。
-旧 `changes` 和通用字典入口继续使用原语义；自动时间汇总维护仅作用于新编辑分支明确涉及的信息。
+完整字典入口支持高级语义声明；说明编辑仅维护本次明确涉及的自动时间汇总。
 
-## 兼容与高级维护：定义与未知信息
+## 高级维护：定义与未知信息
 
-以下标准、字典、绑定与导入导出接口继续保留，可通过旧 `/semantics` 页面或 HTTP 使用。
+以下标准、字典、绑定与导入导出接口继续保留，可通过`/semantics` 页面或 HTTP 使用。
 对象详情内保存说明已自动处理日常关联；仅在需要共享定义、精确映射或历史维护时使用这些步骤。
 
 | 对象 | 用途 | 例子 |
@@ -258,7 +258,7 @@ F1 精确比较类型描述，不推断不同类型系统的等价性。关系�
 
 ## 高级来源候选与绑定
 
-需要精确复用既有字典、控制映射或修订历史时，可通过旧 `/semantics` 的来源编辑器，或下文通道 HTTP 接口操作。
+需要精确复用既有字典、控制映射或修订历史时，可通过`/semantics` 的来源编辑器，或下文通道 HTTP 接口操作。
 选择明确 DataFrame、Kafka 结构化 source/both 或限定数据库表；数据库 locator 包含适用的 database/schema/table，
 不登记整个连接，不接收任意 SQL 或扫描全库。日常入口使用前述“数据说明”，原行内“数据字典／表字典”按钮已移除。
 
@@ -298,13 +298,13 @@ Kafka/DataFrame 的受管身份独立于名称且可重启恢复；重命名保�
 连接改指向或可观测表重建需要重新确认。SQLite/MySQL 等无法证明库外同名重建的来源为 identity_state=unknown，
 需明确确认本次语义连续性；确认是用户声明，不能证明未观察的外部 DDL 或业务含义从未变化。
 
-v2 绑定保留 source_snapshot 和 confirmation；只有 channels/apply 重取来源并核验后才在同一事务中建立服务端观察记录。
+当前绑定必须提供 source_snapshot 和 confirmation；只有 channels/apply 重取来源并核验后才在同一事务中建立服务端观察记录。
 导入/通用 save 的快照只作历史声明，即使内容自洽也不会自行变为可信当前观察，需要 observation 确认并重新应用。
-旧 v1 的 declared_schema 继续表示人工声明，显式升级时保留并单独检查，旧版本保持不变。
+人工登记也使用同一完整绑定结构；declared_schema 仅用于显式的人工结构声明。channels/apply 不继承旧声明，使用重新取得的来源快照建立绑定。
 
 ## 人工绑定与保存后应用
 
-“新建绑定”需要独立名称、对象标签、Provider 身份、具体数据集身份、字典精确版本和字段映射。
+“新建绑定”需要独立名称、对象标签、Provider 身份、具体数据集身份、字典精确版本、字段映射及完整来源快照。
 `object_key={provider_id,object_id}` 在部署内唯一且创建后不可改变；它标识数据集，不是整个数据库连接。
 
 字段映射方向为字典 field_id → 来源字段名，必须覆盖全部字典字段且来源字段不能重复。
@@ -348,7 +348,8 @@ v2 绑定保留 source_snapshot 和 confirmation；只有 channels/apply 重取�
 ## HTTP 契约与可运行示例
 
 所有控制操作使用 POST JSON；成功为 `{data:...}`，错误为 `{error:{code,message,field_path,details}}`。
-部署内前缀为 `/semantics/v1/`，Web 对外前缀为 `/api/semantics/v1/`。
+部署内前缀为 `/semantics/`，Web 对外前缀为 `/api/semantics/v1/`。
+对外 URL 保留普通客户端使用的版本路径段，仅提供当前契约；部署内路由不保留旧入口。
 浏览器及普通客户端使用同一套接口，机器可读文件通过普通 GET 获取：
 
 ```text
@@ -362,7 +363,7 @@ v2 绑定保留 source_snapshot 和 confirmation；只有 channels/apply 重取�
 | POST 操作 | 用途 |
 | --- | --- |
 | describe | `target` 为明确通道 locator 或算子 category.name；通道返回完整对象说明，算子默认 usage，显式 `view:"full"` 读取全文 |
-| channels/save-description | `locator`、完整 `basis`、`changes` 及人工确认项；系统生成内部身份/映射并保存当前对象说明 |
+| channels/save-description | `locator`、完整 `basis`、`editor_changes` 及人工确认项；系统生成内部身份/映射并保存当前对象说明 |
 | operators/save-description | `name`、`expected_component_revision`、`expected_description_ref`、`notes`；只保存当前组件的补充文字 |
 | list | kind/q 筛选 current 摘要，返回精确引用与缺口数量 |
 | resolve | exact_reference 读取完整文档；`view:"fields"` 读取字段投影，`view:"resource"` 配合 resource_pointer 读取算子局部规则 |
@@ -407,9 +408,9 @@ v2 绑定保留 source_snapshot 和 confirmation；只有 channels/apply 重取�
 `usage` 固定含 `identity,inputs,parameters,outputs,limitations,examples,annotations`，不携带完整契约、全部 resources 或归一配置 Schema。
 完整阅读指引见下文[普通 HTTP 客户端](#普通-http-客户端)。通道不接受算子 usage/full 视图，未知 view 同样返回 `INVALID_DOCUMENT`。
 
-`channels/save-description` 的 `changes` 只提交已编辑属性：对象 `description`、`entity` 中的行/时间/关联等语义，
-以及按来源字段名索引的 `fields`。各属性沿用下文 SemanticValue 的 state/value/origin 结构；
-字段名称、类型、可空性及内部 field_id 不可通过 changes 改写。`confirmations` 只提交用户实际确认的键。
+`channels/save-description` 的 `editor_changes` 只提交本次编辑的文本、单位、时间与关系，形状见上文简化保存输入。
+完整高级语义使用字典保存与通道绑定接口；字段名称、类型、可空性及内部 field_id 不能通过说明编辑改写。
+`confirmations` 只提交用户实际确认的键。
 返回 `status=applied` 才表示完成当前关联；`status=definition_saved_not_applied` 同时返回已保存的 `dictionary_ref`、
 当前 `binding_ref`、`basis` 与具体 `error`。部分成功也可以是 HTTP 200，客户端必须检查 status，并保留草稿与精确引用。
 来源变化、并发修订或缺少必要确认返回 409；相同内容重试复用已保存依据。
@@ -438,7 +439,7 @@ v2 绑定保留 source_snapshot 和 confirmation；只有 channels/apply 重取�
 本格式直接替代旧分组格式及更早的文字说明，不提供旧字段、旧会话草稿或历史说明迁移。
 expected 字段使用 describe 的 `basis.component_revision` 与 `basis.description_ref`，首次后者为 null。
 保存返回精确 `description_ref`、`component_revision` 和 `created_revision`；内容相同可返回原修订。
-notes 复用 Config 版本资源，`schema_id=flowsql.operator-description.v1`，按具体组件关联。
+notes 复用 Config 版本资源，`schema_id=flowsql.operator-description`，按具体组件关联。
 读取精确 Config 内容时使用原 `/api/channels/config/resolve`，解码其 `content_base64`；执行契约继续使用语义 resolve。
 
 统一 describe 和通道保存的 timeout_ms 默认 5000，范围 1～30000。描述读取的各子调用共享一次总预算，
@@ -544,11 +545,11 @@ assert context['dictionary_fields']['exact_reference'] == check['dictionary_ref'
 
 ## 进程内消费与验证范围
 
-C++ 插件通过 IQuerier 查找 [IDataSemanticsRegistryV1](../src/framework/interfaces/idata_semantics_registry.h)，
+C++ 插件通过 IQuerier 查找 [IDataSemanticsRegistry](../src/framework/interfaces/idata_semantics_registry.h)，
 用 Resolve 读取精确引用。返回快照独立拥有规范 JSON 内容和摘要；失败清空输出，不返回上一次内容。
 消费者不接触 SQLite 句柄，不在逐行/逐包数据面查询注册表。
 
-C++ 对象说明调用通过独立 [IMetadataDescriptionV1](../src/framework/interfaces/imetadata_description.h) IID，
+C++ 对象说明调用通过独立 [IMetadataDescription](../src/framework/interfaces/imetadata_description.h) IID，
 提供 Describe、SaveChannel、SaveOperator JSON 信封接口；原执行 ABI 不变。跨进程仍走 HTTP。
 回归入口和依赖配置见[测试说明](testing.md)。本次对象说明验收使用隔离原生进程、临时 SQLite、
 DataFrame/CSV、保存的 Kafka 配置、真实 Python/C++ 组件、普通客户端和 Chromium，覆盖冲突、部分成功与重启。
@@ -610,7 +611,7 @@ Python 装饰器新增可选的 `data_contract`，接受完整 JSON 对象或 `{
 from flowsql import OperatorBase, register_operator
 
 CONTRACT = {
-    "schema_id": "flowsql.operator-data-contract.v1",
+    "schema_id": "flowsql.operator-data-contract",
     "title": "复制实际输入字段",
     "operator": {"category": "demo", "name": "identity", "version": "1"},
     "configuration": {
@@ -640,8 +641,9 @@ SELECT * FROM dataframe.input USING demo.identity INTO dataframe.identity_result
 通用检查不会根据 Schema 的 `default` 擅自填值。源码编辑提交读取详情时的 `expected_component_revision`；
 变更组件或声明不会覆盖运行任务已经取得的组件租约与精确版本。
 
-C++ 插件可在现有 ABI 导出之外提供可选的 `flowsql_operator_data_contract_v1(int index)`，
-返回随库携带的完整文档或精确引用；不改变旧执行虚表和 V2 descriptor 的 `contract_iid`。
+C++ 插件可在现有 ABI 导出之外提供可选的 `flowsql_operator_data_contract(int index)`，
+返回随库携带的完整文档或精确引用；数据声明与当前 `CppOperatorDescriptor.contract_iid` 标识的执行能力相互独立。
+插件只使用当前 descriptor/capability ABI，每个逻辑算子只有一个导出索引，宿主与插件须同步重建。
 可编译样例见 [C++ 契约输出算子](../src/tests/test_builtin/fixtures/fixture_contract_output.cpp)，
 `cmake -B build src` 后执行 `cmake --build build --target fixture_contract_output -j8`，
 将生成的 `build/output/libfixture_contract_output.so` 通过 C++ 插件页上传和激活。

@@ -22,30 +22,30 @@ using Bytes = std::vector<uint8_t>;
 
 namespace {
 
-class QueueCursor final : public npm::INpmTcpStreamCursorV1 {
+class QueueCursor final : public npm::INpmTcpStreamCursor {
  public:
     void Data(std::shared_ptr<Bytes> owner, std::optional<int64_t> time) {
-        npm::NpmTcpStreamEventV1 event;
-        event.kind = npm::NpmTcpStreamEventKindV1::kData;
+        npm::NpmTcpStreamEvent event;
+        event.kind = npm::NpmTcpStreamEventKind::kData;
         event.bytes = {owner->data(), owner->size()};
         event.end = owner->size();
         event.captured_at_ns = time;
         items_.push_back({event, std::move(owner)});
     }
     void Gap(bool capture_truncation = false) {
-        npm::NpmTcpStreamEventV1 event;
-        event.kind = npm::NpmTcpStreamEventKindV1::kGap;
+        npm::NpmTcpStreamEvent event;
+        event.kind = npm::NpmTcpStreamEventKind::kGap;
         event.includes_capture_truncation = capture_truncation;
-        event.gap_reason = npm::NpmTcpStreamGapReasonV1::kWaitExpired;
+        event.gap_reason = npm::NpmTcpStreamGapReason::kWaitExpired;
         items_.push_back({event, {}});
     }
-    void End(npm::NpmTcpStreamEndReasonV1 reason) {
-        npm::NpmTcpStreamEventV1 event;
-        event.kind = npm::NpmTcpStreamEventKindV1::kEnd;
+    void End(npm::NpmTcpStreamEndReason reason) {
+        npm::NpmTcpStreamEvent event;
+        event.kind = npm::NpmTcpStreamEventKind::kEnd;
         event.end_reason = reason;
         items_.push_back({event, {}});
     }
-    bool Peek(npm::NpmTcpStreamEventV1* event) const override {
+    bool Peek(npm::NpmTcpStreamEvent* event) const override {
         if (!event || index_ == items_.size()) return false;
         *event = items_[index_].event;
         return true;
@@ -53,8 +53,8 @@ class QueueCursor final : public npm::INpmTcpStreamCursorV1 {
     int Consume(uint64_t bytes) override {
         if (index_ == items_.size()) return EINVAL;
         const auto& event = items_[index_].event;
-        if ((event.kind == npm::NpmTcpStreamEventKindV1::kData && bytes != event.bytes.size) ||
-            (event.kind != npm::NpmTcpStreamEventKindV1::kData && bytes != 0))
+        if ((event.kind == npm::NpmTcpStreamEventKind::kData && bytes != event.bytes.size) ||
+            (event.kind != npm::NpmTcpStreamEventKind::kData && bytes != 0))
             return EINVAL;
         items_[index_].owner.reset();
         ++index_;
@@ -64,7 +64,7 @@ class QueueCursor final : public npm::INpmTcpStreamCursorV1 {
 
  private:
     struct Item {
-        npm::NpmTcpStreamEventV1 event;
+        npm::NpmTcpStreamEvent event;
         std::shared_ptr<Bytes> owner;
     };
     std::vector<Item> items_;
@@ -99,9 +99,9 @@ Bytes Frame(const Bytes& message) {
     return frame;
 }
 
-npm::NpmTcpStreamContextV1 Context(npm::NpmSessionView* session, Direction direction, npm::NpmTcpStreamOriginV1 origin,
-                                   int64_t observed_at_ns, bool final_drain = false) {
-    npm::NpmTcpStreamContextV1 context;
+npm::NpmTcpStreamContext Context(npm::NpmSessionView* session, Direction direction, npm::NpmTcpStreamOrigin origin,
+                                 int64_t observed_at_ns, bool final_drain = false) {
+    npm::NpmTcpStreamContext context;
     context.session = session;
     context.direction = direction;
     context.origin = origin;
@@ -110,45 +110,45 @@ npm::NpmTcpStreamContextV1 Context(npm::NpmSessionView* session, Direction direc
     return context;
 }
 
-void Deliver(npm::NpmDnsTcpFramerV1* framer, npm::NpmSessionView* session, Direction direction,
-             npm::NpmTcpStreamOriginV1 origin, int64_t observed_at_ns, QueueCursor* cursor,
-             std::vector<npm::NpmDnsUdpResultV1>* rows, bool final_drain = false) {
+void Deliver(npm::NpmDnsTcpFramer* framer, npm::NpmSessionView* session, Direction direction,
+             npm::NpmTcpStreamOrigin origin, int64_t observed_at_ns, QueueCursor* cursor,
+             std::vector<npm::NpmDnsUdpResult>* rows, bool final_drain = false) {
     assert(framer->OnReadable(Context(session, direction, origin, observed_at_ns, final_drain), *cursor, rows) == 0);
     assert(cursor->Empty());
 }
 
 void TestSplitMultipleFramesAndBorrowedOwners() {
-    npm::NpmDnsUdpTrackerV1 transactions({{1001}, 5'000'000'000, 256});
-    npm::NpmDnsTcpFramerV1 framer(&transactions);
+    npm::NpmDnsUdpTracker transactions({{1001}, 5'000'000'000, 256});
+    npm::NpmDnsTcpFramer framer(&transactions);
     npm::NpmSessionView session;
     session.session_id = 7;
-    std::vector<npm::NpmDnsUdpResultV1> rows;
+    std::vector<npm::NpmDnsUdpResult> rows;
     const auto query = Frame(Message(3));
     auto first = std::make_shared<Bytes>(query.begin(), query.begin() + 1);
     std::weak_ptr<Bytes> first_weak = first;
     QueueCursor cursor;
     cursor.Data(first, 100);
     first.reset();
-    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 100, &cursor, &rows);
+    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 100, &cursor, &rows);
     assert(first_weak.expired() && transactions.PendingCount(7) == 0);
     cursor = QueueCursor{};
     auto second = std::make_shared<Bytes>(query.begin() + 1, query.begin() + 5);
     std::weak_ptr<Bytes> second_weak = second;
     cursor.Data(second, 110);
     second.reset();
-    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 110, &cursor, &rows);
+    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 110, &cursor, &rows);
     assert(second_weak.expired() && rows.empty());
     cursor = QueueCursor{};
     auto rest = std::make_shared<Bytes>(query.begin() + 5, query.end());
     std::weak_ptr<Bytes> rest_weak = rest;
     cursor.Data(rest, 120);
     rest.reset();
-    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 120, &cursor, &rows);
+    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 120, &cursor, &rows);
     assert(rest_weak.expired() && transactions.PendingCount(7) == 1);
     const auto response = Frame(Message(3, true));
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(response), 200);
-    Deliver(&framer, &session, Direction::kBToA, npm::NpmTcpStreamOriginV1::kSyn, 200, &cursor, &rows);
+    Deliver(&framer, &session, Direction::kBToA, npm::NpmTcpStreamOrigin::kSyn, 200, &cursor, &rows);
     assert(rows.size() == 1 && rows[0].outcome == "matched" && rows[0].query_at_ns == 120 &&
            rows[0].response_at_ns == 200 && rows[0].latency_ns == 80);
     assert(framer.ActiveDirections() == 2);
@@ -158,25 +158,25 @@ void TestSplitMultipleFramesAndBorrowedOwners() {
     two_queries.insert(two_queries.end(), other.begin(), other.end());
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(two_queries), 210);
-    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 210, &cursor, &rows);
+    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 210, &cursor, &rows);
     assert(transactions.PendingCount(7) == 2);
     auto two_responses = Frame(Message(4, true));
     other = Frame(Message(5, true));
     two_responses.insert(two_responses.end(), other.begin(), other.end());
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(two_responses), 230);
-    Deliver(&framer, &session, Direction::kBToA, npm::NpmTcpStreamOriginV1::kSyn, 230, &cursor, &rows);
+    Deliver(&framer, &session, Direction::kBToA, npm::NpmTcpStreamOrigin::kSyn, 230, &cursor, &rows);
     assert(rows.size() == 3 && rows[1].dns_id == 4 && rows[2].dns_id == 5);
     assert(rows[1].latency_ns == 20 && rows[2].latency_ns == 20);
 }
 
 void TestSegmentationInvariantAndMissingTime() {
     const auto run = [](bool split) {
-        npm::NpmDnsUdpTrackerV1 transactions({{1001}, 5'000'000'000, 256});
-        npm::NpmDnsTcpFramerV1 framer(&transactions);
+        npm::NpmDnsUdpTracker transactions({{1001}, 5'000'000'000, 256});
+        npm::NpmDnsTcpFramer framer(&transactions);
         npm::NpmSessionView session;
         session.session_id = 8;
-        std::vector<npm::NpmDnsUdpResultV1> rows;
+        std::vector<npm::NpmDnsUdpResult> rows;
         const auto query = Frame(Message(17));
         const auto response = Frame(Message(17, true));
         if (split) {
@@ -185,22 +185,22 @@ void TestSegmentationInvariantAndMissingTime() {
                 cursor.Data(std::make_shared<Bytes>(query.begin() + position,
                                                     query.begin() + std::min(query.size(), position + 3)),
                             100);
-                Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 100, &cursor, &rows);
+                Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 100, &cursor, &rows);
             }
             for (size_t position = 0; position < response.size(); position += 4) {
                 QueueCursor cursor;
                 cursor.Data(std::make_shared<Bytes>(response.begin() + position,
                                                     response.begin() + std::min(response.size(), position + 4)),
                             160);
-                Deliver(&framer, &session, Direction::kBToA, npm::NpmTcpStreamOriginV1::kSyn, 160, &cursor, &rows);
+                Deliver(&framer, &session, Direction::kBToA, npm::NpmTcpStreamOrigin::kSyn, 160, &cursor, &rows);
             }
         } else {
             QueueCursor cursor;
             cursor.Data(std::make_shared<Bytes>(query), 100);
-            Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 100, &cursor, &rows);
+            Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 100, &cursor, &rows);
             cursor = QueueCursor{};
             cursor.Data(std::make_shared<Bytes>(response), 160);
-            Deliver(&framer, &session, Direction::kBToA, npm::NpmTcpStreamOriginV1::kSyn, 160, &cursor, &rows);
+            Deliver(&framer, &session, Direction::kBToA, npm::NpmTcpStreamOrigin::kSyn, 160, &cursor, &rows);
         }
         return rows;
     };
@@ -211,53 +211,53 @@ void TestSegmentationInvariantAndMissingTime() {
     assert(whole[0].outcome == sliced[0].outcome && whole[0].latency_ns == sliced[0].latency_ns);
     assert(whole[0].qname == sliced[0].qname && whole[0].dns_id == sliced[0].dns_id);
 
-    npm::NpmDnsUdpTrackerV1 transactions({{1001}, 5'000'000'000, 256});
-    npm::NpmDnsTcpFramerV1 framer(&transactions);
+    npm::NpmDnsUdpTracker transactions({{1001}, 5'000'000'000, 256});
+    npm::NpmDnsTcpFramer framer(&transactions);
     npm::NpmSessionView session;
     session.session_id = 9;
-    std::vector<npm::NpmDnsUdpResultV1> rows;
+    std::vector<npm::NpmDnsUdpResult> rows;
     QueueCursor cursor;
     const auto query = Frame(Message(18));
     cursor.Data(std::make_shared<Bytes>(query.begin(), query.begin() + 1), std::nullopt);
-    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 50, &cursor, &rows);
+    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 50, &cursor, &rows);
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(query.begin() + 1, query.end()), 100);
-    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 100, &cursor, &rows);
+    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 100, &cursor, &rows);
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(Frame(Message(18, true))), 150);
-    Deliver(&framer, &session, Direction::kBToA, npm::NpmTcpStreamOriginV1::kSyn, 150, &cursor, &rows);
+    Deliver(&framer, &session, Direction::kBToA, npm::NpmTcpStreamOrigin::kSyn, 150, &cursor, &rows);
     assert(rows.size() == 1 && rows[0].outcome == "matched" && !rows[0].query_at_ns && !rows[0].latency_ns &&
            rows[0].response_at_ns == 150);
 }
 
 void TestGapMidstreamEndAndSessionLifecycle() {
-    npm::NpmDnsUdpTrackerV1 transactions({{1001}, 5'000'000'000, 256});
-    npm::NpmDnsTcpFramerV1 framer(&transactions);
+    npm::NpmDnsUdpTracker transactions({{1001}, 5'000'000'000, 256});
+    npm::NpmDnsTcpFramer framer(&transactions);
     npm::NpmSessionView first;
     first.session_id = 10;
-    std::vector<npm::NpmDnsUdpResultV1> rows;
+    std::vector<npm::NpmDnsUdpResult> rows;
     QueueCursor cursor;
     cursor.Data(std::make_shared<Bytes>(Frame(Message(1))), 100);
-    Deliver(&framer, &first, Direction::kAToB, npm::NpmTcpStreamOriginV1::kMidstream, 100, &cursor, &rows);
+    Deliver(&framer, &first, Direction::kAToB, npm::NpmTcpStreamOrigin::kMidstream, 100, &cursor, &rows);
     assert(rows.empty() && transactions.PendingCount(10) == 0);
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(Frame(Message(2, true))), 110);
-    Deliver(&framer, &first, Direction::kBToA, npm::NpmTcpStreamOriginV1::kSyn, 110, &cursor, &rows);
+    Deliver(&framer, &first, Direction::kBToA, npm::NpmTcpStreamOrigin::kSyn, 110, &cursor, &rows);
     assert(rows.size() == 1 && rows[0].outcome == "response_only");
 
     npm::NpmSessionView second;
     second.session_id = 11;
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(Frame(Message(3))), 120);
-    Deliver(&framer, &second, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 120, &cursor, &rows);
+    Deliver(&framer, &second, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 120, &cursor, &rows);
     assert(transactions.PendingCount(11) == 1);
     cursor = QueueCursor{};
-    cursor.End(npm::NpmTcpStreamEndReasonV1::kFin);
-    Deliver(&framer, &second, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 125, &cursor, &rows, true);
+    cursor.End(npm::NpmTcpStreamEndReason::kFin);
+    Deliver(&framer, &second, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 125, &cursor, &rows, true);
     assert(transactions.PendingCount(11) == 1 && rows.size() == 1);
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(Frame(Message(3, true))), 130);
-    Deliver(&framer, &second, Direction::kBToA, npm::NpmTcpStreamOriginV1::kSyn, 130, &cursor, &rows);
+    Deliver(&framer, &second, Direction::kBToA, npm::NpmTcpStreamOrigin::kSyn, 130, &cursor, &rows);
     assert(rows.size() == 2 && rows.back().outcome == "matched" && rows.back().latency_ns == 10);
     assert(framer.OnSessionEnd(11, 140, &rows) == 0 && rows.size() == 2);
     assert(framer.OnSessionEnd(11, 141, &rows) == 0 && rows.size() == 2);
@@ -266,14 +266,14 @@ void TestGapMidstreamEndAndSessionLifecycle() {
     third.session_id = 12;
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(Frame(Message(4))), 150);
-    Deliver(&framer, &third, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 150, &cursor, &rows);
+    Deliver(&framer, &third, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 150, &cursor, &rows);
     cursor = QueueCursor{};
     auto partial = Frame(Message(4, true));
     cursor.Data(std::make_shared<Bytes>(partial.begin(), partial.begin() + 5), 160);
     cursor.Gap(true);
     cursor.Data(std::make_shared<Bytes>(partial), 170);
-    cursor.End(npm::NpmTcpStreamEndReasonV1::kReset);
-    Deliver(&framer, &third, Direction::kBToA, npm::NpmTcpStreamOriginV1::kSyn, 170, &cursor, &rows, true);
+    cursor.End(npm::NpmTcpStreamEndReason::kReset);
+    Deliver(&framer, &third, Direction::kBToA, npm::NpmTcpStreamOrigin::kSyn, 170, &cursor, &rows, true);
     assert(rows.size() == 3 && rows.back().outcome == "query_only" &&
            rows.back().incomplete_reason == "response_path_gap");
     assert(transactions.PendingCount(12) == 0);
@@ -283,10 +283,10 @@ void TestGapMidstreamEndAndSessionLifecycle() {
     fourth.session_id = 13;
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(Frame(Message(5))), 200);
-    Deliver(&framer, &fourth, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 200, &cursor, &rows);
+    Deliver(&framer, &fourth, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 200, &cursor, &rows);
     cursor = QueueCursor{};
-    cursor.End(npm::NpmTcpStreamEndReasonV1::kSessionEnd);
-    Deliver(&framer, &fourth, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 210, &cursor, &rows, true);
+    cursor.End(npm::NpmTcpStreamEndReason::kSessionEnd);
+    Deliver(&framer, &fourth, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 210, &cursor, &rows, true);
     assert(transactions.PendingCount(13) == 1 && rows.size() == 3);
     assert(framer.OnSessionEnd(13, 220, &rows) == 0);
     assert(rows.size() == 4 && rows.back().outcome == "query_only" && rows.back().incomplete_reason == "session_end");
@@ -296,71 +296,71 @@ void TestGapMidstreamEndAndSessionLifecycle() {
     reuse.session_id = 14;
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(Frame(Message(5, true))), 240);
-    Deliver(&framer, &reuse, Direction::kBToA, npm::NpmTcpStreamOriginV1::kSyn, 240, &cursor, &rows);
+    Deliver(&framer, &reuse, Direction::kBToA, npm::NpmTcpStreamOrigin::kSyn, 240, &cursor, &rows);
     assert(rows.back().outcome == "response_only" && !rows.back().latency_ns);
 
     npm::NpmSessionView bidirectional;
     bidirectional.session_id = 15;
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(Frame(Message(6))), 250);
-    Deliver(&framer, &bidirectional, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 250, &cursor, &rows);
+    Deliver(&framer, &bidirectional, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 250, &cursor, &rows);
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(Frame(Message(7))), 260);
     cursor.Gap();
-    cursor.End(npm::NpmTcpStreamEndReasonV1::kReset);
-    Deliver(&framer, &bidirectional, Direction::kBToA, npm::NpmTcpStreamOriginV1::kSyn, 270, &cursor, &rows, true);
+    cursor.End(npm::NpmTcpStreamEndReason::kReset);
+    Deliver(&framer, &bidirectional, Direction::kBToA, npm::NpmTcpStreamOrigin::kSyn, 270, &cursor, &rows, true);
     assert(rows.back().outcome == "query_only" && rows.back().dns_id == 6 &&
            rows.back().incomplete_reason == "response_path_gap");
     assert(transactions.PendingCount(15) == 1);
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(Frame(Message(7, true))), 280);
-    Deliver(&framer, &bidirectional, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 280, &cursor, &rows);
+    Deliver(&framer, &bidirectional, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 280, &cursor, &rows);
     assert(rows.back().outcome == "matched" && rows.back().dns_id == 7);
     assert(framer.OnSessionEnd(15, 290, &rows) == 0 && transactions.PendingCount(15) == 0);
 }
 
 void TestInvalidLengthNeverResynchronizes() {
-    npm::NpmDnsUdpTrackerV1 transactions({{1001}, 5'000'000'000, 256});
-    npm::NpmDnsTcpFramerV1 framer(&transactions);
+    npm::NpmDnsUdpTracker transactions({{1001}, 5'000'000'000, 256});
+    npm::NpmDnsTcpFramer framer(&transactions);
     npm::NpmSessionView session;
     session.session_id = 20;
-    std::vector<npm::NpmDnsUdpResultV1> rows;
+    std::vector<npm::NpmDnsUdpResult> rows;
     Bytes input = {0, 0};
     const auto valid = Frame(Message(1));
     input.insert(input.end(), valid.begin(), valid.end());
     QueueCursor cursor;
     cursor.Data(std::make_shared<Bytes>(input), 100);
-    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 100, &cursor, &rows);
+    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 100, &cursor, &rows);
     assert(rows.empty() && transactions.PendingCount(20) == 0);
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(valid), 110);
-    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 110, &cursor, &rows);
+    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 110, &cursor, &rows);
     assert(transactions.PendingCount(20) == 0);
 }
 
-class StreamBridge final : public npm::INpmTcpStreamConsumerV1 {
+class StreamBridge final : public npm::INpmTcpStreamConsumer {
  public:
-    StreamBridge(npm::NpmDnsTcpFramerV1* framer, std::vector<npm::NpmDnsUdpResultV1>* rows)
+    StreamBridge(npm::NpmDnsTcpFramer* framer, std::vector<npm::NpmDnsUdpResult>* rows)
         : framer_(framer), rows_(rows) {}
-    int OnTcpStreamReadable(const npm::NpmTcpStreamContextV1& context, npm::INpmTcpStreamCursorV1& cursor,
-                            npm::INpmResultEmitterV1&) override {
+    int OnTcpStreamReadable(const npm::NpmTcpStreamContext& context, npm::INpmTcpStreamCursor& cursor,
+                            npm::INpmResultEmitter&) override {
         return framer_->OnReadable(context, cursor, rows_);
     }
 
  private:
-    npm::NpmDnsTcpFramerV1* framer_;
-    std::vector<npm::NpmDnsUdpResultV1>* rows_;
+    npm::NpmDnsTcpFramer* framer_;
+    std::vector<npm::NpmDnsUdpResult>* rows_;
 };
 
-class UnusedEmitter final : public npm::INpmResultEmitterV1 {
+class UnusedEmitter final : public npm::INpmResultEmitter {
  public:
     int Emit(std::string_view, const arrow::RecordBatch&) override { return EINVAL; }
 };
 
 void TestActualSharedStreamAcrossPushes() {
-    npm::NpmDnsUdpTrackerV1 transactions({{1001}, 5'000'000'000, 256});
-    npm::NpmDnsTcpFramerV1 framer(&transactions);
-    std::vector<npm::NpmDnsUdpResultV1> rows;
+    npm::NpmDnsUdpTracker transactions({{1001}, 5'000'000'000, 256});
+    npm::NpmDnsTcpFramer framer(&transactions);
+    std::vector<npm::NpmDnsUdpResult> rows;
     StreamBridge bridge(&framer, &rows);
     UnusedEmitter emitter;
     auto budget = std::make_shared<npm::NpmTaskBudget>(npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline));
@@ -406,7 +406,7 @@ void TestActualSharedStreamAcrossPushes() {
     push(response.get(), Direction::kBToA, 201, answer, false, 180);
     assert(rows.size() == 1 && rows[0].outcome == "matched" && rows[0].query_at_ns == 120 &&
            rows[0].response_at_ns == 180 && rows[0].latency_ns == 60);
-    assert(response->End(session, npm::NpmTcpStreamEndReasonV1::kSessionEnd, npm::NpmSessionEndReason::kEof, 190) ==
+    assert(response->End(session, npm::NpmTcpStreamEndReason::kSessionEnd, npm::NpmSessionEndReason::kEof, 190) ==
            npm::NpmTcpStreamError::kNone);
     assert(framer.OnSessionEnd(30, 190, &rows) == 0 && rows.size() == 1);
     request.reset();
@@ -432,22 +432,22 @@ void TestFrameBudgetFailureAndRelease() {
         uint64_t limit = 256;
     };
     auto budget = std::make_shared<Budget>();
-    npm::NpmDnsUdpTrackerV1 transactions({{1001}, 5'000'000'000, 256});
-    npm::NpmDnsTcpFramerV1 framer(&transactions, budget);
+    npm::NpmDnsUdpTracker transactions({{1001}, 5'000'000'000, 256});
+    npm::NpmDnsTcpFramer framer(&transactions, budget);
     npm::NpmSessionView session;
     session.session_id = 31;
-    std::vector<npm::NpmDnsUdpResultV1> rows;
+    std::vector<npm::NpmDnsUdpResult> rows;
     QueueCursor cursor;
     cursor.Data(std::make_shared<Bytes>(Frame(Message(41))), 100);
-    assert(framer.OnReadable(Context(&session, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 100), cursor,
-                             &rows) == ENOSPC);
+    assert(framer.OnReadable(Context(&session, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 100), cursor, &rows) ==
+           ENOSPC);
     assert(budget->used == 256);
     framer.Abort();
     assert(budget->used == 0);
     budget->limit = 8192;
     cursor = QueueCursor{};
     cursor.Data(std::make_shared<Bytes>(Frame(Message(42))), 110);
-    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, 110, &cursor, &rows);
+    Deliver(&framer, &session, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, 110, &cursor, &rows);
     assert(budget->used == 256);
     assert(framer.OnSessionEnd(31, 120, &rows) == 0 && budget->used == 0);
     assert(rows.size() == 1 && rows[0].incomplete_reason == "session_end");

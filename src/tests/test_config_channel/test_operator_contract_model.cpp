@@ -20,7 +20,7 @@ int main() {
     assert(fd >= 0);
     close(fd);
     DataSemanticsRegistry store;
-    DataSemanticsErrorV1 e;
+    DataSemanticsError e;
     assert(store.Open(path, &e) == 0);
     SemanticsSaveResult out;
     SemanticsSaveRequest r{"operator_contract", "builtin.passthrough", Fixture("operator-contract-passthrough.json")};
@@ -71,7 +71,7 @@ int main() {
     d["outputs"][0]["context_semantics"]["metric_pointer"].SetString("/bad~2", d.GetAllocator());
     invalid.document_json = SemanticsJson(d);
     assert(store.Save(invalid, &out, &e) != 0 && e.code == "CONTRACT_INVALID");
-    invalid = {"operator_use", "fake", R"({"schema_id":"flowsql.operator-data-use.v1"})"};
+    invalid = {"operator_use", "fake", R"({"schema_id":"flowsql.operator-data-use"})"};
     assert(store.Save(invalid, &out, &e) != 0);
     std::string response;
     assert(
@@ -136,7 +136,7 @@ int main() {
     const std::string yaml_request =
         R"({"kind":"operator_contract","name":"builtin.passthrough","format":"yaml","content":)" +
         SemanticsJson(rapidjson::Value(
-            "schema_id: flowsql.operator-data-contract.v1\ntitle: imported\noperator: {category: builtin, name: "
+            "schema_id: flowsql.operator-data-contract\ntitle: imported\noperator: {category: builtin, name: "
             "passthrough, version: '1'}\nconfiguration: {invocation_schema: true, affects: {}}\ninputs: [{port_id: "
             "input, min_count: 1, max_count: 1, shape: dataframe, roles: []}]\noutputs: [{port_id: output, shape: "
             "dataframe, mode: unknown, rules: []}]\nlimitations: []\n")) +
@@ -152,7 +152,7 @@ int main() {
     assert(store.Save(invalid, &out, &e) != 0 && e.code == "CONTRACT_INVALID");
     store.Close();
     assert(store.Open(path, &e) == 0);
-    DataSemanticsSnapshotV1 snapshot;
+    DataSemanticsSnapshot snapshot;
     assert(store.Resolve("operator_contract.explore.baseliner@1", &snapshot, &e) == 0);
     assert(store.Resolve("operator_contract.explore.baseliner@latest", &snapshot, &e) != 0 && !snapshot.document_json);
     assert(store.Resolve("operator_contract.explore.baseliner@999", &snapshot, &e) != 0);

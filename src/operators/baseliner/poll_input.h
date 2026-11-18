@@ -9,25 +9,25 @@
 namespace flowsql::baseliner {
 // Serialized task-private reader. Unclosed target buckets remain at source; no premature observations.
 // Only a released progress-only window boundary advances input confirmation, independently of target durability.
-class PollInput final : public IBlockStreamChannel, public IBlockStreamInputProgressV1 {
+class PollInput final : public IBlockStreamChannel, public IBlockStreamInputProgress {
  public:
     ~PollInput() override { Close(); }
     int Initialize(ConfigSnapshot config, std::shared_ptr<IDatabaseChannel> source, std::string_view exact_source,
-                   const BlockInputProgressV1& restore = {}, const std::map<std::string, int64_t>& pending_starts = {},
+                   const BlockInputProgress& restore = {}, const std::map<std::string, int64_t>& pending_starts = {},
                    const std::map<std::string, std::string>& source_epochs = {});
     std::map<std::string, int64_t> PendingStarts() const;
     std::map<std::string, std::string> SourceEpochs() const;
     const char* Category() override { return "baseliner"; }
     const char* Name() override { return "poll"; }
     const char* Type() override { return ChannelType::kBlockStream; }
-    const char* Schema() override { return "baseline_observation_v1"; }
+    const char* Schema() override { return "baseline_observation"; }
     int Open() override { return opened_ ? 0 : -1; }
     int Close() override;
     bool IsOpened() const override { return opened_; }
     int Flush() override { return 0; }
     BlockPollEvent PollBlock(int timeout_ms = 100) override;
     int ReleaseBlock(const std::shared_ptr<arrow::RecordBatch>& block) override;
-    int ReadInputProgress(BlockInputProgressV1* output) const override;
+    int ReadInputProgress(BlockInputProgress* output) const override;
     void Cancel() override;
     bool IsFinished() const override { return cancelled_ || finished_; }
     const std::string& LastError() const { return error_; }
@@ -35,21 +35,21 @@ class PollInput final : public IBlockStreamChannel, public IBlockStreamInputProg
 
  private:
     struct DatasetState {
-        PublishedDatasetRequestV1 request;
+        PublishedDatasetRequest request;
         std::string epoch;
         int64_t next_bucket = 0;
         int64_t source_period_ns = 0;
-        BlockDatasetProgressV1 confirmed;
+        BlockDatasetProgress confirmed;
     };
     BlockPollEvent Fail(std::string error);
-    int Validate(size_t dataset, const std::string& position, PublishedDatasetProgressV1* output);
+    int Validate(size_t dataset, const std::string& position, PublishedDatasetProgress* output);
     ConfigSnapshot config_;
     std::shared_ptr<IDatabaseChannel> source_;
-    std::shared_ptr<IDatabasePublishedProgressReaderV1> progress_;
+    std::shared_ptr<IDatabasePublishedProgressReader> progress_;
     std::shared_ptr<SnapshotInput> cycle_;
     std::shared_ptr<SnapshotReader> selection_;
     std::vector<DatasetState> states_;
-    PublishedDatasetProgressV1 frozen_;
+    PublishedDatasetProgress frozen_;
     std::shared_ptr<arrow::RecordBatch> outstanding_;
     bool outstanding_boundary_ = false;
     bool progress_readable_ = false;

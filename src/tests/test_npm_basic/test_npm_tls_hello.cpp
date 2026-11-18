@@ -89,36 +89,36 @@ std::string Server(std::string extensions = {}, bool retry = false) {
 }
 
 void TestClientAndServer() {
-    using Error = npm::NpmTlsHelloErrorV1;
-    npm::NpmTlsHelloFactsV1 facts;
+    using Error = npm::NpmTlsHelloError;
+    npm::NpmTlsHelloFacts facts;
     auto client =
         Client(Ext(65000, "opaque") + Sni("example.com") + Alpn({"h2", "http/1.1"}) + Versions({0x0304, 0x0303}));
-    assert(npm::ParseNpmTlsHelloV1(1, client, 123, &facts) == Error::kNone);
+    assert(npm::ParseNpmTlsHello(1, client, 123, &facts) == Error::kNone);
     client.assign(client.size(), '\0');
     assert(facts.legacy_version == 0x0303 && facts.complete_at_ns == 123);
     assert(facts.sni == "example.com" && facts.offered_alpn == std::vector<std::string>({"h2", "http/1.1"}));
     assert(facts.offered_versions == std::vector<uint16_t>({0x0304, 0x0303}));
     std::string json;
-    assert(npm::EncodeNpmTlsAlpnJsonV1(facts.offered_alpn, &json) == Error::kNone);
+    assert(npm::EncodeNpmTlsAlpnJson(facts.offered_alpn, &json) == Error::kNone);
     assert(json == R"(["h2","http/1.1"])");
 
-    assert(npm::ParseNpmTlsHelloV1(1, Client(), std::nullopt, &facts) == Error::kNone);
+    assert(npm::ParseNpmTlsHello(1, Client(), std::nullopt, &facts) == Error::kNone);
     assert(!facts.sni && facts.offered_alpn.empty() && facts.offered_versions.empty() && !facts.complete_at_ns);
     auto server = Server(Ext(43, std::string("\x03\x04", 2)), true);
-    assert(npm::ParseNpmTlsHelloV1(2, server, 234, &facts) == Error::kNone);
+    assert(npm::ParseNpmTlsHello(2, server, 234, &facts) == Error::kNone);
     server.clear();
     assert(facts.hello_retry_request && facts.selected_version == 0x0304 && facts.cipher_suite == 0x1301);
     assert(facts.complete_at_ns == 234 && !facts.selected_alpn);
-    assert(npm::ParseNpmTlsHelloV1(2, Server(Alpn({"h2"})), 345, &facts) == Error::kNone);
+    assert(npm::ParseNpmTlsHello(2, Server(Alpn({"h2"})), 345, &facts) == Error::kNone);
     assert(!facts.hello_retry_request && facts.selected_alpn == "h2" && !facts.selected_version);
 }
 
 void TestErrorsAndBounds() {
-    using Error = npm::NpmTlsHelloErrorV1;
-    npm::NpmTlsHelloFactsV1 facts;
+    using Error = npm::NpmTlsHelloError;
+    npm::NpmTlsHelloFacts facts;
     facts.sni = "sentinel";
     const auto reject = [&](uint8_t type, const std::string& body, Error error) {
-        assert(npm::ParseNpmTlsHelloV1(type, body, 456, &facts) == error);
+        assert(npm::ParseNpmTlsHello(type, body, 456, &facts) == error);
         assert(facts.sni == "sentinel");
     };
     reject(3, Client(), Error::kMalformed);
@@ -136,12 +136,12 @@ void TestErrorsAndBounds() {
     reject(2, Server(Ext(0, "invalid")), Error::kMalformed);
     reject(2, Server(Ext(43, std::string("\x03", 1))), Error::kMalformed);
     reject(1, Client(Alpn({std::string(100, static_cast<char>(0x80))})), Error::kLimit);
-    assert(npm::ParseNpmTlsHelloV1(1, Client(), 0, nullptr) == Error::kInvalidOutput);
+    assert(npm::ParseNpmTlsHello(1, Client(), 0, nullptr) == Error::kInvalidOutput);
 
     std::string encoded = "sentinel";
-    assert(npm::EncodeNpmTlsAlpnJsonV1({"x\"\\", std::string("\x00\xff", 2)}, &encoded) == Error::kNone);
+    assert(npm::EncodeNpmTlsAlpnJson({"x\"\\", std::string("\x00\xff", 2)}, &encoded) == Error::kNone);
     assert(encoded == "[\"x\\\"\\\\\",\"\\u0000\\u00ff\"]");
-    assert(npm::EncodeNpmTlsAlpnJsonV1({std::string(100, static_cast<char>(0x80))}, &encoded) == Error::kLimit);
+    assert(npm::EncodeNpmTlsAlpnJson({std::string(100, static_cast<char>(0x80))}, &encoded) == Error::kLimit);
     assert(encoded == "[\"x\\\"\\\\\",\"\\u0000\\u00ff\"]");
 }
 

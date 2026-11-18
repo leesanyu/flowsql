@@ -27,9 +27,7 @@ namespace baseline {
 
 class TaskRegistry;
 
-class BaselineRelationTask final : public IBaselineRelationTask,
-                                   public IBaselineRelationEvaluationV1,
-                                   public BaselineTaskBase {
+class BaselineRelationTask final : public IBaselineRelationTask, public BaselineTaskBase {
     friend class CheckpointAccess;
     friend struct checkpoint::Fields<BaselineRelationTask>;
 
@@ -48,10 +46,8 @@ class BaselineRelationTask final : public IBaselineRelationTask,
                                                     BaselineSerializationFormat format) const override;
     BaselineStatus Close() override;
 
-    RelationRollingResult SubmitObservation(const RelationRollingObservation& obs,
-                                            const RelationRollingSubmitOptions& options) override;
-    BaselineRelationEvaluationResultV1 SubmitObservationWithReadiness(
-        const RelationRollingObservation& obs, const RelationRollingSubmitOptions& options) override;
+    BaselineRelationEvaluationResult SubmitObservation(const RelationRollingObservation& obs,
+                                                       const RelationRollingSubmitOptions& options) override;
     RollingPrediction PredictRoutedSummary(const RelationRoutedSummaryQuery& query, int64_t bucket_id) const override;
     BaselineSerializationResult QueryRoutedSummarySnapshot(const RelationRoutedSummaryQuery& query,
                                                            BaselineSerializationFormat format) const override;
@@ -83,8 +79,8 @@ class BaselineRelationTask final : public IBaselineRelationTask,
     };
 
     void OnClosing() override;
-    BaselineStatus DoReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope) override;
-    BaselineStateUsageV1 DoQueryStateUsage() const override;
+    BaselineStatus DoReleaseIdentity(std::string_view key, BaselineStateReleaseScope scope) override;
+    BaselineStateUsage DoQueryStateUsage() const override;
     bool HasIdentityCapacity(const std::string& source, bool include_model) const;
     bool SeedsFitRuntimeLimits(const BootstrapSeedStore& seeds) const;
     ManagedSourceRuntimeIndex& TrackManagedSource(const std::string& source);

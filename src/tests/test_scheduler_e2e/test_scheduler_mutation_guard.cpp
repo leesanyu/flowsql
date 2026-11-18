@@ -90,11 +90,11 @@ enum class DomainResolverBehavior {
     kError,
 };
 
-class DomainResolverFixture final : public IFilterDomainResolverV1 {
+class DomainResolverFixture final : public IFilterDomainResolver {
  public:
     explicit DomainResolverFixture(DomainResolverBehavior behavior) : behavior_(behavior) {}
 
-    int Resolve(const FilterDomainResolveRequestV1& request, FilterDomainResolveResultV1* result) const override {
+    int Resolve(const FilterDomainResolveRequest& request, FilterDomainResolveResult* result) const override {
         ++calls;
         if (result) *result = {};
         if (!result || !request.expression) return EINVAL;
@@ -118,7 +118,7 @@ class DomainResolverFixture final : public IFilterDomainResolverV1 {
     }
 
     mutable int calls = 0;
-    mutable FilterDomainTargetKindV1 observed_kind = FilterDomainTargetKindV1::kTransform;
+    mutable FilterDomainTargetKind observed_kind = FilterDomainTargetKind::kTransform;
     mutable std::string observed_category;
     mutable std::string observed_name;
     mutable std::shared_ptr<arrow::Schema> observed_schema;
@@ -277,14 +277,14 @@ enum class ReaderFactoryBehavior {
     kNullSuccess,
 };
 
-class BlockReaderFactoryFixture final : public IBlockStreamReaderFactoryV1 {
+class BlockReaderFactoryFixture final : public IBlockStreamReaderFactory {
  public:
     BlockReaderFactoryFixture(ReaderFactoryBehavior behavior, IBlockStreamChannel* reader = nullptr)
         : behavior_(behavior), reader_(reader) {}
 
     void SetReader(IBlockStreamChannel* reader) { reader_ = reader; }
 
-    int CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** reader) override {
+    int CreateReader(const BlockStreamReaderConfig& config, IBlockStreamChannel** reader) override {
         ++create_calls;
         if (!reader) return EINVAL;
         *reader = nullptr;
@@ -381,14 +381,14 @@ struct ReleasedTransformTaskSnapshot {
     std::shared_ptr<arrow::Schema> opened_input_schema;
 };
 
-class SchedulerTransformTask final : public IBlockTransformTaskV2 {
+class SchedulerTransformTask final : public IBlockTransformTask, public IBlockTransformTimeDrivenTask {
  public:
     SchedulerTransformTask(std::shared_ptr<arrow::Schema> output_schema,
                            std::vector<std::shared_ptr<arrow::RecordBatch>> process_outputs, bool passthrough,
                            std::vector<std::shared_ptr<arrow::RecordBatch>> flush_outputs, int process_result,
                            int flush_result, std::string event_label, std::vector<std::string>* events,
                            bool time_armed = false, std::vector<std::shared_ptr<arrow::RecordBatch>> time_outputs = {},
-                           int time_result = static_cast<int>(BlockTransformStatusV1::kContinue))
+                           int time_result = static_cast<int>(BlockTransformStatus::kContinue))
         : output_schema_(std::move(output_schema)),
           process_outputs_(std::move(process_outputs)),
           passthrough_(passthrough),
@@ -411,7 +411,7 @@ class SchedulerTransformTask final : public IBlockTransformTaskV2 {
     }
 
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t,
-                     std::vector<BlockTransformOutputV1>* outputs) override {
+                     std::vector<BlockTransformOutput>* outputs) override {
         ++process_calls;
         if (!input || !outputs || !outputs->empty()) return EINVAL;
         process_input_rows = input->num_rows();
@@ -428,7 +428,7 @@ class SchedulerTransformTask final : public IBlockTransformTaskV2 {
         return process_result_;
     }
 
-    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+    int Flush(std::vector<BlockTransformOutput>* outputs) override {
         ++flush_calls;
         RecordEvent("flush");
         if (!outputs || !outputs->empty()) return EINVAL;
@@ -445,28 +445,28 @@ class SchedulerTransformTask final : public IBlockTransformTaskV2 {
     }
     std::string LastError() const override { return "scheduler transform task failed"; }
 
-    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override {
+    int GetTimeDriveState(BlockTransformTimeDriveState* state) override {
         ++state_calls;
         RecordEvent("state");
-        if (open_calls != 1 || !state || state->struct_size < kBlockTransformTimeDriveStateV1Size ||
-            state->contract_version != kBlockTransformTimeDriveVersionV1) {
+        if (open_calls != 1 || !state || state->struct_size < kBlockTransformTimeDriveStateSize ||
+            state->contract_version != kBlockTransformTimeDriveVersion) {
             return EINVAL;
         }
-        BlockTransformTimeDriveStateV1 next{};
-        next.struct_size = kBlockTransformTimeDriveStateV1Size;
-        next.contract_version = kBlockTransformTimeDriveVersionV1;
+        BlockTransformTimeDriveState next{};
+        next.struct_size = kBlockTransformTimeDriveStateSize;
+        next.contract_version = kBlockTransformTimeDriveVersion;
         next.armed = time_armed_ ? 1 : 0;
         next.deadline_ns = 0;
         *state = next;
         return 0;
     }
 
-    int OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* outputs) override {
+    int OnTime(const BlockTransformTimeEvent& event, std::vector<BlockTransformOutput>* outputs) override {
         ++time_calls;
         RecordEvent("time");
         if (open_calls != 1 || !time_armed_ || !outputs || !outputs->empty() ||
-            event.struct_size < kBlockTransformTimeEventV1Size ||
-            event.contract_version != kBlockTransformTimeDriveVersionV1) {
+            event.struct_size < kBlockTransformTimeEventSize ||
+            event.contract_version != kBlockTransformTimeDriveVersion) {
             return EINVAL;
         }
         for (const auto& output : time_outputs_) outputs->push_back({output, 789});
@@ -493,16 +493,16 @@ class SchedulerTransformTask final : public IBlockTransformTaskV2 {
     std::vector<std::shared_ptr<arrow::RecordBatch>> process_outputs_;
     bool passthrough_ = false;
     std::vector<std::shared_ptr<arrow::RecordBatch>> flush_outputs_;
-    int process_result_ = static_cast<int>(BlockTransformStatusV1::kContinue);
+    int process_result_ = static_cast<int>(BlockTransformStatus::kContinue);
     int flush_result_ = 0;
     std::string event_label_;
     std::vector<std::string>* events_ = nullptr;
     bool time_armed_ = false;
     std::vector<std::shared_ptr<arrow::RecordBatch>> time_outputs_;
-    int time_result_ = static_cast<int>(BlockTransformStatusV1::kContinue);
+    int time_result_ = static_cast<int>(BlockTransformStatus::kContinue);
 };
 
-class SchedulerTransformProvider final : public IBlockTransformOperatorV1, public IFilterPushdownV1 {
+class SchedulerTransformProvider final : public IBlockTransformOperator, public IFilterPushdown {
  public:
     SchedulerTransformProvider(std::shared_ptr<arrow::Schema> output_schema,
                                std::shared_ptr<arrow::RecordBatch> output_batch, std::string name = "stage_transform")
@@ -512,7 +512,7 @@ class SchedulerTransformProvider final : public IBlockTransformOperatorV1, publi
     std::string Name() const override { return name_; }
     std::string Description() const override { return "scheduler transform test provider"; }
 
-    int CreateTask(const BlockTransformTaskConfigV1& config, IBlockTransformTaskV1** task) override {
+    int CreateTask(const BlockTransformTaskConfig& config, IBlockTransformTask** task) override {
         ++create_calls;
         if (require_dynamic_lifetime && dynamic_lifetime.expired()) ++lifetime_violations;
         if (!task || !config.task_id || !config.with_params_json || !config.pushed_filter_plan_json) {
@@ -531,7 +531,7 @@ class SchedulerTransformProvider final : public IBlockTransformOperatorV1, publi
         return 0;
     }
 
-    void ReleaseTask(IBlockTransformTaskV1* task) override {
+    void ReleaseTask(IBlockTransformTask* task) override {
         if (require_dynamic_lifetime && dynamic_lifetime.expired()) ++lifetime_violations;
         auto* concrete = dynamic_cast<SchedulerTransformTask*>(task);
         ASSERT_TRUE(concrete != nullptr);
@@ -551,9 +551,9 @@ class SchedulerTransformProvider final : public IBlockTransformOperatorV1, publi
         --live_tasks;
     }
 
-    int EvaluatePushdown(const FilterPushdownRequestV1& request, FilterPushdownResultV1* result) const override {
+    int EvaluatePushdown(const FilterPushdownRequest& request, FilterPushdownResult* result) const override {
         ++pushdown_calls;
-        if (!result || request.target_kind != FilterPushdownTargetKindV1::kTransform || !request.target_category ||
+        if (!result || request.target_kind != FilterPushdownTargetKind::kTransform || !request.target_category ||
             !request.target_name || std::string(request.target_category) != Category() ||
             std::string(request.target_name) != Name()) {
             return ENOTSUP;
@@ -581,7 +581,7 @@ class SchedulerTransformProvider final : public IBlockTransformOperatorV1, publi
     std::vector<std::shared_ptr<arrow::RecordBatch>> configured_flush_outputs;
     bool passthrough = false;
     bool accept_first_candidate = true;
-    int process_result = static_cast<int>(BlockTransformStatusV1::kContinue);
+    int process_result = static_cast<int>(BlockTransformStatus::kContinue);
     int flush_result = 0;
     std::string event_label;
     std::vector<std::string>* events = nullptr;
@@ -595,7 +595,7 @@ class SchedulerTransformProvider final : public IBlockTransformOperatorV1, publi
     std::string name_;
 };
 
-class SchedulerTimeTransformProvider final : public IBlockTransformOperatorV2 {
+class SchedulerTimeTransformProvider final : public IBlockTransformOperator {
  public:
     SchedulerTimeTransformProvider(std::shared_ptr<arrow::Schema> output_schema,
                                    std::shared_ptr<arrow::RecordBatch> time_output, std::string name = "time_transform")
@@ -605,13 +605,13 @@ class SchedulerTimeTransformProvider final : public IBlockTransformOperatorV2 {
     std::string Name() const override { return name_; }
     std::string Description() const override { return "scheduler time transform test provider"; }
 
-    int CreateTask(const BlockTransformTaskConfigV2& config, IBlockTransformTaskV2** task) override {
+    int CreateTask(const BlockTransformTaskConfig& config, IBlockTransformTask** task) override {
         ++create_calls;
         if (require_dynamic_lifetime && dynamic_lifetime.expired()) ++lifetime_violations;
         if (task) *task = nullptr;
-        if (!task || config.struct_size < kBlockTransformTaskConfigV2Size ||
-            config.contract_version != kBlockTransformContractVersionV2 || !config.task_id ||
-            !config.with_params_json || !config.pushed_filter_plan_json) {
+        if (!task || config.struct_size < kBlockTransformTaskConfigSize ||
+            config.contract_version != kBlockTransformContractVersion || !config.task_id || !config.with_params_json ||
+            !config.pushed_filter_plan_json) {
             return EINVAL;
         }
         config_struct_sizes.push_back(config.struct_size);
@@ -629,7 +629,7 @@ class SchedulerTimeTransformProvider final : public IBlockTransformOperatorV2 {
         return 0;
     }
 
-    void ReleaseTask(IBlockTransformTaskV2* task) override {
+    void ReleaseTask(IBlockTransformTask* task) override {
         if (require_dynamic_lifetime && dynamic_lifetime.expired()) ++lifetime_violations;
         auto* concrete = dynamic_cast<SchedulerTransformTask*>(task);
         ASSERT_TRUE(concrete != nullptr);
@@ -660,9 +660,9 @@ class SchedulerTimeTransformProvider final : public IBlockTransformOperatorV2 {
     int create_calls = 0;
     int release_calls = 0;
     int live_tasks = 0;
-    int process_result = static_cast<int>(BlockTransformStatusV1::kContinue);
+    int process_result = static_cast<int>(BlockTransformStatus::kContinue);
     int flush_result = 0;
-    int time_result = static_cast<int>(BlockTransformStatusV1::kStop);
+    int time_result = static_cast<int>(BlockTransformStatus::kStop);
     bool passthrough = false;
     bool time_armed = true;
     std::string event_label;
@@ -677,25 +677,25 @@ class SchedulerTimeTransformProvider final : public IBlockTransformOperatorV2 {
     std::string name_;
 };
 
-class DynamicBlockTransformRegistry final : public ICppOperatorPluginRegistryV1 {
+class DynamicBlockTransformRegistry final : public ICppOperatorPluginRegistry {
  public:
     explicit DynamicBlockTransformRegistry(SchedulerTransformProvider* provider) : provider_(provider) {}
     explicit DynamicBlockTransformRegistry(SchedulerTimeTransformProvider* provider) : time_provider_(provider) {}
 
     int Acquire(const char* category, const char* name, const Guid& contract_iid,
-                CppOperatorCapabilityLeaseV1* lease) override {
+                CppOperatorCapabilityLease* lease) override {
         ++acquire_calls;
         if (!lease) return EINVAL;
         *lease = {};
         if (!category || !name) return ENOENT;
 
         void* capability = nullptr;
-        if (provider_ && SameGuid(contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V1) && provider_->Category() == category &&
+        if (provider_ && SameGuid(contract_iid, IID_BLOCK_TRANSFORM_OPERATOR) && provider_->Category() == category &&
             provider_->Name() == name) {
-            capability = static_cast<IBlockTransformOperatorV1*>(provider_);
-        } else if (time_provider_ && SameGuid(contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V2) &&
+            capability = static_cast<IBlockTransformOperator*>(provider_);
+        } else if (time_provider_ && SameGuid(contract_iid, IID_BLOCK_TRANSFORM_OPERATOR) &&
                    time_provider_->Category() == category && time_provider_->Name() == name) {
-            capability = static_cast<IBlockTransformOperatorV2*>(time_provider_);
+            capability = static_cast<IBlockTransformOperator*>(time_provider_);
         } else {
             return ENOENT;
         }
@@ -737,7 +737,7 @@ class DynamicBlockTransformRegistry final : public ICppOperatorPluginRegistryV1 
     SchedulerTimeTransformProvider* time_provider_ = nullptr;
 };
 
-class SourceFilterPushdownFixture final : public IFilterPushdownV1 {
+class SourceFilterPushdownFixture final : public IFilterPushdown {
  public:
     enum class Behavior {
         kAcceptAll,
@@ -748,10 +748,10 @@ class SourceFilterPushdownFixture final : public IFilterPushdownV1 {
 
     explicit SourceFilterPushdownFixture(Behavior behavior) : behavior_(behavior) {}
 
-    int EvaluatePushdown(const FilterPushdownRequestV1& request, FilterPushdownResultV1* result) const override {
+    int EvaluatePushdown(const FilterPushdownRequest& request, FilterPushdownResult* result) const override {
         ++calls;
         if (result) *result = {};
-        if (!result || request.target_kind != FilterPushdownTargetKindV1::kSource || !request.target_category ||
+        if (!result || request.target_kind != FilterPushdownTargetKind::kSource || !request.target_category ||
             !request.target_name || std::string(request.target_category) != "pcapfile" ||
             std::string(request.target_name) != "input") {
             return ENOTSUP;
@@ -793,37 +793,31 @@ class BlockProviderQuerier final : public IQuerier {
         } else if (SameGuid(iid, IID_BLOCK_STREAM_OPERATOR)) {
             ++operator_traverse_calls;
             providers = &operators;
-        } else if (SameGuid(iid, IID_BLOCK_TRANSFORM_OPERATOR_V1)) {
+        } else if (SameGuid(iid, IID_BLOCK_TRANSFORM_OPERATOR)) {
             ++transform_traverse_calls;
             if (transform_traverse_return_code != 0) {
                 return transform_traverse_return_code;
             }
             providers = &transforms;
-        } else if (SameGuid(iid, IID_BLOCK_TRANSFORM_OPERATOR_V2)) {
-            ++time_transform_traverse_calls;
-            if (time_transform_traverse_return_code != 0) {
-                return time_transform_traverse_return_code;
-            }
-            providers = &time_transforms;
-        } else if (SameGuid(iid, IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1)) {
+        } else if (SameGuid(iid, IID_CPP_OPERATOR_PLUGIN_REGISTRY)) {
             ++cpp_operator_registry_traverse_calls;
             if (cpp_operator_registry_traverse_return_code != 0) {
                 return cpp_operator_registry_traverse_return_code;
             }
             providers = &cpp_operator_registries;
-        } else if (SameGuid(iid, IID_FILTER_PUSHDOWN_V1)) {
+        } else if (SameGuid(iid, IID_FILTER_PUSHDOWN)) {
             ++filter_pushdown_traverse_calls;
             if (filter_pushdown_traverse_return_code != 0) {
                 return filter_pushdown_traverse_return_code;
             }
             providers = &filter_pushdowns;
-        } else if (SameGuid(iid, IID_FILTER_DOMAIN_RESOLVER_V1)) {
+        } else if (SameGuid(iid, IID_FILTER_DOMAIN_RESOLVER)) {
             ++filter_domain_resolver_traverse_calls;
             if (filter_domain_resolver_traverse_return_code != 0) {
                 return filter_domain_resolver_traverse_return_code;
             }
             providers = &filter_domain_resolvers;
-        } else if (SameGuid(iid, IID_BLOCK_STREAM_READER_FACTORY_V1)) {
+        } else if (SameGuid(iid, IID_BLOCK_STREAM_READER_FACTORY)) {
             ++reader_factory_traverse_calls;
             if (reader_factory_traverse_return_code != 0) {
                 return reader_factory_traverse_return_code;
@@ -852,7 +846,6 @@ class BlockProviderQuerier final : public IQuerier {
     std::vector<void*> managers;
     std::vector<void*> operators;
     std::vector<void*> transforms;
-    std::vector<void*> time_transforms;
     std::vector<void*> cpp_operator_registries;
     std::vector<void*> filter_pushdowns;
     std::vector<void*> filter_domain_resolvers;
@@ -861,13 +854,11 @@ class BlockProviderQuerier final : public IQuerier {
     int manager_traverse_calls = 0;
     int operator_traverse_calls = 0;
     int transform_traverse_calls = 0;
-    int time_transform_traverse_calls = 0;
     int cpp_operator_registry_traverse_calls = 0;
     int filter_pushdown_traverse_calls = 0;
     int filter_domain_resolver_traverse_calls = 0;
     int reader_factory_traverse_calls = 0;
     int transform_traverse_return_code = 0;
-    int time_transform_traverse_return_code = 0;
     int cpp_operator_registry_traverse_return_code = 0;
     int filter_pushdown_traverse_return_code = 0;
     int filter_domain_resolver_traverse_return_code = 0;
@@ -1817,10 +1808,10 @@ void TestBlockReaderFactoryLifecycle() {
         ASSERT_EQ(reader_factory.create_calls, 1);
         ASSERT_EQ(reader_factory.release_calls, 1);
         ASSERT_EQ(reader_factory.live_readers, 0);
-        ASSERT_EQ(reader_factory.observed_contract_version, kBlockStreamReaderContractVersionV1);
+        ASSERT_EQ(reader_factory.observed_contract_version, kBlockStreamReaderContractVersion);
         ASSERT_EQ(reader_factory.source_categories, std::vector<std::string>({"pcapfile"}));
         ASSERT_EQ(reader_factory.source_names, std::vector<std::string>({"input"}));
-        ASSERT_EQ(reader_factory.pushed_plans, std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
+        ASSERT_EQ(reader_factory.pushed_plans, std::vector<std::string>({kEmptyCanonicalFilterPlan}));
         ASSERT_TRUE(!reader_factory.task_ids.front().empty());
 
         reader_factory.SetReader(&second_reader);
@@ -1855,7 +1846,7 @@ void TestBlockReaderFactoryLifecycle() {
         ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
         ASSERT_EQ(non_owner.create_calls, 1);
         ASSERT_EQ(non_owner.release_calls, 0);
-        ASSERT_EQ(non_owner.pushed_plans, std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
+        ASSERT_EQ(non_owner.pushed_plans, std::vector<std::string>({kEmptyCanonicalFilterPlan}));
         ASSERT_EQ(legacy_source.poll_calls, 2);
         ASSERT_EQ(legacy_source.release_calls, 1);
     }
@@ -2077,7 +2068,7 @@ void TestBlockSourceFilterPlanning() {
                   error::OK);
         ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
         ASSERT_EQ(pushdown.calls, has_zero_owner ? 1 : 0);
-        ASSERT_EQ(reader_factory.pushed_plans, std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
+        ASSERT_EQ(reader_factory.pushed_plans, std::vector<std::string>({kEmptyCanonicalFilterPlan}));
         ASSERT_EQ(exclusive_reader.release_calls, 1);
         ASSERT_EQ(reader_factory.release_calls, 1);
     }
@@ -2099,7 +2090,7 @@ void TestBlockSourceFilterPlanning() {
         ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(&plugin, partial_sql, &response), error::OK);
         ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
         ASSERT_EQ(non_owner.pushed_plans.size(), 1u);
-        ASSERT_TRUE(non_owner.pushed_plans[0] != kEmptyCanonicalFilterPlanV1);
+        ASSERT_TRUE(non_owner.pushed_plans[0] != kEmptyCanonicalFilterPlan);
         ASSERT_EQ(legacy_source.poll_calls, 2);
         ASSERT_EQ(legacy_source.release_calls, 1);
         ASSERT_EQ(non_owner.release_calls, 0);
@@ -2158,7 +2149,7 @@ void TestBlockSourceFilterPlanning() {
         provider.passthrough = true;
         BlockProviderQuerier querier;
         querier.factories = {&factory};
-        querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&provider)};
+        querier.transforms = {static_cast<IBlockTransformOperator*>(&provider)};
         SchedulerPlugin plugin;
         ASSERT_EQ(plugin.Load(&querier), 0);
 
@@ -2228,7 +2219,7 @@ void TestBlockTransformSchedulerPipeline() {
                   error::OK);
         ASSERT_TRUE(response.find("\"rows\":1") != std::string::npos);
         ASSERT_EQ(resolver.calls, 1);
-        ASSERT_EQ(resolver.observed_kind, FilterDomainTargetKindV1::kSource);
+        ASSERT_EQ(resolver.observed_kind, FilterDomainTargetKind::kSource);
         ASSERT_EQ(resolver.observed_category, "pcapfile");
         ASSERT_EQ(resolver.observed_name, "input");
         ASSERT_TRUE(resolver.observed_schema != nullptr &&
@@ -2303,40 +2294,36 @@ void TestBlockTransformSchedulerPipeline() {
         SchemaBlockChannel priority_source(packet_batch, 1);
         TraversalBlockFactory priority_factory(1);
         priority_factory.channel = &priority_source;
-        SchedulerTransformProvider v1_provider(output_schema, output_batch, "version_preferred");
-        SchedulerTimeTransformProvider v2_provider(output_schema, output_batch, "version_preferred");
+        SchedulerTimeTransformProvider time_provider(output_schema, output_batch, "time_driven");
         BlockProviderQuerier priority_querier;
         priority_querier.factories = {&priority_factory};
-        priority_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&v1_provider)};
-        priority_querier.time_transforms = {static_cast<IBlockTransformOperatorV2*>(&v2_provider)};
+        priority_querier.transforms = {static_cast<IBlockTransformOperator*>(&time_provider)};
         SchedulerPlugin priority_plugin;
         ASSERT_EQ(priority_plugin.Load(&priority_querier), 0);
 
         std::string priority_response;
-        ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
-                      &priority_plugin,
-                      R"({"sql":"SELECT * FROM pcapfile.input USING test.version_preferred WHERE score >= 10"})",
-                      &priority_response),
-                  error::OK);
+        ASSERT_EQ(
+            SchedulerPluginTestAccessor::HandleExecute(
+                &priority_plugin, R"({"sql":"SELECT * FROM pcapfile.input USING test.time_driven WHERE score >= 10"})",
+                &priority_response),
+            error::OK);
         ASSERT_TRUE(priority_response.find("\"status\":\"stopped\"") != std::string::npos);
         ASSERT_TRUE(priority_response.find("\"rows\":2") != std::string::npos);
         ASSERT_EQ(priority_source.poll_calls, 0);
-        ASSERT_EQ(priority_querier.time_transform_traverse_calls, 1);
-        ASSERT_EQ(priority_querier.transform_traverse_calls, 0);
-        ASSERT_EQ(v1_provider.create_calls, 0);
-        ASSERT_EQ(v2_provider.create_calls, 2);
-        ASSERT_EQ(v2_provider.release_calls, 2);
-        ASSERT_EQ(v2_provider.live_tasks, 0);
-        ASSERT_EQ(v2_provider.config_struct_sizes, std::vector<uint32_t>(2, kBlockTransformTaskConfigV2Size));
-        ASSERT_EQ(v2_provider.contract_versions, std::vector<uint32_t>(2, kBlockTransformContractVersionV2));
-        ASSERT_EQ(v2_provider.released.size(), 2u);
-        ASSERT_EQ(v2_provider.released[0].state_calls, 0);
-        ASSERT_EQ(v2_provider.released[0].time_calls, 0);
-        ASSERT_EQ(v2_provider.released[0].cancel_calls, 1);
-        ASSERT_EQ(v2_provider.released[1].state_calls, 1);
-        ASSERT_EQ(v2_provider.released[1].time_calls, 1);
-        ASSERT_EQ(v2_provider.released[1].flush_calls, 1);
-        ASSERT_EQ(v2_provider.released[1].cancel_calls, 0);
+        ASSERT_EQ(priority_querier.transform_traverse_calls, 1);
+        ASSERT_EQ(time_provider.create_calls, 2);
+        ASSERT_EQ(time_provider.release_calls, 2);
+        ASSERT_EQ(time_provider.live_tasks, 0);
+        ASSERT_EQ(time_provider.config_struct_sizes, std::vector<uint32_t>(2, kBlockTransformTaskConfigSize));
+        ASSERT_EQ(time_provider.contract_versions, std::vector<uint32_t>(2, kBlockTransformContractVersion));
+        ASSERT_EQ(time_provider.released.size(), 2u);
+        ASSERT_EQ(time_provider.released[0].state_calls, 0);
+        ASSERT_EQ(time_provider.released[0].time_calls, 0);
+        ASSERT_EQ(time_provider.released[0].cancel_calls, 1);
+        ASSERT_EQ(time_provider.released[1].state_calls, 1);
+        ASSERT_EQ(time_provider.released[1].time_calls, 1);
+        ASSERT_EQ(time_provider.released[1].flush_calls, 1);
+        ASSERT_EQ(time_provider.released[1].cancel_calls, 0);
     }
 
     {
@@ -2344,19 +2331,19 @@ void TestBlockTransformSchedulerPipeline() {
         TraversalBlockFactory mixed_factory(1);
         mixed_factory.channel = &mixed_source;
         SchedulerTimeTransformProvider time_provider(output_schema, output_batch, "mixed_time");
-        SchedulerTransformProvider v1_provider(output_schema, nullptr, "mixed_v1");
-        v1_provider.passthrough = true;
+        SchedulerTransformProvider data_provider(output_schema, nullptr, "mixed_data");
+        data_provider.passthrough = true;
         BlockProviderQuerier mixed_querier;
         mixed_querier.factories = {&mixed_factory};
-        mixed_querier.time_transforms = {static_cast<IBlockTransformOperatorV2*>(&time_provider)};
-        mixed_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&v1_provider)};
+        mixed_querier.transforms = {static_cast<IBlockTransformOperator*>(&time_provider),
+                                    static_cast<IBlockTransformOperator*>(&data_provider)};
         SchedulerPlugin mixed_plugin;
         ASSERT_EQ(mixed_plugin.Load(&mixed_querier), 0);
 
         std::string mixed_response;
         ASSERT_EQ(
             SchedulerPluginTestAccessor::HandleExecute(
-                &mixed_plugin, R"({"sql":"SELECT * FROM pcapfile.input USING test.mixed_time THEN test.mixed_v1"})",
+                &mixed_plugin, R"({"sql":"SELECT * FROM pcapfile.input USING test.mixed_time THEN test.mixed_data"})",
                 &mixed_response),
             error::OK);
         ASSERT_TRUE(mixed_response.find("\"status\":\"stopped\"") != std::string::npos);
@@ -2366,11 +2353,11 @@ void TestBlockTransformSchedulerPipeline() {
         ASSERT_EQ(time_provider.release_calls, 2);
         ASSERT_EQ(time_provider.released[0].time_calls, 0);
         ASSERT_EQ(time_provider.released[1].time_calls, 1);
-        ASSERT_EQ(v1_provider.create_calls, 2);
-        ASSERT_EQ(v1_provider.release_calls, 2);
-        ASSERT_EQ(v1_provider.released[1].process_calls, 1);
-        ASSERT_EQ(v1_provider.released[1].process_input_rows, 2);
-        ASSERT_EQ(v1_provider.released[1].flush_calls, 1);
+        ASSERT_EQ(data_provider.create_calls, 2);
+        ASSERT_EQ(data_provider.release_calls, 2);
+        ASSERT_EQ(data_provider.released[1].process_calls, 1);
+        ASSERT_EQ(data_provider.released[1].process_input_rows, 2);
+        ASSERT_EQ(data_provider.released[1].flush_calls, 1);
     }
 
     {
@@ -2412,9 +2399,9 @@ void TestBlockTransformSchedulerPipeline() {
         SchedulerTransformProvider fallback_provider(output_schema, output_batch, "duplicate_time");
         BlockProviderQuerier duplicate_time_querier;
         duplicate_time_querier.factories = {&duplicate_time_factory};
-        duplicate_time_querier.time_transforms = {static_cast<IBlockTransformOperatorV2*>(&first_time_provider),
-                                                  static_cast<IBlockTransformOperatorV2*>(&second_time_provider)};
-        duplicate_time_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&fallback_provider)};
+        duplicate_time_querier.transforms = {static_cast<IBlockTransformOperator*>(&first_time_provider),
+                                             static_cast<IBlockTransformOperator*>(&second_time_provider),
+                                             static_cast<IBlockTransformOperator*>(&fallback_provider)};
         SchedulerPlugin duplicate_time_plugin;
         ASSERT_EQ(duplicate_time_plugin.Load(&duplicate_time_querier), 0);
 
@@ -2428,7 +2415,7 @@ void TestBlockTransformSchedulerPipeline() {
         ASSERT_EQ(first_time_provider.create_calls, 0);
         ASSERT_EQ(second_time_provider.create_calls, 0);
         ASSERT_EQ(fallback_provider.create_calls, 0);
-        ASSERT_EQ(duplicate_time_querier.transform_traverse_calls, 0);
+        ASSERT_EQ(duplicate_time_querier.transform_traverse_calls, 1);
     }
 
     {
@@ -2441,7 +2428,7 @@ void TestBlockTransformSchedulerPipeline() {
         SchedulerTransformProvider fallback_provider(output_schema, output_batch, "invalid_time_lease");
         BlockProviderQuerier invalid_time_querier;
         invalid_time_querier.factories = {&invalid_time_factory};
-        invalid_time_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&fallback_provider)};
+        invalid_time_querier.transforms = {static_cast<IBlockTransformOperator*>(&fallback_provider)};
         invalid_time_querier.cpp_operator_registries = {&invalid_time_registry};
         SchedulerPlugin invalid_time_plugin;
         ASSERT_EQ(invalid_time_plugin.Load(&invalid_time_querier), 0);
@@ -2456,7 +2443,7 @@ void TestBlockTransformSchedulerPipeline() {
         ASSERT_EQ(invalid_time_registry.acquire_calls, 1);
         ASSERT_EQ(invalid_time_provider.create_calls, 0);
         ASSERT_EQ(fallback_provider.create_calls, 0);
-        ASSERT_EQ(invalid_time_querier.transform_traverse_calls, 0);
+        ASSERT_EQ(invalid_time_querier.transform_traverse_calls, 1);
     }
 
     {
@@ -2479,9 +2466,8 @@ void TestBlockTransformSchedulerPipeline() {
                   error::OK);
         ASSERT_TRUE(dynamic_response.find("\"rows\":2") != std::string::npos);
         ASSERT_EQ(dynamic_querier.transform_traverse_calls, 1);
-        ASSERT_EQ(dynamic_querier.time_transform_traverse_calls, 1);
-        ASSERT_EQ(dynamic_querier.cpp_operator_registry_traverse_calls, 2);
-        ASSERT_EQ(dynamic_registry.acquire_calls, 2);
+        ASSERT_EQ(dynamic_querier.cpp_operator_registry_traverse_calls, 1);
+        ASSERT_EQ(dynamic_registry.acquire_calls, 1);
         ASSERT_EQ(dynamic_registry.successful_acquires, 1);
         ASSERT_EQ(dynamic_provider.create_calls, 2);
         ASSERT_EQ(dynamic_provider.release_calls, 2);
@@ -2499,7 +2485,7 @@ void TestBlockTransformSchedulerPipeline() {
         DynamicBlockTransformRegistry conflict_registry(&conflict_provider);
         BlockProviderQuerier conflict_querier;
         conflict_querier.factories = {&conflict_factory};
-        conflict_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&conflict_provider)};
+        conflict_querier.transforms = {static_cast<IBlockTransformOperator*>(&conflict_provider)};
         conflict_querier.cpp_operator_registries = {&conflict_registry};
         SchedulerPlugin conflict_plugin;
         ASSERT_EQ(conflict_plugin.Load(&conflict_querier), 0);
@@ -2586,7 +2572,7 @@ void TestBlockTransformSchedulerPipeline() {
         ASSERT_TRUE(invalid_response.find("operator discovery failed") != std::string::npos);
         ASSERT_EQ(invalid_source.poll_calls, 0);
         ASSERT_EQ(invalid_provider.create_calls, 0);
-        ASSERT_EQ(invalid_registry.acquire_calls, 2);
+        ASSERT_EQ(invalid_registry.acquire_calls, 1);
         ASSERT_EQ(invalid_registry.successful_acquires, 0);
     }
 
@@ -2596,8 +2582,8 @@ void TestBlockTransformSchedulerPipeline() {
     SchedulerTransformProvider provider(output_schema, output_batch);
     BlockProviderQuerier querier;
     querier.factories = {&factory};
-    querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&provider)};
-    querier.filter_pushdowns = {static_cast<IFilterPushdownV1*>(&provider)};
+    querier.transforms = {static_cast<IBlockTransformOperator*>(&provider)};
+    querier.filter_pushdowns = {static_cast<IFilterPushdown*>(&provider)};
     SchedulerPlugin plugin;
     ASSERT_EQ(plugin.Load(&querier), 0);
 
@@ -2626,7 +2612,7 @@ void TestBlockTransformSchedulerPipeline() {
     ASSERT_EQ(provider.release_calls, 2);
     ASSERT_EQ(provider.live_tasks, 0);
     ASSERT_EQ(provider.pushed_plans.size(), 2u);
-    ASSERT_EQ(provider.pushed_plans[0], std::string(kEmptyCanonicalFilterPlanV1));
+    ASSERT_EQ(provider.pushed_plans[0], std::string(kEmptyCanonicalFilterPlan));
     ASSERT_TRUE(provider.pushed_plans[1].find("\"field_name\":\"score\"") != std::string::npos);
     ASSERT_TRUE(provider.pushed_plans[1].find("\"field_name\":\"protocol\"") == std::string::npos);
     ASSERT_TRUE(provider.with_params[0].find("\"mode\":\"fast\"") != std::string::npos);
@@ -2646,7 +2632,7 @@ void TestBlockTransformSchedulerPipeline() {
     SchedulerTransformProvider unfiltered_provider(output_schema, output_batch);
     BlockProviderQuerier unfiltered_querier;
     unfiltered_querier.factories = {&factory};
-    unfiltered_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&unfiltered_provider)};
+    unfiltered_querier.transforms = {static_cast<IBlockTransformOperator*>(&unfiltered_provider)};
     SchedulerPlugin unfiltered_plugin;
     ASSERT_EQ(unfiltered_plugin.Load(&unfiltered_querier), 0);
     ASSERT_EQ(
@@ -2657,7 +2643,7 @@ void TestBlockTransformSchedulerPipeline() {
     ASSERT_EQ(unfiltered_provider.create_calls, 1);
     ASSERT_EQ(unfiltered_provider.release_calls, 1);
     ASSERT_EQ(unfiltered_provider.pushdown_calls, 0);
-    ASSERT_EQ(unfiltered_provider.pushed_plans, std::vector<std::string>({kEmptyCanonicalFilterPlanV1}));
+    ASSERT_EQ(unfiltered_provider.pushed_plans, std::vector<std::string>({kEmptyCanonicalFilterPlan}));
     ASSERT_EQ(unfiltered_provider.released[0].open_calls, 1);
     ASSERT_EQ(unfiltered_provider.released[0].process_calls, 1);
     ASSERT_EQ(unfiltered_provider.released[0].flush_calls, 1);
@@ -2668,7 +2654,7 @@ void TestBlockTransformSchedulerPipeline() {
     SchedulerTransformProvider invalid_provider(output_schema, output_batch);
     BlockProviderQuerier invalid_querier;
     invalid_querier.factories = {&factory};
-    invalid_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&invalid_provider)};
+    invalid_querier.transforms = {static_cast<IBlockTransformOperator*>(&invalid_provider)};
     SchedulerPlugin invalid_plugin;
     ASSERT_EQ(invalid_plugin.Load(&invalid_querier), 0);
     ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
@@ -2690,8 +2676,8 @@ void TestBlockTransformSchedulerPipeline() {
     });
     BlockProviderQuerier changed_schema_querier;
     changed_schema_querier.factories = {&factory};
-    changed_schema_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&changed_schema_provider)};
-    changed_schema_querier.filter_pushdowns = {static_cast<IFilterPushdownV1*>(&changed_schema_provider)};
+    changed_schema_querier.transforms = {static_cast<IBlockTransformOperator*>(&changed_schema_provider)};
+    changed_schema_querier.filter_pushdowns = {static_cast<IFilterPushdown*>(&changed_schema_provider)};
     SchedulerPlugin changed_schema_plugin;
     ASSERT_EQ(changed_schema_plugin.Load(&changed_schema_querier), 0);
     ASSERT_EQ(SchedulerPluginTestAccessor::HandleExecute(
@@ -2710,7 +2696,7 @@ void TestBlockTransformSchedulerPipeline() {
     SchedulerTransformProvider traversal_provider(output_schema, output_batch);
     BlockProviderQuerier traversal_querier;
     traversal_querier.factories = {&factory};
-    traversal_querier.transforms = {static_cast<IBlockTransformOperatorV1*>(&traversal_provider)};
+    traversal_querier.transforms = {static_cast<IBlockTransformOperator*>(&traversal_provider)};
     traversal_querier.transform_traverse_return_code = EIO;
     SchedulerPlugin traversal_plugin;
     ASSERT_EQ(traversal_plugin.Load(&traversal_querier), 0);
@@ -2770,7 +2756,7 @@ void TestMultiBlockTransformSchedulerPipeline() {
     SchedulerTransformProvider second_provider(stage_schema, nullptr, "second_transform");
     second_provider.passthrough = true;
     second_provider.accept_first_candidate = false;
-    second_provider.process_result = static_cast<int>(BlockTransformStatusV1::kStop);
+    second_provider.process_result = static_cast<int>(BlockTransformStatus::kStop);
     second_provider.configured_flush_outputs = {flush2_batch};
     second_provider.event_label = "second";
     second_provider.events = &events;
@@ -2778,12 +2764,12 @@ void TestMultiBlockTransformSchedulerPipeline() {
     BlockProviderQuerier querier;
     querier.factories = {&factory};
     querier.transforms = {
-        static_cast<IBlockTransformOperatorV1*>(&first_provider),
-        static_cast<IBlockTransformOperatorV1*>(&second_provider),
+        static_cast<IBlockTransformOperator*>(&first_provider),
+        static_cast<IBlockTransformOperator*>(&second_provider),
     };
     querier.filter_pushdowns = {
-        static_cast<IFilterPushdownV1*>(&first_provider),
-        static_cast<IFilterPushdownV1*>(&second_provider),
+        static_cast<IFilterPushdown*>(&first_provider),
+        static_cast<IFilterPushdown*>(&second_provider),
     };
     SchedulerPlugin plugin;
     ASSERT_EQ(plugin.Load(&querier), 0);
@@ -2819,11 +2805,11 @@ void TestMultiBlockTransformSchedulerPipeline() {
     ASSERT_EQ(second_provider.create_calls, 2);
     ASSERT_EQ(second_provider.release_calls, 2);
     ASSERT_EQ(second_provider.live_tasks, 0);
-    ASSERT_EQ(first_provider.pushed_plans[0], std::string(kEmptyCanonicalFilterPlanV1));
+    ASSERT_EQ(first_provider.pushed_plans[0], std::string(kEmptyCanonicalFilterPlan));
     ASSERT_TRUE(first_provider.pushed_plans[1].find("\"field_name\":\"score\"") != std::string::npos);
     ASSERT_TRUE(first_provider.pushed_plans[1].find("\"field_name\":\"protocol\"") == std::string::npos);
     ASSERT_EQ(second_provider.pushed_plans,
-              std::vector<std::string>({kEmptyCanonicalFilterPlanV1, kEmptyCanonicalFilterPlanV1}));
+              std::vector<std::string>({kEmptyCanonicalFilterPlan, kEmptyCanonicalFilterPlan}));
     ASSERT_TRUE(first_provider.with_params[1].find("\"mode\":\"first\"") != std::string::npos);
     ASSERT_TRUE(second_provider.with_params[1].find("\"mode\":\"second\"") != std::string::npos);
 
@@ -2853,8 +2839,8 @@ void TestMultiBlockTransformSchedulerPipeline() {
     BlockProviderQuerier failing_querier;
     failing_querier.factories = {&factory};
     failing_querier.transforms = {
-        static_cast<IBlockTransformOperatorV1*>(&before_failure),
-        static_cast<IBlockTransformOperatorV1*>(&failing_provider),
+        static_cast<IBlockTransformOperator*>(&before_failure),
+        static_cast<IBlockTransformOperator*>(&failing_provider),
     };
     SchedulerPlugin failing_plugin;
     ASSERT_EQ(failing_plugin.Load(&failing_querier), 0);

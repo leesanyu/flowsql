@@ -42,7 +42,7 @@ std::string With(const std::string& config) {
     writer.EndObject();
     return {buffer.GetString(), buffer.GetSize()};
 }
-struct Querier : IQuerier, IConfigChannelRegistryV1 {
+struct Querier : IQuerier, IConfigChannelRegistry {
     baseline::BaselinePlugin baseline;
     ConfigSnapshot config;
     int lookups = 0;
@@ -57,12 +57,12 @@ struct Querier : IQuerier, IConfigChannelRegistryV1 {
     void* First(const Guid& id) override {
         if (std::memcmp(&id, &IID_BASELINE_SERVICE, sizeof(Guid)) == 0)
             return static_cast<IBaselineService*>(&baseline);
-        if (std::memcmp(&id, &IID_BASELINE_STATE_CONTROL_SERVICE_V1, sizeof(Guid)) == 0)
-            return static_cast<IBaselineStateControlServiceV1*>(&baseline);
-        if (std::memcmp(&id, &IID_BASELINE_CHECKPOINT_SERVICE_V1, sizeof(Guid)) == 0)
-            return static_cast<IBaselineCheckpointServiceV1*>(&baseline);
-        if (std::memcmp(&id, &IID_CONFIG_CHANNEL_REGISTRY_V1, sizeof(Guid)) == 0)
-            return static_cast<IConfigChannelRegistryV1*>(this);
+        if (std::memcmp(&id, &IID_BASELINE_STATE_CONTROL_SERVICE, sizeof(Guid)) == 0)
+            return static_cast<IBaselineStateControlService*>(&baseline);
+        if (std::memcmp(&id, &IID_BASELINE_CHECKPOINT_SERVICE, sizeof(Guid)) == 0)
+            return static_cast<IBaselineCheckpointService*>(&baseline);
+        if (std::memcmp(&id, &IID_CONFIG_CHANNEL_REGISTRY, sizeof(Guid)) == 0)
+            return static_cast<IConfigChannelRegistry*>(this);
         return nullptr;
     }
     int Traverse(const Guid& id, fntraverse fn) override {
@@ -75,7 +75,7 @@ struct Querier : IQuerier, IConfigChannelRegistryV1 {
         *out = {"t4",
                 1,
                 "json",
-                "baseliner.task.v1",
+                "flowsql.baseliner.task",
                 config.sha256_hex,
                 config.original_json.size(),
                 0,
@@ -85,8 +85,8 @@ struct Querier : IQuerier, IConfigChannelRegistryV1 {
 };
 struct Loaded {
     void* handle = nullptr;
-    IBlockTransformOperatorV2* provider = nullptr;
-    CppOperatorPluginDestroyCapabilityV2Fn destroy = nullptr;
+    IBlockTransformOperator* provider = nullptr;
+    CppOperatorPluginDestroyCapabilityFn destroy = nullptr;
     explicit Loaded(Querier& q) {
         handle = dlopen("./libflowsql_baseliner.so", RTLD_NOW | RTLD_LOCAL);
         if (!handle) std::cerr << dlerror() << '\n';
@@ -94,20 +94,19 @@ struct Loaded {
         auto version =
             reinterpret_cast<CppOperatorPluginAbiVersionFn>(dlsym(handle, kCppOperatorPluginAbiVersionSymbol));
         auto count = reinterpret_cast<CppOperatorPluginCountFn>(dlsym(handle, kCppOperatorPluginCountSymbol));
-        auto describe =
-            reinterpret_cast<CppOperatorPluginDescribeV2Fn>(dlsym(handle, kCppOperatorPluginDescribeV2Symbol));
-        auto create = reinterpret_cast<CppOperatorPluginCreateCapabilityV2Fn>(
-            dlsym(handle, kCppOperatorPluginCreateCapabilityV2Symbol));
-        destroy = reinterpret_cast<CppOperatorPluginDestroyCapabilityV2Fn>(
-            dlsym(handle, kCppOperatorPluginDestroyCapabilityV2Symbol));
+        auto describe = reinterpret_cast<CppOperatorPluginDescribeFn>(dlsym(handle, kCppOperatorPluginDescribeSymbol));
+        auto create = reinterpret_cast<CppOperatorPluginCreateCapabilityFn>(
+            dlsym(handle, kCppOperatorPluginCreateCapabilitySymbol));
+        destroy = reinterpret_cast<CppOperatorPluginDestroyCapabilityFn>(
+            dlsym(handle, kCppOperatorPluginDestroyCapabilitySymbol));
         assert(version && count && describe && create && destroy && version() == 2 && count() == 1);
-        CppOperatorDescriptorV2 descriptor{};
-        descriptor.struct_size = kCppOperatorDescriptorV2Size;
+        CppOperatorDescriptor descriptor{};
+        descriptor.struct_size = kCppOperatorDescriptorSize;
         assert(describe(0, &descriptor) == 0 && std::string(descriptor.category) == "explore" &&
                std::string(descriptor.name) == "baseliner");
-        assert(std::memcmp(&descriptor.contract_iid, &IID_BLOCK_TRANSFORM_OPERATOR_V2, sizeof(Guid)) == 0 &&
+        assert(std::memcmp(&descriptor.contract_iid, &IID_BLOCK_TRANSFORM_OPERATOR, sizeof(Guid)) == 0 &&
                describe(1, &descriptor) != 0);
-        provider = static_cast<IBlockTransformOperatorV2*>(create(0, &q));
+        provider = static_cast<IBlockTransformOperator*>(create(0, &q));
         assert(provider);
     }
     ~Loaded() {
@@ -116,11 +115,11 @@ struct Loaded {
     }
 };
 auto Task(const std::shared_ptr<Loaded>& owner, const std::string& with = With(json)) {
-    BlockTransformTaskConfigV2 c{kBlockTransformTaskConfigV2Size, kBlockTransformContractVersionV2, "execution",
-                                 with.c_str(), ""};
-    IBlockTransformTaskV2* raw = nullptr;
+    BlockTransformTaskConfig c{kBlockTransformTaskConfigSize, kBlockTransformContractVersion, "execution", with.c_str(),
+                               ""};
+    IBlockTransformTask* raw = nullptr;
     assert(owner->provider->CreateTask(c, &raw) == 0 && raw);
-    return std::unique_ptr<IBlockTransformTaskV2, std::function<void(IBlockTransformTaskV2*)>>(
+    return std::unique_ptr<IBlockTransformTask, std::function<void(IBlockTransformTask*)>>(
         raw, [owner](auto* task) { owner->provider->ReleaseTask(task); });
 }
 Observation Input(int64_t bucket) {
@@ -163,16 +162,16 @@ struct Gate {
         cv.notify_all();
     }
 };
-struct ReadSession : IDatabaseSnapshotSessionV1 {
-    std::shared_ptr<IDatabaseSnapshotSessionV1> inner;
+struct ReadSession : IDatabaseSnapshotSession {
+    std::shared_ptr<IDatabaseSnapshotSession> inner;
     Gate* gate;
     std::atomic<int>* live;
-    ReadSession(std::shared_ptr<IDatabaseSnapshotSessionV1> s, Gate* g, std::atomic<int>* l)
+    ReadSession(std::shared_ptr<IDatabaseSnapshotSession> s, Gate* g, std::atomic<int>* l)
         : inner(std::move(s)), gate(g), live(l) {
         ++*live;
     }
     ~ReadSession() override { --*live; }
-    int ReadPage(const char* sql, const DatabaseParameterV1* p, size_t n, std::shared_ptr<arrow::Schema> schema,
+    int ReadPage(const char* sql, const DatabaseParameter* p, size_t n, std::shared_ptr<arrow::Schema> schema,
                  uint32_t rows, uint64_t bytes, std::shared_ptr<arrow::RecordBatch>* output) override {
         output->reset();
         return gate ? gate->Block() : inner->ReadPage(sql, p, n, std::move(schema), rows, bytes, output);
@@ -183,10 +182,10 @@ struct ReadSession : IDatabaseSnapshotSessionV1 {
     }
     std::string LastError() const override { return "cancelled test session"; }
 };
-struct ProgressReader : IDatabasePublishedProgressReaderV1 {
+struct ProgressReader : IDatabasePublishedProgressReader {
     Gate* gate;
     explicit ProgressReader(Gate* g) : gate(g) {}
-    int ReadProgress(const PublishedDatasetRequestV1& r, const std::string&, PublishedDatasetProgressV1* out) override {
+    int ReadProgress(const PublishedDatasetRequest& r, const std::string&, PublishedDatasetProgress* out) override {
         *out = {};
         if (gate) return gate->Block();
         out->progress = {r.dataset_id, "epoch", "1", 40};
@@ -198,39 +197,38 @@ struct ProgressReader : IDatabasePublishedProgressReaderV1 {
     }
     std::string LastError() const override { return "cancelled progress"; }
 };
-struct AtomicSession : IDatabaseAtomicSessionV1 {
-    std::shared_ptr<IDatabaseAtomicSessionV1> inner;
+struct AtomicSession : IDatabaseAtomicSession {
+    std::shared_ptr<IDatabaseAtomicSession> inner;
     Gate* gate;
     std::atomic<int>* live;
-    AtomicSession(std::shared_ptr<IDatabaseAtomicSessionV1> s, Gate* g, std::atomic<int>* l)
+    AtomicSession(std::shared_ptr<IDatabaseAtomicSession> s, Gate* g, std::atomic<int>* l)
         : inner(std::move(s)), gate(g), live(l) {
         ++*live;
     }
     ~AtomicSession() override { --*live; }
-    DatabaseAtomicStatusV1 Begin() override { return inner->Begin(); }
-    DatabaseAtomicStatusV1 ExecutePrepared(const char* sql, const DatabaseParameterV1* p, size_t n,
-                                           uint64_t* rows) override {
+    DatabaseAtomicStatus Begin() override { return inner->Begin(); }
+    DatabaseAtomicStatus ExecutePrepared(const char* sql, const DatabaseParameter* p, size_t n,
+                                         uint64_t* rows) override {
         if (gate && std::string(sql).find("INSERT INTO baseline_model_versions") != std::string::npos) {
             *rows = 0;
             gate->Block();
-            return {DatabaseAtomicCodeV1::kCancelled, "cancelled publication"};
+            return {DatabaseAtomicCode::kCancelled, "cancelled publication"};
         }
         return inner->ExecutePrepared(sql, p, n, rows);
     }
-    DatabaseAtomicStatusV1 CreateReader(const char* s, const DatabaseParameterV1* p, size_t n,
-                                        IBatchReader** r) override {
+    DatabaseAtomicStatus CreateReader(const char* s, const DatabaseParameter* p, size_t n, IBatchReader** r) override {
         return inner->CreateReader(s, p, n, r);
     }
-    DatabaseAtomicStatusV1 ReadDatabaseTime(int64_t* t) override { return inner->ReadDatabaseTime(t); }
-    DatabaseCommitResultV1 Commit() override { return inner->Commit(); }
-    DatabaseAtomicStatusV1 Rollback() override { return inner->Rollback(); }
+    DatabaseAtomicStatus ReadDatabaseTime(int64_t* t) override { return inner->ReadDatabaseTime(t); }
+    DatabaseCommitResult Commit() override { return inner->Commit(); }
+    DatabaseAtomicStatus Rollback() override { return inner->Rollback(); }
     void Cancel() override {
         if (gate) gate->Cancel();
         inner->Cancel();
     }
     void Close() override { inner->Close(); }
 };
-struct Source : IDatabaseChannel, IDatabaseSnapshotSourceV1, IDatabasePublishedSourceV1, IDatabaseAtomicTargetV1 {
+struct Source : IDatabaseChannel, IDatabaseSnapshotSource, IDatabasePublishedSource, IDatabaseAtomicTarget {
     std::shared_ptr<IDatabaseChannel> real;
     Gate* snapshot_gate = nullptr;
     Gate* progress_gate = nullptr;
@@ -260,24 +258,24 @@ struct Source : IDatabaseChannel, IDatabaseSnapshotSourceV1, IDatabasePublishedS
     const char* GetLastError() override { return real->GetLastError(); }
     bool IsOpened() const override { return true; }
     bool IsConnected() override { return true; }
-    DatabaseAtomicStatusV1 AcquireAtomicSession(const DatabaseAtomicSessionOptionsV1& options,
-                                                std::shared_ptr<IDatabaseAtomicSessionV1>* out) override {
-        std::shared_ptr<IDatabaseAtomicSessionV1> session;
-        auto status = dynamic_cast<IDatabaseAtomicTargetV1*>(real.get())->AcquireAtomicSession(options, &session);
+    DatabaseAtomicStatus AcquireAtomicSession(const DatabaseAtomicSessionOptions& options,
+                                              std::shared_ptr<IDatabaseAtomicSession>* out) override {
+        std::shared_ptr<IDatabaseAtomicSession> session;
+        auto status = dynamic_cast<IDatabaseAtomicTarget*>(real.get())->AcquireAtomicSession(options, &session);
         if (status.ok()) *out = std::make_shared<AtomicSession>(std::move(session), atomic_gate, &atomic_live);
         return status;
     }
-    int CreateSnapshotSession(const DatabaseSnapshotOptionsV1& options,
-                              std::shared_ptr<IDatabaseSnapshotSessionV1>* out) override {
-        std::shared_ptr<IDatabaseSnapshotSessionV1> s;
-        int rc = dynamic_cast<IDatabaseSnapshotSourceV1*>(real.get())->CreateSnapshotSession(options, &s);
+    int CreateSnapshotSession(const DatabaseSnapshotOptions& options,
+                              std::shared_ptr<IDatabaseSnapshotSession>* out) override {
+        std::shared_ptr<IDatabaseSnapshotSession> s;
+        int rc = dynamic_cast<IDatabaseSnapshotSource*>(real.get())->CreateSnapshotSession(options, &s);
         if (rc) return rc;
         *out = std::make_shared<ReadSession>(std::move(s), ++session_number == block_session ? snapshot_gate : nullptr,
                                              &live);
         return 0;
     }
-    int CreatePublishedProgressReader(const DatabaseSnapshotOptionsV1&,
-                                      std::shared_ptr<IDatabasePublishedProgressReaderV1>* out) override {
+    int CreatePublishedProgressReader(const DatabaseSnapshotOptions&,
+                                      std::shared_ptr<IDatabasePublishedProgressReader>* out) override {
         *out = std::make_shared<ProgressReader>(progress_gate);
         return 0;
     }
@@ -329,10 +327,10 @@ void ReaderCancellation(const std::shared_ptr<IDatabaseChannel>& real) {
             Querier q;
             auto owner = std::make_shared<Loaded>(q);
             auto task = Task(owner);
-            assert(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("sqlite.t4") == 0);
-            auto* capability = dynamic_cast<IBlockTransformDatabaseInputTaskV1*>(task.get());
-            BlockDatabaseInputV1 input;
-            BlockDatabaseInputBindingV1 binding;
+            assert(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("sqlite.t4") == 0);
+            auto* capability = dynamic_cast<IBlockTransformDatabaseInputTask*>(task.get());
+            BlockDatabaseInput input;
+            BlockDatabaseInputBinding binding;
             binding.source = source;
             binding.exact_source = "sqlite.t4";
             std::thread worker([&] { rc = capability->CreateDatabaseInput(binding, &input); });
@@ -347,7 +345,7 @@ void ReaderCancellation(const std::shared_ptr<IDatabaseChannel>& real) {
     }
     std::cout << "PASS cancellation during snapshot/task/progress/selection/window initialization, join before close\n";
 }
-class SerialTask : public IBlockTransformTaskV2 {
+class SerialTask : public IBlockTransformTask, public IBlockTransformTimeDrivenTask {
  public:
     int processes = 0, times = 0, flushes = 0;
     int active = 0;
@@ -358,7 +356,7 @@ class SerialTask : public IBlockTransformTaskV2 {
         return 0;
     }
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& b, int64_t t,
-                     std::vector<BlockTransformOutputV1>* out) override {
+                     std::vector<BlockTransformOutput>* out) override {
         assert(active++ == 0);
         ++processes;
         if (gate) {
@@ -369,9 +367,9 @@ class SerialTask : public IBlockTransformTaskV2 {
         --active;
         if (fail) return -EIO;
         out->push_back({b, t});
-        return static_cast<int>(stop ? BlockTransformStatusV1::kStop : BlockTransformStatusV1::kContinue);
+        return static_cast<int>(stop ? BlockTransformStatus::kStop : BlockTransformStatus::kContinue);
     }
-    int Flush(std::vector<BlockTransformOutputV1>*) override {
+    int Flush(std::vector<BlockTransformOutput>*) override {
         assert(active++ == 0);
         ++flushes;
         --active;
@@ -381,12 +379,12 @@ class SerialTask : public IBlockTransformTaskV2 {
         if (gate) gate->Cancel();
     }
     std::string LastError() const override { return "test failure"; }
-    int GetTimeDriveState(BlockTransformTimeDriveStateV1* s) override {
+    int GetTimeDriveState(BlockTransformTimeDriveState* s) override {
         s->armed = timed && !times;
         s->deadline_ns = 0;
         return 0;
     }
-    int OnTime(const BlockTransformTimeEventV1&, std::vector<BlockTransformOutputV1>*) override {
+    int OnTime(const BlockTransformTimeEvent&, std::vector<BlockTransformOutput>*) override {
         assert(active++ == 0);
         ++times;
         --active;
@@ -458,30 +456,32 @@ void PipelineLifecycle() {
     std::cout << "PASS EOF/Stop once Flush, source/transform/sink errors and concurrent Cancel without Flush, serial "
                  "callbacks\n";
 }
-class CountTask : public IBlockTransformTaskV2 {
+class CountTask : public IBlockTransformTask, public IBlockTransformTimeDrivenTask {
  public:
-    IBlockTransformTaskV2* inner;
+    IBlockTransformTask* inner;
     std::shared_ptr<BlockTransformRunControl> control;
     int flushes = 0;
     bool request_stop = false, request_cancel = false;
-    explicit CountTask(IBlockTransformTaskV2* t) : inner(t) {}
+    explicit CountTask(IBlockTransformTask* t) : inner(t) {}
     int Open(std::shared_ptr<arrow::Schema> s, std::shared_ptr<arrow::Schema>* o) override { return inner->Open(s, o); }
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& b, int64_t t,
-                     std::vector<BlockTransformOutputV1>* o) override {
+                     std::vector<BlockTransformOutput>* o) override {
         int rc = inner->ProcessBlock(b, t, o);
         if (request_stop && rc >= 0) control->Request(false);
         if (request_cancel && rc >= 0) control->Request(true);
         return rc;
     }
-    int Flush(std::vector<BlockTransformOutputV1>* o) override {
+    int Flush(std::vector<BlockTransformOutput>* o) override {
         ++flushes;
         return inner->Flush(o);
     }
     void Cancel() override { inner->Cancel(); }
     std::string LastError() const override { return inner->LastError(); }
-    int GetTimeDriveState(BlockTransformTimeDriveStateV1* s) override { return inner->GetTimeDriveState(s); }
-    int OnTime(const BlockTransformTimeEventV1& e, std::vector<BlockTransformOutputV1>* o) override {
-        return inner->OnTime(e, o);
+    int GetTimeDriveState(BlockTransformTimeDriveState* s) override {
+        return dynamic_cast<IBlockTransformTimeDrivenTask*>(inner)->GetTimeDriveState(s);
+    }
+    int OnTime(const BlockTransformTimeEvent& e, std::vector<BlockTransformOutput>* o) override {
+        return dynamic_cast<IBlockTransformTimeDrivenTask*>(inner)->OnTime(e, o);
     }
 };
 void ManagedLifecycle(const std::shared_ptr<IDatabaseChannel>& real) {
@@ -503,14 +503,14 @@ void ManagedLifecycle(const std::shared_ptr<IDatabaseChannel>& real) {
                        std::strlen(",\"consistency\":\"consistent_snapshot\""));
         }
         auto task = Task(owner, With(text));
-        assert(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("sqlite.t4") == 0);
+        assert(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("sqlite.t4") == 0);
         if (mode == 4) source->atomic_gate = &gate;
-        BlockTransformManagedSinkBindingV1 sink;
+        BlockTransformManagedSinkBinding sink;
         sink.sink_channel = source.get();
         sink.target = "sqlite.t4";
         sink.category = "sqlite";
         sink.name = "t4";
-        assert(dynamic_cast<IBlockTransformManagedSinkTaskV1*>(task.get())->BindManagedSink(sink) == 0);
+        assert(dynamic_cast<IBlockTransformManagedSinkTask*>(task.get())->BindManagedSink(sink) == 0);
         ArrowSource input;
         input.error = mode == 2;
         if (mode == 3) {
@@ -524,16 +524,16 @@ void ManagedLifecycle(const std::shared_ptr<IDatabaseChannel>& real) {
         BlockTransformPipelineConfig c;
         c.source = &input;
         c.source_schema = input.batch->schema();
-        BlockDatabaseInputV1 database_input;
-        auto* input_capability = dynamic_cast<IBlockTransformDatabaseInputTaskV1*>(task.get());
+        BlockDatabaseInput database_input;
+        auto* input_capability = dynamic_cast<IBlockTransformDatabaseInputTask*>(task.get());
         if (mode >= 5) {
-            BlockDatabaseInputBindingV1 binding;
+            BlockDatabaseInputBinding binding;
             binding.source = source;
             binding.exact_source = "sqlite.t4";
             assert(input_capability->CreateDatabaseInput(binding, &database_input) == 0);
             c.source = database_input.input;
             c.source_schema = database_input.schema;
-            c.input_progress_task = dynamic_cast<IBlockTransformInputProgressTaskV1*>(task.get());
+            c.input_progress_task = dynamic_cast<IBlockTransformInputProgressTask*>(task.get());
         }
         c.transform = &counted;
         c.time_transform = &counted;
@@ -562,8 +562,8 @@ void ManagedLifecycle(const std::shared_ptr<IDatabaseChannel>& real) {
         task.reset();
         assert(source->live == 0);
         assert(source->atomic_live == 0);
-        std::shared_ptr<IDatabaseAtomicSessionV1> session;
-        assert(dynamic_cast<IDatabaseAtomicTargetV1*>(real.get())->AcquireAtomicSession({}, &session).ok());
+        std::shared_ptr<IDatabaseAtomicSession> session;
+        assert(dynamic_cast<IDatabaseAtomicTarget*>(real.get())->AcquireAtomicSession({}, &session).ok());
         assert(session->Begin().ok());
         std::shared_ptr<arrow::RecordBatch> generation;
         assert(ReadAtomicBatch(*session, "SELECT current_generation FROM baseline_tasks WHERE task_key='" + key + "'",
@@ -586,14 +586,14 @@ void LibraryOwnership() {
     struct Products {
         std::shared_ptr<Loaded> owner;
         std::shared_ptr<arrow::Schema> schema;
-        std::vector<BlockTransformOutputV1> outputs;
+        std::vector<BlockTransformOutput> outputs;
     };
     std::unique_ptr<Products> products;
     {
         auto owner = std::make_shared<Loaded>(q);
         weak = owner;
         auto task = Task(owner);
-        assert(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("sqlite.t4") == 0);
+        assert(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("sqlite.t4") == 0);
         products = std::make_unique<Products>();
         products->owner = owner;
         owner.reset();
@@ -617,10 +617,10 @@ void FailedOutputIsEmpty() {
     text.erase(text.find(",\"consistency\":\"consistent_snapshot\""),
                std::strlen(",\"consistency\":\"consistent_snapshot\""));
     auto task = Task(owner, With(text));
-    assert(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("sqlite.t4") == 0);
+    assert(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("sqlite.t4") == 0);
     std::shared_ptr<arrow::Schema> schema;
     assert(task->Open(MakeSchema(SchemaKind::kObservation), &schema) == 0);
-    std::vector<BlockTransformOutputV1> out;
+    std::vector<BlockTransformOutput> out;
     assert(task->ProcessBlock(Batch({Input(0)}), 0, &out) == 0);
     out.clear();
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -665,11 +665,11 @@ void RealDatabaseCancellation() {
             sql += ", pg_sleep(10)";
         else
             sql += " WHERE sleep(3)=0";
-        DatabaseSnapshotOptionsV1 o;
+        DatabaseSnapshotOptions o;
         o.operation_timeout_ms = 15000;
         o.consistent_transaction = backend != "clickhouse";
-        std::shared_ptr<IDatabaseSnapshotSessionV1> session;
-        assert(dynamic_cast<IDatabaseSnapshotSourceV1*>(source.get())->CreateSnapshotSession(o, &session) == 0);
+        std::shared_ptr<IDatabaseSnapshotSession> session;
+        assert(dynamic_cast<IDatabaseSnapshotSource*>(source.get())->CreateSnapshotSession(o, &session) == 0);
         std::atomic<bool> done{false};
         int rc = 0;
         std::shared_ptr<arrow::RecordBatch> batch;
@@ -689,13 +689,13 @@ void RealDatabaseCancellation() {
         session.reset();
         std::cout << "PASS real snapshot cancellation " << backend << " wake_ms=" << ms << '\n';
         if (backend != "clickhouse") {
-            std::shared_ptr<IDatabaseAtomicSessionV1> atomic;
-            DatabaseAtomicSessionOptionsV1 a;
+            std::shared_ptr<IDatabaseAtomicSession> atomic;
+            DatabaseAtomicSessionOptions a;
             a.operation_timeout_ms = 15000;
-            assert(dynamic_cast<IDatabaseAtomicTargetV1*>(source.get())->AcquireAtomicSession(a, &atomic).ok());
+            assert(dynamic_cast<IDatabaseAtomicTarget*>(source.get())->AcquireAtomicSession(a, &atomic).ok());
             assert(atomic->Begin().ok());
             done = false;
-            DatabaseAtomicStatusV1 status;
+            DatabaseAtomicStatus status;
             std::thread active([&] {
                 status = ReadAtomicBatch(*atomic, sql, {}, &batch);
                 done = true;

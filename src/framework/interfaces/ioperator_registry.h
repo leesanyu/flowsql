@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_FRAMEWORK_INTERFACES_IOPERATOR_REGISTRY_H_
 #define _FLOWSQL_FRAMEWORK_INTERFACES_IOPERATOR_REGISTRY_H_
@@ -33,7 +28,7 @@ interface IOperatorRegistry {
 
     /**
      * @brief 注册算子工厂。
-     * @param name 算子类型全名。
+     * @param name 算子类型全名 category.name（分类和名称均非空）。
      * @param factory 算子工厂函数。
      * @return 0 表示成功，非 0 表示失败。
      */
@@ -41,14 +36,14 @@ interface IOperatorRegistry {
 
     /**
      * @brief 按名称创建算子实例。
-     * @param name 算子类型全名。
+     * @param name 算子类型全名 category.name（分类和名称均非空）。
      * @return 新创建的算子实例（调用方负责释放），未注册返回 nullptr。
      */
     virtual IOperator* Create(const char* name) = 0;
 
     /**
      * @brief 移除算子工厂。
-     * @param name 算子类型全名。
+     * @param name 算子类型全名 category.name（分类和名称均非空）。
      * @return 0 表示成功，非 0 表示失败。
      */
     virtual int RemoveFactory(const char* name) = 0;

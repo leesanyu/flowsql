@@ -33,7 +33,7 @@ class ModelOutputStore {
     std::string Type(const arrow::DataType& type) const;
     struct SessionOwner {
         std::shared_ptr<IDatabaseChannel> channel;
-        std::shared_ptr<IDatabaseAtomicSessionV1> session;
+        std::shared_ptr<IDatabaseAtomicSession> session;
         ~SessionOwner() {
             if (session) session->Close();
             session.reset();  // Destroy the session before releasing its channel/library lease.

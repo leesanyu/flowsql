@@ -21,7 +21,7 @@ std::shared_ptr<Client> Session(const char* brokers, const char* topic = "packet
     b.snapshot.payload_kind = "packet";
     b.snapshot.topic = topic;
     b.sink_options_json =
-        R"({"encoding":"flowsql_packet_v1","stream_id":"probe-a","queue_max_messages":1,"delivery_timeout_ms":2000})";
+        R"({"encoding":"flowsql_packet","stream_id":"probe-a","queue_max_messages":1,"delivery_timeout_ms":2000})";
     if (options) b.sink_options_json = options;
     return std::make_shared<Client>(std::move(b), Deployment{});
 }
@@ -38,7 +38,7 @@ void FakeCases() {
             continue;
         }
         assert(!w.Open(Sources(), packet::PacketFamilySchema()));
-        assert(!w.Write(CapturePollEventV2{}));
+        assert(!w.Write(CapturePollEvent{}));
         assert(w.Report().messages.input == 0);
         auto e = Event();
         assert(!w.Write(e));
@@ -107,7 +107,7 @@ void MockCases() {
     const char* brokers = rd_kafka_mock_cluster_bootstraps(cluster);
     {
         auto s = Session(brokers);
-        KafkaDeliveryV1 d;
+        KafkaDelivery d;
         assert(!s->Produce({{"probe-a", "raw"}}, 2000, &d) && d.confirmed == 1);
         assert(s->Produce({{"probe-a", "raw"}, {"probe-a", "raw"}}, 2000, &d) == EINVAL && d.not_sent == 2);
         assert(s->Produce({{"k", std::string(2097153, 'x')}}, 2000, &d) == EMSGSIZE && d.not_sent == 1);
@@ -141,14 +141,14 @@ void MockCases() {
     {
         auto s = Session(
             brokers, "packets",
-            R"({"encoding":"flowsql_packet_v1","stream_id":"probe-a","max_message_bytes":1048576,"queue_max_bytes":1048576,"queue_max_messages":64,"delivery_timeout_ms":2000})");
-        KafkaDeliveryV1 d;
+            R"({"encoding":"flowsql_packet","stream_id":"probe-a","max_message_bytes":1048576,"queue_max_bytes":1048576,"queue_max_messages":64,"delivery_timeout_ms":2000})");
+        KafkaDelivery d;
         assert(s->Produce({{"k", std::string(600000, 'a')}, {"k", std::string(600000, 'b')}}, 2000, &d) == EMSGSIZE &&
                d.not_sent == 2);
     }
     {
         auto s = Session(brokers);
-        KafkaDeliveryV1 d;
+        KafkaDelivery d;
         assert(!s->Produce({{"k", "warm"}}, 2000, &d));
         assert(!rd_kafka_mock_broker_push_request_error_rtts(cluster, 1, 0, 1, RD_KAFKA_RESP_ERR_NO_ERROR, 500));
         assert(s->Produce({{"k", "late"}}, 100, &d) == ETIMEDOUT && d.unknown == 1 && d.confirmed == 0);
@@ -157,13 +157,13 @@ void MockCases() {
     }
     {
         auto s = Session(brokers, "invalid");
-        KafkaDeliveryV1 d;
+        KafkaDelivery d;
         assert(s->Produce({{"k", "v"}}, 2000, &d) == EPROTO && d.not_sent == 1);
     }
     {
         auto s = Session(brokers);
         rd_kafka_mock_broker_set_rtt(cluster, 1, 1000);
-        KafkaDeliveryV1 d;
+        KafkaDelivery d;
         const auto start = std::chrono::steady_clock::now();
         assert(s->Produce({{"k", "v"}}, 100, &d) != 0);
         assert(d.confirmed + d.not_sent + d.unknown == 1 &&
@@ -193,10 +193,10 @@ void MockCases() {
         p.Definitions().Mutate(
             "channels", "add",
             Parse(
-                R"({"name":"packets","connection_name":"mock","role":"sink","topic":"packets","payload_kind":"packet","payload_options":{"sink":{"encoding":"flowsql_packet_v1","stream_id":"probe-a"}}})"));
+                R"({"name":"packets","connection_name":"mock","role":"sink","topic":"packets","payload_kind":"packet","payload_options":{"sink":{"encoding":"flowsql_packet","stream_id":"probe-a"}}})"));
         assert(p.Definitions().Query("channels", "packets")["items"][0]["adapter_status"]["sink"] == "ready");
-        std::unique_ptr<IPacketSinkWriterV1> first, second;
-        PacketSinkContextV1 context{1, "kafka.packets", "t"};
+        std::unique_ptr<IPacketSinkWriter> first, second;
+        PacketSinkContext context{1, "kafka.packets", "t"};
         assert(!p.CreateWriter(context, &first) && p.CreateWriter(context, &second) == EBUSY && !second);
         assert(p.Definitions().Query("channels", "packets")["items"][0]["in_use"].GetBool());
         auto epoch = Text(Parse(first->Report().binding_json), "stream_epoch");
@@ -219,9 +219,9 @@ void MockCases() {
         const char* opts[] = {text.c_str()};
         assert(!loader->Load(get_absolute_process_path(), names, opts, 1));
         assert(!loader->StartAll());
-        auto* factory = static_cast<IPacketSinkFactoryV1*>(loader->First(IID_PACKET_SINK_FACTORY_V1));
+        auto* factory = static_cast<IPacketSinkFactory*>(loader->First(IID_PACKET_SINK_FACTORY));
         assert(factory);
-        std::unique_ptr<IPacketSinkWriterV1> dynamic_writer;
+        std::unique_ptr<IPacketSinkWriter> dynamic_writer;
         assert(!factory->CreateWriter(context, &dynamic_writer));
         dynamic_writer->Cancel();
         assert(dynamic_writer->Report().state == "cancelled");

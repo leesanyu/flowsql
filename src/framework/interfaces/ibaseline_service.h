@@ -1,17 +1,12 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_FRAMEWORK_INTERFACES_IBASELINE_SERVICE_H_
 #define _FLOWSQL_FRAMEWORK_INTERFACES_IBASELINE_SERVICE_H_
 
 #include <common/guid.h>
 #include <common/typedef.h>
-#include <framework/interfaces/ibaseline_types.h>
+#include <framework/interfaces/ibaseline_evaluation.h>
 
 #include <memory>
 #include <string_view>
@@ -94,11 +89,10 @@ interface IBaselineValueTask : public IBaselineTask {
      * @brief 提交一条在线观测并推进 rolling 状态。
      * @param obs 数值型观测。
      * @param options rolling 提交选项。
-     * @return rolling 更新结果。
+     * @return 完整 rolling 更新结果与本次求值 readiness。
      */
-    virtual RollingBaselineResult SubmitObservation(
-        const ValueRollingObservation& obs,
-        const RollingSubmitOptions& options) = 0;
+    virtual BaselineEvaluationResult SubmitObservation(const ValueRollingObservation& obs,
+                                                       const RollingSubmitOptions& options) = 0;
     /**
      * @brief 只读预测单个未来 bucket。
      * @param series_key 序列标识。
@@ -183,11 +177,10 @@ interface IBaselineRatioTask : public IBaselineTask {
      * @brief 提交一条在线比例观测并推进 rolling 状态。
      * @param obs 比例型观测。
      * @param options rolling 提交选项。
-     * @return rolling 更新结果。
+     * @return 完整 rolling 更新结果与本次求值 readiness。
      */
-    virtual RollingBaselineResult SubmitObservation(
-        const RatioRollingObservation& obs,
-        const RollingSubmitOptions& options) = 0;
+    virtual BaselineEvaluationResult SubmitObservation(const RatioRollingObservation& obs,
+                                                       const RollingSubmitOptions& options) = 0;
     /**
      * @brief 只读预测单个未来 bucket。
      * @param series_key 序列标识。
@@ -274,9 +267,8 @@ interface IBaselineRelationTask : public IBaselineTask {
      * @param options 关系 rolling 提交选项。
      * @return 关系 rolling 更新结果。
      */
-    virtual RelationRollingResult SubmitObservation(
-        const RelationRollingObservation& obs,
-        const RelationRollingSubmitOptions& options) = 0;
+    virtual BaselineRelationEvaluationResult SubmitObservation(const RelationRollingObservation& obs,
+                                                               const RelationRollingSubmitOptions& options) = 0;
     /**
      * @brief 只读预测一个 routed summary 的未来 bucket。
      * @param query routed summary 查询条件；basis-scoped summary 中 basis_version 为 0 表示使用当前 active basis。

@@ -62,7 +62,7 @@ if (status != flowsql::BaselineStatus::kOk || !task) {
 
 1. `CreateValueTask()` / `CreateRatioTask()` 创建 task。
 2. 可选：`Bootstrap()` 或 `LoadBootstrapArtifact()` 预热历史模型。
-3. 调用 `SubmitObservation()` 提交在线 bucket。
+3. 调用 `SubmitObservation()` 提交在线 bucket，读取完整返回值的 `result` 与 `readiness`。
 4. 调用 `PredictRolling()` / `PredictBootstrap()` 做只读预测。
 5. 调用 `QueryTaskSnapshot()` / `QuerySeriesSnapshot()` 观测运行时状态。
 6. 调用 `ExportBootstrapArtifact()` / `ExportBootstrapSeed()` 导出恢复数据。
@@ -76,7 +76,7 @@ if (status != flowsql::BaselineStatus::kOk || !task) {
 
 1. `CreateRelationTask()` 创建 Relation task。
 2. 可选：`Bootstrap()` 或 `LoadBootstrapArtifact()` 加载历史 relation basis 和 routed summary seed。
-3. 调用 `SubmitObservation()` 提交在线 relation block。
+3. 调用 `SubmitObservation()` 提交在线 relation block，读取完整返回值的 `result` 与对应各路结果的 `routed_readiness`。
 4. 调用 `PredictRoutedSummary()` 预测某个 routed summary。
 5. 调用 `QuerySeriesSnapshot(source_series_key)` 观测 source 级状态和 relation fusion。
 6. 调用 `QueryRoutedSummarySnapshot(query)` 观测某个 routed summary 的底层 rolling 状态。
@@ -100,12 +100,12 @@ Task 由 `std::shared_ptr<IBaseline*Task>` 持有。`Close()` 会关闭 task 并
 ### 3.1.1 可选状态管理
 
 可选状态管理通过独立头 `framework/interfaces/ibaseline_state_control.h` 和
-`IID_BASELINE_STATE_CONTROL_SERVICE_V1` 提供，不改变原服务、task 虚表或序列化格式。
+`IID_BASELINE_STATE_CONTROL_SERVICE` 提供，不改变原服务、task 虚表或序列化格式。
 创建 task 后、首次 `SubmitObservation` / `Bootstrap` / `LoadBootstrapArtifact` 前可绑定：
 
 ```cpp
-auto* management = static_cast<flowsql::IBaselineStateControlServiceV1*>(
-    querier->First(flowsql::IID_BASELINE_STATE_CONTROL_SERVICE_V1));
+auto* management = static_cast<flowsql::IBaselineStateControlService*>(
+    querier->First(flowsql::IID_BASELINE_STATE_CONTROL_SERVICE));
 auto [bind_status, control] = management->Bind(task, {1024, 1024, 2});
 ```
 
@@ -201,7 +201,7 @@ Snapshot 用于观测和调试，不应被调用方当成热路径状态传递�
 4. `src/tests/test_baseline/*`
 5. 本 README
 
-新增配置项必须同步更新 C++ 默认值、YAML 模板、strict schema 和配置测试。新增 public 字段必须保持 append-only 兼容策略，除非阶段设计明确允许破坏性迁移。
+新增配置项必须同步更新 C++ 默认值、YAML 模板、strict schema 和配置测试。公共接口及字段只维护当前契约，变更时同步全部实现、调用方、测试和文档，不保留旧版本兼容。
 
 常规回归共 12 个 CTest，统一标记为 `baseline`，测试工作目录为 `build/output`：
 

@@ -44,7 +44,7 @@ T Get(arrow::Result<T> result) {
 }
 
 // Independent row fixtures use the actual family encodings; protocol address text never enters the batch.
-std::shared_ptr<arrow::RecordBatch> Fixture(const npm::NpmEntityDescriptorV1& entity) {
+std::shared_ptr<arrow::RecordBatch> Fixture(const npm::NpmEntityDescriptor& entity) {
     arrow::ArrayVector columns;
     for (const auto& field : entity.schema->fields()) {
         std::shared_ptr<arrow::Array> array;
@@ -102,7 +102,7 @@ void TestTwelveEntityContracts() {
                 kind.kind == npm::NpmFamilyEntityKind::kBasic || kind.kind == npm::NpmFamilyEntityKind::kSession;
             assert(entity.identity_column == (cumulative ? "session_id" : "entity_instance_id"));
             assert(entity.revision_semantics ==
-                   (cumulative ? npm::NpmRevisionSemanticsV1::kCumulative : npm::NpmRevisionSemanticsV1::kEvent));
+                   (cumulative ? npm::NpmRevisionSemantics::kCumulative : npm::NpmRevisionSemantics::kEvent));
             auto batch = Fixture(entity);
             Check(npm::ValidateNpmFamilyEntityRows(entity, *batch));
             Check(npm::ValidateNpmFamilyEntityRows(entity, *batch->Slice(1, 1)));
@@ -181,7 +181,7 @@ void TestSnapshotAndBorrowedInput() {
     input.observation_domain_id = 0;
     input.endpoints = &pair6;
     assert(!npm::ValidateNpmFamilyInputEvent(input).ok());
-    input.kind = npm::NpmInputKindV1::kControlPacket;
+    input.kind = npm::NpmInputKind::kControlPacket;
     assert(!npm::ValidateNpmFamilyInputEvent(input).ok());
     input.session = nullptr;
     input.transport = nullptr;

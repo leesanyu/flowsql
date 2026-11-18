@@ -46,7 +46,7 @@ class TestBlockSource final : public IBlockStreamChannel {
     const char* category_;
 };
 
-class TestBlockSources final : public IBlockStreamFactory, public IBlockStreamChannelDescriptorV1 {
+class TestBlockSources final : public IBlockStreamFactory, public IBlockStreamChannelDescriptor {
  public:
     IBlockStreamChannel* Get(const char* type, const char* name) override {
         if (std::string(name) != "input") return nullptr;
@@ -57,9 +57,9 @@ class TestBlockSources final : public IBlockStreamFactory, public IBlockStreamCh
     void List(std::function<void(const char*, const char*, IBlockStreamChannel*)> callback) override {
         for (auto* source : {&finite_, &live_, &legacy_}) callback(source->Category(), source->Name(), source);
     }
-    void DescribeChannelTypes(std::function<void(const BlockStreamChannelTypeDescriptorV1&)> callback) const override {
+    void DescribeChannelTypes(std::function<void(const BlockStreamChannelTypeDescriptor&)> callback) const override {
         for (const auto* category : {"finite_capture", "custom_live"}) {
-            BlockStreamChannelTypeDescriptorV1 descriptor;
+            BlockStreamChannelTypeDescriptor descriptor;
             descriptor.channel_type = category;
             descriptor.is_finite = std::string(category) == "finite_capture";
             callback(descriptor);
@@ -81,37 +81,36 @@ class Protocol final : public IProtocol {
     protocol::IDictionary* Dictionary() override { return nullptr; }
 };
 
-class Session final : public ICaptureBackendSessionV1 {
+class Session final : public ICaptureBackendSession {
  public:
-    explicit Session(const CaptureBackendConfigV1& config) {
+    explicit Session(const CaptureBackendConfig& config) {
         for (const auto& name : config.interfaces) {
-            CaptureBackendInputV1 input;
+            CaptureBackendInput input;
             input.interface_name = name;
             input.buffer_bytes = 1024 * 1024;
             inputs_.push_back(input);
         }
     }
-    const std::vector<CaptureBackendInputV1>& Inputs() const override { return inputs_; }
-    int TryRead(uint32_t, CapturePacketViewV1*) override { return EAGAIN; }
+    const std::vector<CaptureBackendInput>& Inputs() const override { return inputs_; }
+    int TryRead(uint32_t, CapturePacketView*) override { return EAGAIN; }
     void ReleasePacket(uint32_t) override { assert(false); }
-    CaptureBacklogV1 Backlog(uint32_t) const override { return CaptureBacklogV1::kEmpty; }
+    CaptureBacklog Backlog(uint32_t) const override { return CaptureBacklog::kEmpty; }
     int64_t IdleTimeNs(uint32_t) const override { return 0; }
-    int ReadCounters(uint32_t, CaptureCountersV1* out) override {
+    int ReadCounters(uint32_t, CaptureCounters* out) override {
         *out = {};
         return 0;
     }
     void Cancel() override {}
 
  private:
-    std::vector<CaptureBackendInputV1> inputs_;
+    std::vector<CaptureBackendInput> inputs_;
 };
 
-class Provider final : public ICaptureBackendProviderV1 {
+class Provider final : public ICaptureBackendProvider {
  public:
     explicit Provider(const char* name) : name_(name) {}
     const char* Backend() const override { return name_; }
-    int Open(const CaptureBackendConfigV1& config, std::shared_ptr<ICaptureBackendSessionV1>* out,
-             std::string*) override {
+    int Open(const CaptureBackendConfig& config, std::shared_ptr<ICaptureBackendSession>* out, std::string*) override {
         *out = std::make_shared<Session>(config);
         return 0;
     }
@@ -137,19 +136,22 @@ class Runtime {
  public:
     explicit Runtime(const std::string& db) : loader_(PluginLoader::Single()) {
         loader_->Regist(IID_PROTOCOL, &protocol_);
-        loader_->Regist(IID_CAPTURE_BACKEND_PROVIDER_V1, &af_packet_);
-        loader_->Regist(IID_CAPTURE_BACKEND_PROVIDER_V1, &pfring_);
+        loader_->Regist(IID_CAPTURE_BACKEND_PROVIDER, &af_packet_);
+        loader_->Regist(IID_CAPTURE_BACKEND_PROVIDER, &pfring_);
         loader_->Regist(IID_BLOCK_STREAM_FACTORY, static_cast<IBlockStreamFactory*>(&block_sources_));
-        loader_->Regist(IID_BLOCK_STREAM_CHANNEL_DESCRIPTOR_V1,
-                        static_cast<IBlockStreamChannelDescriptorV1*>(&block_sources_));
+        loader_->Regist(IID_BLOCK_STREAM_CHANNEL_DESCRIPTOR,
+                        static_cast<IBlockStreamChannelDescriptor*>(&block_sources_));
         const int port = server_->bind_to_any_port("127.0.0.1");
         assert(port > 0);
-        const char* libraries[] = {"libflowsql_netadapter.so", "libflowsql_builtin.so", "libflowsql_scheduler.so",
-                                   "libflowsql_web.so"};
+        const char* libraries[] = {"libflowsql_config_channel.so", "libflowsql_netadapter.so", "libflowsql_builtin.so",
+                                   "libflowsql_catalog.so",        "libflowsql_scheduler.so",  "libflowsql_web.so"};
         const std::string netadapter = "{\"db_path\":\"" + db + "\"}";
         const std::string web = "db_path=:memory:;gateway=127.0.0.1:" + std::to_string(port);
-        const char* options[] = {netadapter.c_str(), nullptr, nullptr, web.c_str()};
-        assert(loader_->Load(get_absolute_process_path(), libraries, options, 4) == 0);
+        const std::string semantics_option = "db_path=" + db + ".semantics";
+        const std::string catalog_option = "data_dir=" + db + ".frames;operator_db_path=" + db + ".catalog";
+        const char* options[] = {
+            semantics_option.c_str(), netadapter.c_str(), nullptr, catalog_option.c_str(), nullptr, web.c_str()};
+        assert(loader_->Load(get_absolute_process_path(), libraries, options, 6) == 0);
         for (const auto* operation : {"definitions/query", "query", "add", "modify", "remove"}) {
             const std::string uri = std::string("/channels/stream/") + operation;
             const auto handler = Route(loader_, uri);
@@ -183,9 +185,9 @@ class Runtime {
         return doc;
     }
     void Acquire() {
-        auto* factory = static_cast<IBlockStreamReaderFactoryV1*>(loader_->First(IID_BLOCK_STREAM_READER_FACTORY_V1));
+        auto* factory = static_cast<IBlockStreamReaderFactory*>(loader_->First(IID_BLOCK_STREAM_READER_FACTORY));
         assert(factory);
-        BlockStreamReaderConfigV1 config;
+        BlockStreamReaderConfig config;
         config.task_id = "web-test";
         config.source_category = "netadapter";
         config.source_name = "edge";
@@ -204,7 +206,7 @@ class Runtime {
         assert(doc["requires_async"].GetBool() == requires_async);
     }
     void Release() {
-        auto* factory = static_cast<IBlockStreamReaderFactoryV1*>(loader_->First(IID_BLOCK_STREAM_READER_FACTORY_V1));
+        auto* factory = static_cast<IBlockStreamReaderFactory*>(loader_->First(IID_BLOCK_STREAM_READER_FACTORY));
         factory->ReleaseReader(reader_);
         reader_ = nullptr;
     }

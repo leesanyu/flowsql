@@ -2,12 +2,12 @@
 // Licensed under the MIT License.
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
-#include <dlfcn.h>
 #include <framework/core/channel_adapter.h>
 #include <framework/core/dataframe.h>
 #include <framework/core/dataframe_channel.h>
 #include <framework/core/packet_codec.h>
 #include <framework/interfaces/cpp_operator_plugin_abi.h>
+#include <framework/interfaces/ibinaddon_host.h>
 #include <framework/interfaces/iblock_stream_factory.h>
 #include <framework/interfaces/iblock_stream_reader.h>
 #include <framework/interfaces/iblock_transform_operator.h>
@@ -102,8 +102,8 @@ std::shared_ptr<arrow::RecordBatch> Query(const std::string& sql) {
         const auto begin = sql.find(" FROM ") + 6, end = sql.find(' ', begin);
         const auto reference = sql.substr(begin, end - begin);
         const auto a = reference.find('.'), b = reference.find('.', a + 1);
-        auto* factory = static_cast<IDatabaseChannelLeaseProviderV1*>(
-            PluginLoader::Single()->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1));
+        auto* factory = static_cast<IDatabaseChannelLeaseProvider*>(
+            PluginLoader::Single()->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER));
         auto channel =
             factory->AcquireChannel(reference.substr(0, a).c_str(), reference.substr(a + 1, b - a - 1).c_str());
         assert(channel);
@@ -229,7 +229,7 @@ std::string Isolate(const std::string& original, const std::string& root, const 
 }
 // Test-only capture adapter. It drains an actual finite PCAP reader, so its final packet fact
 // is backed by consumed packets and confirmed EOF, with no unread packet backlog or idle extrapolation.
-class CapturePcap final : public IBlockStreamFactory, public IBlockStreamReaderFactoryV1 {
+class CapturePcap final : public IBlockStreamFactory, public IBlockStreamReaderFactory {
  public:
     std::string pcap_name;
     class Source final : public IBlockStreamChannel {
@@ -247,7 +247,7 @@ class CapturePcap final : public IBlockStreamFactory, public IBlockStreamReaderF
         int ReleaseBlock(const std::shared_ptr<arrow::RecordBatch>&) override { return EINVAL; }
         void Cancel() override {}
     } source;
-    class Reader final : public ICaptureBlockStreamReaderV2 {
+    class Reader final : public ICaptureBlockStreamReader {
      public:
         explicit Reader(std::vector<std::shared_ptr<arrow::RecordBatch>> batches) : batches_(std::move(batches)) {}
         const char* Category() override { return "t73capture"; }
@@ -269,9 +269,9 @@ class CapturePcap final : public IBlockStreamFactory, public IBlockStreamReaderF
             return 0;
         }
         void Cancel() override { cancelled_ = true; }
-        int DescribeSources(CaptureSourceSetV2* out) const override {
+        int DescribeSources(CaptureSourceSet* out) const override {
             *out = {};
-            CaptureQueueIdentityV1 identity;
+            CaptureQueueIdentity identity;
             identity.source_name = "t73capture.live";
             identity.source_id = 0;
             identity.observation_domain_id = 1;
@@ -284,8 +284,8 @@ class CapturePcap final : public IBlockStreamFactory, public IBlockStreamReaderF
             out->limits.max_outstanding_batches = 1;
             return 0;
         }
-        CapturePollEventV2 PollCapture(int) override {
-            CapturePollEventV2 e;
+        CapturePollEvent PollCapture(int) override {
+            CapturePollEvent e;
             if (cancelled_) {
                 e.block.kind = BlockPollEvent::kCancelled;
                 return e;
@@ -302,18 +302,18 @@ class CapturePcap final : public IBlockStreamFactory, public IBlockStreamReaderF
             {
                 auto time = std::static_pointer_cast<arrow::Int64Array>(outstanding_->GetColumnByName("timestamp_ns"));
                 assert(time && time->length());
-                CaptureProgressV1 fact;
+                CaptureProgress fact;
                 fact.source_id = 0;
                 fact.generation = 1;
                 fact.fact_sequence = index_;
                 fact.capture_time_ns = time->Value(time->length() - 1);
                 fact.packet_observed = true;
-                fact.backlog = index_ == batches_.size() ? CaptureBacklogV1::kEmpty : CaptureBacklogV1::kPresent;
+                fact.backlog = index_ == batches_.size() ? CaptureBacklog::kEmpty : CaptureBacklog::kPresent;
                 e.progress = {fact};
             }
             return e;
         }
-        int ReadInputCounters(uint32_t, CaptureCountersV1* out) const override {
+        int ReadInputCounters(uint32_t, CaptureCounters* out) const override {
             *out = {};
             out->generation = 1;
             return 0;
@@ -331,16 +331,16 @@ class CapturePcap final : public IBlockStreamFactory, public IBlockStreamReaderF
     void List(std::function<void(const char*, const char*, IBlockStreamChannel*)> fn) override {
         fn("t73capture", "live", &source);
     }
-    int CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** out) override {
+    int CreateReader(const BlockStreamReaderConfig& config, IBlockStreamChannel** out) override {
         *out = nullptr;
         if (std::string(config.source_category) != "t73capture") return ENOTSUP;
         IBlockStreamChannel* input = nullptr;
-        IBlockStreamReaderFactoryV1* owner = nullptr;
+        IBlockStreamReaderFactory* owner = nullptr;
         auto actual = config;
         actual.source_category = "pcapfile";
         actual.source_name = pcap_name.c_str();
-        PluginLoader::Single()->Traverse(IID_BLOCK_STREAM_READER_FACTORY_V1, [&](void* p) {
-            auto* factory = static_cast<IBlockStreamReaderFactoryV1*>(p);
+        PluginLoader::Single()->Traverse(IID_BLOCK_STREAM_READER_FACTORY, [&](void* p) {
+            auto* factory = static_cast<IBlockStreamReaderFactory*>(p);
             if (factory == this) return 0;
             if (factory->CreateReader(actual, &input) == 0) {
                 owner = factory;
@@ -374,9 +374,7 @@ class CapturePcap final : public IBlockStreamFactory, public IBlockStreamReaderF
 };
 std::string CaptureRun(const std::string& exact, const std::string& id) {
     const std::string sql =
-        "SELECT * FROM t73capture.live USING npm.basic WITH "
-        "input_namespace='t73-capture',source_domains='0:1',features='basic',udp_idle_timeout_ns=120000000000,output_"
-        "interval_ns=60000000000 INTO " +
+        R"JSON(SELECT * FROM t73capture.live USING npm.basic WITH input_namespace='t73-capture',source_domains='0:1',features='basic',parameters='{"schema_version":1,"core":{"udp_idle_timeout_ns":120000000000,"output_interval_ns":60000000000}}' INTO )JSON" +
         exact;
     Call("/scheduler/batch/submit", Json({{"runtime_task_id", id}, {"sql_text", sql}}));
     for (int i = 0; i < 1500; ++i) {
@@ -465,75 +463,52 @@ void QueryOwnership() {
               "borrowed IPC overwritten after Next/Close");
     std::cout << "PASS Scheduler query owns IPC across reader reuse/close" << std::endl;
 }
-struct NpmOwner {
-    void* handle = nullptr;
-    void* provider = nullptr;
-    CppOperatorPluginDestroyCapabilityV2Fn destroy = nullptr;
-    explicit NpmOwner(PluginLoader* loader) {
-        handle = dlopen("./libflowsql_npm_basic.so", RTLD_NOW | RTLD_LOCAL);
-        Check(handle, dlerror() ? "NPM dlopen failed" : "NPM dlopen");
-        auto count = reinterpret_cast<CppOperatorPluginCountFn>(dlsym(handle, kCppOperatorPluginCountSymbol));
-        auto describe =
-            reinterpret_cast<CppOperatorPluginDescribeV2Fn>(dlsym(handle, kCppOperatorPluginDescribeV2Symbol));
-        auto create = reinterpret_cast<CppOperatorPluginCreateCapabilityV2Fn>(
-            dlsym(handle, kCppOperatorPluginCreateCapabilityV2Symbol));
-        destroy = reinterpret_cast<CppOperatorPluginDestroyCapabilityV2Fn>(
-            dlsym(handle, kCppOperatorPluginDestroyCapabilityV2Symbol));
-        assert(count && describe && create && destroy);
-        for (int i = 0; i < count(); ++i) {
-            CppOperatorDescriptorV2 d{};
-            d.struct_size = kCppOperatorDescriptorV2Size;
-            assert(describe(i, &d) == 0);
-            if (std::memcmp(&d.contract_iid, &IID_BLOCK_TRANSFORM_OPERATOR_V2, sizeof(Guid)) == 0) {
-                index = i;
-                provider = create(i, loader);
-                assert(provider);
-                loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V2, provider);
-                break;
-            }
-        }
-        assert(provider);
-    }
-    ~NpmOwner() {
-        if (provider) destroy(index, provider);
-        if (handle) dlclose(handle);
-    }
-    int index = -1;
-};
 struct Environment {
     PluginLoader* loader = PluginLoader::Single();
-    std::unique_ptr<NpmOwner> npm;
     CapturePcap capture;
-    Environment(const std::string& options, const std::string& root) {
-        const char* libs[] = {"libflowsql_database.so",      "libflowsql_builtin.so",  "libflowsql_catalog.so",
-                              "libflowsql_npi.so",           "libflowsql_pcapfile.so", "libflowsql_scheduler.so",
-                              "libflowsql_stream.so",        "libflowsql_baseline.so", "libflowsql_baseliner.so",
-                              "libflowsql_config_channel.so"};
+    Environment(const std::string& options, const std::string& root, bool restore = false) {
+        const char* libs[] = {"libflowsql_database.so",  "libflowsql_builtin.so",
+                              "libflowsql_catalog.so",   "libflowsql_npi.so",
+                              "libflowsql_pcapfile.so",  "libflowsql_scheduler.so",
+                              "libflowsql_stream.so",    "libflowsql_baseline.so",
+                              "libflowsql_baseliner.so", "libflowsql_config_channel.so",
+                              "libflowsql_binaddon.so"};
         std::string catalog = "data_dir=" + root + ";operator_db_path=" + root + "/operators.db";
         std::string npi = std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\",\"concurrency\":2}";
         std::string pcap = "db_path=" + root + "/pcap.db",
                     stream = "config_file=" + root + "/stream.yml;db_path=" + root + "/stream.db";
         std::string config = "db_path=" + root + "/config.db";
-        const char* opts[] = {options.c_str(), nullptr,        catalog.c_str(), npi.c_str(), pcap.c_str(),
-                              nullptr,         stream.c_str(), nullptr,         nullptr,     config.c_str()};
+        const std::string host_options = "operator_db_path=" + root + "/operators.db;upload_dir=" + root + "/plugins";
+        const char* opts[] = {options.c_str(), nullptr, catalog.c_str(), npi.c_str(),    pcap.c_str(),        nullptr,
+                              stream.c_str(),  nullptr, nullptr,         config.c_str(), host_options.c_str()};
         // Database Option logs its options; suppress configuration values in test output.
         int saved = dup(STDOUT_FILENO);
         FILE* quiet = fopen("/dev/null", "w");
         dup2(fileno(quiet), STDOUT_FILENO);
-        int rc = loader->Load(get_absolute_process_path(), libs, opts, 10);
+        int rc = loader->Load(get_absolute_process_path(), libs, opts, 11);
         fflush(stdout);
         dup2(saved, STDOUT_FILENO);
         close(saved);
         fclose(quiet);
         Check(rc == 0, "load production plugins");
         loader->Regist(IID_BLOCK_STREAM_FACTORY, static_cast<IBlockStreamFactory*>(&capture));
-        loader->Regist(IID_BLOCK_STREAM_READER_FACTORY_V1, static_cast<IBlockStreamReaderFactoryV1*>(&capture));
-        npm = std::make_unique<NpmOwner>(loader);
+        loader->Regist(IID_BLOCK_STREAM_READER_FACTORY, static_cast<IBlockStreamReaderFactory*>(&capture));
         assert(loader->StartAll() == 0);
+        auto* host = static_cast<IBinAddonHost*>(loader->First(IID_BINADDON_HOST));
+        Check(host != nullptr, "NPM plugin host");
+        if (!restore) {
+            const auto upload = root + "/npm-upload.so";
+            std::filesystem::copy_file("./libflowsql_npm_basic.so", upload,
+                                       std::filesystem::copy_options::overwrite_existing);
+            std::string response;
+            Check(host->UploadCppPlugin("npm.so", upload, response) == 0, response);
+            rapidjson::Document uploaded;
+            uploaded.Parse(response.c_str());
+            Check(host->ActivateCppPlugin(uploaded["plugin_id"].GetString(), response) == 0, response);
+        }
     }
     ~Environment() {
         loader->StopAll();
-        npm.reset();
         loader->Unload();
     }
 };
@@ -546,7 +521,7 @@ std::string Configuration(const std::string& source, const std::string& run, con
            R"(,"timezone":"UTC"},"calendar":{"calendar_id":"cn-holiday","calendar_version":"2026.1"},
 "forecast":{"horizon_buckets":2},"read_policy":{"page_rows":37,"poll_interval_ms":5},
 "persistence":{"checkpoint_every_buckets":1000,"restore":"if_exists"},
-"datasets":[{"id":"npm","table":"npm_basic_ipv4_history_v1","fields":{"__npm_run_id":"utf8","session_id":"uint64","revision":"uint64",
+"datasets":[{"id":"npm","table":"npm_basic_ipv4_history","fields":{"__npm_run_id":"utf8","session_id":"uint64","revision":"uint64",
 "observation_domain_id":"uint64","b_port":"uint64","period_start_ns":"int64","period_end_ns":"int64","period_complete":"boolean",
 "interval_wire_bytes_total":"uint64","interval_packets_ab":"uint64"},
 "scope":{"run_ids":[")" +
@@ -561,8 +536,10 @@ std::string Configuration(const std::string& source, const std::string& run, con
 "metrics":[{"id":"m","column":"interval_wire_bytes_total","aggregate":"sum"}],"support_policy":{"k_support":3,"min_hist_share":0.01,"min_active_ratio":0.1},"summary_policy":{"k_head":2,"k_stable":1}}]}]})";
 }
 std::string Publish(const std::string& name, const std::string& content) {
-    std::string request = Json(
-        {{"name", name}, {"format", "json"}, {"schema_id", "baseliner.task.v1"}, {"content_base64", Base64(content)}});
+    std::string request = Json({{"name", name},
+                                {"format", "json"},
+                                {"schema_id", "flowsql.baseliner.task"},
+                                {"content_base64", Base64(content)}});
     request.insert(1, "\"expected_current_revision\":0,");
     auto result = Call("/channels/config/publish", request);
     return result["exact_reference"].GetString();
@@ -575,13 +552,13 @@ struct Case {
 };
 std::string Results(const Case& c) {
     if (c.empty)
-        return "SELECT COUNT(*) AS empty_result_count FROM " + c.target + ".baseline_results_v1 WHERE task_key='" +
-               c.key + "'";
+        return "SELECT COUNT(*) AS empty_result_count FROM " + c.target + ".baseline_results WHERE task_key='" + c.key +
+               "'";
     return "SELECT "
            "metric_id,result_kind,target_bucket,issued_after_bucket,observed,expected,lower,upper,band_kind,model_"
            "basis_id,"
            "basis_id FROM " +
-           c.target + ".baseline_results_v1 WHERE task_key='" + c.key +
+           c.target + ".baseline_results WHERE task_key='" + c.key +
            "' ORDER BY metric_id,result_kind,target_bucket,issued_after_bucket,summary_id";
 }
 void Run(const Case& c, bool restarted) {
@@ -632,8 +609,8 @@ void Run(const Case& c, bool restarted) {
 }
 std::string Checkpoint(const Case& c) {
     auto dot = c.target.find('.');
-    auto* factory = static_cast<IDatabaseChannelLeaseProviderV1*>(
-        PluginLoader::Single()->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1));
+    auto* factory =
+        static_cast<IDatabaseChannelLeaseProvider*>(PluginLoader::Single()->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER));
     auto target = factory->AcquireChannel(c.target.substr(0, dot).c_str(), c.target.substr(dot + 1).c_str());
     assert(target);
     ConfigSnapshot config;
@@ -700,7 +677,7 @@ std::string SqlLiteral(const std::string& text) {
 std::string ComparableResults(const Case& c) {
     return "SELECT metric_id,result_kind,target_bucket,issued_after_bucket,observed,expected,lower,upper,band_kind "
            "FROM " +
-           c.target + ".baseline_results_v1 WHERE task_key='" + c.key +
+           c.target + ".baseline_results WHERE task_key='" + c.key +
            "' ORDER BY metric_id,result_kind,target_bucket,issued_after_bucket,observed,expected,lower,upper,band_kind";
 }
 void ThreePartCases(const std::string& source, const std::string& run, const std::string& poll_run,
@@ -708,7 +685,7 @@ void ThreePartCases(const std::string& source, const std::string& run, const std
     const auto target = "sqlite.t73sqlite";
     for (int variant = 0; variant < 3; ++variant) {
         Case c;
-        c.source = source + ".npm_basic_ipv4_history_v1";
+        c.source = source + ".npm_basic_ipv4_history";
         c.target = target;
         c.poll = variant == 1;
         c.key = "single-" + unique + "-" + source + "-" + std::to_string(variant);
@@ -749,12 +726,12 @@ void ThreePartCases(const std::string& source, const std::string& run, const std
         std::cout << "PASS three-part SQL " << source << " " << (c.poll ? "poll" : "snapshot")
                   << (variant == 2 ? " single WITH" : " exact config") << " matches two-part" << std::endl;
     }
-    auto full = Configuration(source + ".npm_basic_ipv4_history_v1", run, "missing-progress-" + unique, true);
+    auto full = Configuration(source + ".npm_basic_ipv4_history", run, "missing-progress-" + unique, true);
     ConfigSnapshot finite;
     Check(ParseConfig(full, &finite).ok(), "finite producer poll config");
     const auto dot = source.find('.');
-    auto* leases = static_cast<IDatabaseChannelLeaseProviderV1*>(
-        PluginLoader::Single()->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1));
+    auto* leases =
+        static_cast<IDatabaseChannelLeaseProvider*>(PluginLoader::Single()->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER));
     auto channel = leases->AcquireChannel(source.substr(0, dot).c_str(), source.substr(dot + 1).c_str());
     PollInput missing;
     Check(missing.Initialize(finite, channel, finite.config.source) != 0, "finite PCAP falsely provided progress");
@@ -1051,8 +1028,8 @@ void ModelOutputCases(const std::string& unique, const std::vector<Case>& cases)
         return response;
     };
     // A model-table failure follows a successful old managed publication. Report both truthfully.
-    auto* leases = static_cast<IDatabaseChannelLeaseProviderV1*>(
-        PluginLoader::Single()->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1));
+    auto* leases =
+        static_cast<IDatabaseChannelLeaseProvider*>(PluginLoader::Single()->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER));
     auto sqlite = leases->AcquireChannel("sqlite", "t73sqlite");
     Check(bool(sqlite), "model failure fixture channel");
     const auto failed_key = "t4-managed-fail-" + unique;
@@ -1112,14 +1089,14 @@ void ModelOutputCases(const std::string& unique, const std::vector<Case>& cases)
 }
 void ResultOutputCases(const std::string& root, const std::string& unique, const std::vector<Case>& cases) {
     auto* registry = static_cast<IChannelRegistry*>(PluginLoader::Single()->First(IID_CHANNEL_REGISTRY));
-    auto* leases = static_cast<IDatabaseChannelLeaseProviderV1*>(
-        PluginLoader::Single()->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1));
+    auto* leases =
+        static_cast<IDatabaseChannelLeaseProvider*>(PluginLoader::Single()->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER));
     auto csv = std::find_if(cases.begin(), cases.end(),
                             [](const auto& c) { return !c.empty && c.source.compare(0, 10, "dataframe.") == 0; });
     auto two =
         std::find_if(cases.begin(), cases.end(), [](const auto& c) { return !c.poll && c.source == "mysql.t73mysql"; });
     auto three = std::find_if(cases.begin(), cases.end(), [](const auto& c) {
-        return !c.poll && c.source == "mysql.t73mysql.npm_basic_ipv4_history_v1";
+        return !c.poll && c.source == "mysql.t73mysql.npm_basic_ipv4_history";
     });
     Check(csv != cases.end() && two != cases.end() && three != cases.end(), "T5 input fixtures");
     auto comparable = [](const std::string& target, const std::string& key) {
@@ -1263,7 +1240,7 @@ void ResultOutputCases(const std::string& root, const std::string& unique, const
               "joint failure left partial data");
         std::cout << "PASS T5 production joint transaction rollback " << backend << std::endl;
     }
-    Check(Query("SELECT * FROM " + csv->target + ".baseline_relation_fusion_v1 WHERE task_key='" + csv->key + "'")
+    Check(Query("SELECT * FROM " + csv->target + ".baseline_relation_fusion WHERE task_key='" + csv->key + "'")
                   ->num_rows() > 0,
           "old managed Relation fusion missing");
     const auto seed = "SELECT * FROM " + csv->source + " USING explore.baseliner WITH config=" + SqlLiteral(csv->ref);
@@ -1335,19 +1312,17 @@ int main() {
                                   root + R"(/input.pcap","format":"pcap","batch_packets":32}})";
             Call("/channels/stream/add", request);
             auto exact = std::string(source) + ".t73" + source;
-            auto result = Execute("SELECT * FROM pcapfile." + name +
-                                  " USING npm.basic WITH "
-                                  "input_namespace='t73-production',source_domains='0:1',features='basic',udp_idle_"
-                                  "timeout_ns=120000000000,output_"
-                                  "interval_ns=60000000000 INTO " +
-                                  exact);
+            auto result = Execute(
+                "SELECT * FROM pcapfile." + name +
+                R"JSON( USING npm.basic WITH input_namespace='t73-production',source_domains='0:1',features='basic',parameters='{"schema_version":1,"core":{"udp_idle_timeout_ns":120000000000,"output_interval_ns":60000000000}}' INTO )JSON" +
+                exact);
             const std::string run = result["result"]["run_id"].GetString();
             environment.capture.pcap_name = name;
             const auto poll_run = CaptureRun(exact, "producer-" + std::string(source) + unique);
             sources[exact + "|" + poll_run] =
-                Fingerprint(*Query("SELECT * FROM " + exact + ".npm_basic_ipv4_history_v1 WHERE __npm_run_id='" +
+                Fingerprint(*Query("SELECT * FROM " + exact + ".npm_basic_ipv4_history WHERE __npm_run_id='" +
                                    poll_run + "' ORDER BY session_id,revision"));
-            auto before = Query("SELECT * FROM " + exact + ".npm_basic_ipv4_history_v1 WHERE __npm_run_id='" + run +
+            auto before = Query("SELECT * FROM " + exact + ".npm_basic_ipv4_history WHERE __npm_run_id='" + run +
                                 "' ORDER BY session_id,revision");
             Check(before->num_rows() >= 120, "real NPM SQL rows");
             sources[exact + "|" + run] = Fingerprint(*before);
@@ -1396,7 +1371,7 @@ int main() {
     }
     // Real StopAll/Unload/Load, no model service or Arrow products survive the library owner.
     {
-        Environment restarted(isolated, root);
+        Environment restarted(isolated, root, true);
         for (auto& c : cases) {
             Run(c, true);
             auto b = Query(Results(c));
@@ -1416,7 +1391,7 @@ int main() {
         for (const auto& source : sources) {
             auto p = source.first.find('|');
             auto exact = source.first.substr(0, p), run = source.first.substr(p + 1);
-            auto b = Query("SELECT * FROM " + exact + ".npm_basic_ipv4_history_v1 WHERE __npm_run_id='" + run +
+            auto b = Query("SELECT * FROM " + exact + ".npm_basic_ipv4_history WHERE __npm_run_id='" + run +
                            "' ORDER BY session_id,revision");
             Check(Fingerprint(*b) == source.second, "source contents/schema changed");
         }

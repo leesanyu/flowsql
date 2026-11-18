@@ -15,7 +15,7 @@
 using namespace flowsql;
 using namespace flowsql::baseliner;
 namespace {
-using Readiness = BaselineEvaluationReadinessV1;
+using Readiness = BaselineEvaluationReadiness;
 constexpr auto value_config =
     R"({"schema_version":1,"task_id":"readiness","task_name":"readiness","task_kind":"value","feature_id":"v","feature_type":"value_basic","profile":"default","clock_spec":{"bucket_seconds":60,"timezone":"UTC"},"calendar_ref":{"calendar_id":"cn-holiday","calendar_version":"2026.1"}})";
 constexpr auto ratio_config =
@@ -47,7 +47,6 @@ struct Environment {
 };
 struct Value {
     using Task = IBaselineValueTask;
-    using Evaluation = IBaselineValueEvaluationV1;
     using Observation = ValueRollingObservation;
     using Bootstrap = ValueBootstrapInput;
     static auto Create(Environment& e) {
@@ -58,7 +57,6 @@ struct Value {
 };
 struct Ratio {
     using Task = IBaselineRatioTask;
-    using Evaluation = IBaselineRatioEvaluationV1;
     using Observation = RatioRollingObservation;
     using Bootstrap = RatioBootstrapInput;
     static auto Create(Environment& e) {
@@ -76,50 +74,50 @@ auto Snapshot(const std::shared_ptr<IBaselineTask>& t) {
 auto Bind(Environment& e, const std::shared_ptr<IBaselineTask>& t) {
     auto control = e.plugin.Bind(t, {8, 8, 8});
     assert(control.first == BaselineStatus::kOk && control.second);
-    auto checkpoint = e.plugin.Bind(t, control.second, BaselineCheckpointBindingV1{});
+    auto checkpoint = e.plugin.Bind(t, control.second, BaselineCheckpointBinding{});
     assert(checkpoint.first == BaselineStatus::kOk && checkpoint.second);
     return checkpoint.second;
 }
 template <class T>
-void ScalarParity() {
-    Environment old_env, new_env;
-    auto old_task = T::Create(old_env), new_task = T::Create(new_env);
-    auto* evaluation = dynamic_cast<typename T::Evaluation*>(new_task.get());
-    assert(old_task && new_task && evaluation);
-    auto old_checkpoint = Bind(old_env, old_task), new_checkpoint = Bind(new_env, new_task);
+void ScalarDeterminism() {
+    Environment reference_env, observed_env;
+    auto reference_task = T::Create(reference_env), observed_task = T::Create(observed_env);
+    auto* evaluation = observed_task.get();
+    assert(reference_task && observed_task && evaluation);
+    auto reference_checkpoint = Bind(reference_env, reference_task),
+         observed_checkpoint = Bind(observed_env, observed_task);
     bool skipped = false;
     for (int64_t t = 0; t < 80; ++t) {
-        auto old = old_task->SubmitObservation(T::Input(t), {});
-        auto next = evaluation->SubmitObservationWithReadiness(T::Input(t), {});
-        Equal(old, next.result);
+        auto reference = reference_task->SubmitObservation(T::Input(t), {}).result;
+        auto next = evaluation->SubmitObservation(T::Input(t), {});
+        Equal(reference, next.result);
         assert(next.readiness == (t == 0 ? Readiness::kColdStart : Readiness::kReady));
-        assert(Snapshot(old_task) == Snapshot(new_task));
-        assert(old_checkpoint->ExportCheckpoint(BaselineSerializationFormat::kJson) ==
-               new_checkpoint->ExportCheckpoint(BaselineSerializationFormat::kJson));
+        assert(Snapshot(reference_task) == Snapshot(observed_task));
+        assert(reference_checkpoint->ExportCheckpoint(BaselineSerializationFormat::kJson) ==
+               observed_checkpoint->ExportCheckpoint(BaselineSerializationFormat::kJson));
         skipped |= t > 0 && !next.result.can_update;
-        auto before = Snapshot(new_task);
-        auto duplicate = evaluation->SubmitObservationWithReadiness(T::Input(t), {});
+        auto before = Snapshot(observed_task);
+        auto duplicate = evaluation->SubmitObservation(T::Input(t), {});
         assert(duplicate.result.status == BaselineStatus::kInvalidArgument &&
                duplicate.readiness == Readiness::kUnavailable);
-        assert(Snapshot(new_task) == before);
-        auto invalid = evaluation->SubmitObservationWithReadiness(T::Invalid(t + 1), {});
+        assert(Snapshot(observed_task) == before);
+        auto invalid = evaluation->SubmitObservation(T::Invalid(t + 1), {});
         assert(invalid.result.status != BaselineStatus::kOk && invalid.readiness == Readiness::kUnavailable);
-        assert(Snapshot(new_task) == before);
+        assert(Snapshot(observed_task) == before);
     }
     assert(skipped);
-    auto saved = new_checkpoint->ExportCheckpoint(BaselineSerializationFormat::kJson);
+    auto saved = observed_checkpoint->ExportCheckpoint(BaselineSerializationFormat::kJson);
     Environment restored_env;
     auto restored_task = T::Create(restored_env);
     auto restored_checkpoint = Bind(restored_env, restored_task);
-    BaselineCheckpointRestoreV1 request;
+    BaselineCheckpointRestore request;
     request.content = saved.second;
     assert(restored_checkpoint->RestoreCheckpoint(request) == BaselineStatus::kOk);
-    auto first =
-        dynamic_cast<typename T::Evaluation*>(restored_task.get())->SubmitObservationWithReadiness(T::Input(80), {});
+    auto first = restored_task->SubmitObservation(T::Input(80), {});
     assert(first.readiness == Readiness::kReady);
-    Equal(old_task->SubmitObservation(T::Input(80), {}), first.result);
-    new_task->Close();
-    assert(evaluation->SubmitObservationWithReadiness(T::Input(81), {}).readiness == Readiness::kUnavailable);
+    Equal(reference_task->SubmitObservation(T::Input(80), {}).result, first.result);
+    observed_task->Close();
+    assert(evaluation->SubmitObservation(T::Input(81), {}).readiness == Readiness::kUnavailable);
 }
 template <class T>
 void BootstrapReadiness() {
@@ -135,7 +133,7 @@ void BootstrapReadiness() {
             input.observations.push_back({t, 800. + t % 5, 1000.});
     }
     assert(task->Bootstrap(input).ok());
-    auto result = dynamic_cast<typename T::Evaluation*>(task.get())->SubmitObservationWithReadiness(T::Input(200), {});
+    auto result = task->SubmitObservation(T::Input(200), {});
     assert(result.result.status == BaselineStatus::kOk && result.readiness == Readiness::kReady);
 }
 ConfigSnapshot Config(BaselineTaskKind kind) {
@@ -177,11 +175,11 @@ void LowSupportAndInitialization() {
     auto v = e.plugin.CreateValueTask(config, BaselineSerializationFormat::kJson).second;
     auto r = Ratio::Create(e);
     assert(v && r);
-    auto* ve = dynamic_cast<IBaselineValueEvaluationV1*>(v.get());
-    auto* re = dynamic_cast<IBaselineRatioEvaluationV1*>(r.get());
+    auto* ve = v.get();
+    auto* re = r.get();
     assert(ve && re);
-    auto unavailable_v = ve->SubmitObservationWithReadiness({"s", 0, 100., 1}, {});
-    auto unavailable_r = re->SubmitObservationWithReadiness({"s", 0, 1., 1.}, {});
+    auto unavailable_v = ve->SubmitObservation({"s", 0, 100., 1}, {});
+    auto unavailable_r = re->SubmitObservation({"s", 0, 1., 1.}, {});
     assert(unavailable_v.readiness == Readiness::kUnavailable &&
            unavailable_v.result.status == BaselineStatus::kInsufficientData);
     assert(unavailable_r.readiness == Readiness::kUnavailable &&
@@ -190,12 +188,12 @@ void LowSupportAndInitialization() {
     RollingSubmitOptions disabled;
     disabled.allow_auto_init_from_empty = false;
     disabled.allow_auto_init_from_bootstrap = false;
-    assert(ve->SubmitObservationWithReadiness({"s", 0, 100., 1000}, disabled).readiness == Readiness::kUnavailable);
-    assert(re->SubmitObservationWithReadiness({"s", 0, 800., 1000.}, disabled).readiness == Readiness::kUnavailable);
-    assert(ve->SubmitObservationWithReadiness({"s", 0, 100., 1000}, {}).readiness == Readiness::kColdStart);
-    assert(re->SubmitObservationWithReadiness({"s", 0, 800., 1000.}, {}).readiness == Readiness::kColdStart);
-    auto low_v = ve->SubmitObservationWithReadiness({"s", 1, 100., 1}, {});
-    auto low_r = re->SubmitObservationWithReadiness({"s", 1, 1., 1.}, {});
+    assert(ve->SubmitObservation({"s", 0, 100., 1000}, disabled).readiness == Readiness::kUnavailable);
+    assert(re->SubmitObservation({"s", 0, 800., 1000.}, disabled).readiness == Readiness::kUnavailable);
+    assert(ve->SubmitObservation({"s", 0, 100., 1000}, {}).readiness == Readiness::kColdStart);
+    assert(re->SubmitObservation({"s", 0, 800., 1000.}, {}).readiness == Readiness::kColdStart);
+    auto low_v = ve->SubmitObservation({"s", 1, 100., 1}, {});
+    auto low_r = re->SubmitObservation({"s", 1, 1., 1.}, {});
     for (const auto& result : {low_v, low_r}) {
         assert(result.readiness == Readiness::kReady && result.result.status == BaselineStatus::kOk);
         assert(!result.result.can_score && !result.result.can_update && !result.result.can_alert);
@@ -222,19 +220,19 @@ std::string RelationOptions() {
 }
 void RelationReadiness() {
     auto options = RelationOptions();
-    Environment old_env(options.c_str()), new_env(options.c_str());
+    Environment reference_env(options.c_str()), observed_env(options.c_str());
     auto c = Config(BaselineTaskKind::kRelation);
-    auto old_task = old_env.plugin
-                        .CreateRelationTask(c.config.datasets[0].metrics[0].algorithm_config_json,
-                                            BaselineSerializationFormat::kJson)
-                        .second;
-    auto task = new_env.plugin
+    auto reference_task = reference_env.plugin
+                              .CreateRelationTask(c.config.datasets[0].metrics[0].algorithm_config_json,
+                                                  BaselineSerializationFormat::kJson)
+                              .second;
+    auto task = observed_env.plugin
                     .CreateRelationTask(c.config.datasets[0].metrics[0].algorithm_config_json,
                                         BaselineSerializationFormat::kJson)
                     .second;
-    auto* evaluation = dynamic_cast<IBaselineRelationEvaluationV1*>(task.get());
-    assert(old_task && task && evaluation);
-    auto oc = Bind(old_env, old_task), nc = Bind(new_env, task);
+    auto* evaluation = task.get();
+    assert(reference_task && task && evaluation);
+    auto oc = Bind(reference_env, reference_task), nc = Bind(observed_env, task);
     std::map<std::string, bool> initialized;
     bool mixed = false, switched = false;
     uint64_t first_basis = 0;
@@ -246,12 +244,12 @@ void RelationReadiness() {
         obs.metrics = {{"m", 1000., 3, {500., 300., 200.}}};
         RelationRollingSubmitOptions submit;
         submit.include_diagnostics = t % 2 == 0;
-        auto old = old_task->SubmitObservation(obs, submit);
-        auto next = evaluation->SubmitObservationWithReadiness(obs, submit);
-        assert(baseline::checkpoint::Encode(old, 1 << 24) == baseline::checkpoint::Encode(next.result, 1 << 24));
+        auto reference = reference_task->SubmitObservation(obs, submit).result;
+        auto next = evaluation->SubmitObservation(obs, submit);
+        assert(baseline::checkpoint::Encode(reference, 1 << 24) == baseline::checkpoint::Encode(next.result, 1 << 24));
         assert(oc->ExportCheckpoint(BaselineSerializationFormat::kJson) ==
                nc->ExportCheckpoint(BaselineSerializationFormat::kJson));
-        assert(Snapshot(old_task) == Snapshot(task));
+        assert(Snapshot(reference_task) == Snapshot(task));
         assert(next.routed_readiness.size() == next.result.routed_results.size());
         bool ready = false, cold = false;
         for (size_t i = 0; i < next.routed_readiness.size(); ++i) {
@@ -273,7 +271,7 @@ void RelationReadiness() {
         }
         mixed |= ready && cold;
         auto before = Snapshot(task);
-        auto duplicate = evaluation->SubmitObservationWithReadiness(obs, submit);
+        auto duplicate = evaluation->SubmitObservation(obs, submit);
         assert(duplicate.result.status == BaselineStatus::kInvalidArgument && duplicate.routed_readiness.empty() &&
                duplicate.result.routed_results.empty());
         assert(before == Snapshot(task));
@@ -286,18 +284,18 @@ void RelationReadiness() {
     obs.bucket_id = 40;
     obs.group_idx = {4, 5, 6};
     obs.metrics = {{"m", 1000., 3, {500., 300., 200.}}};
-    auto next = evaluation->SubmitObservationWithReadiness(obs, hidden);
-    auto old = old_task->SubmitObservation(obs, hidden);
+    auto next = evaluation->SubmitObservation(obs, hidden);
+    auto reference = reference_task->SubmitObservation(obs, hidden).result;
     assert(next.result.status == BaselineStatus::kOk && next.result.routed_results.empty() &&
            next.routed_readiness.empty());
-    assert(baseline::checkpoint::Encode(old, 1 << 24) == baseline::checkpoint::Encode(next.result, 1 << 24));
+    assert(baseline::checkpoint::Encode(reference, 1 << 24) == baseline::checkpoint::Encode(next.result, 1 << 24));
     assert(oc->ExportCheckpoint(BaselineSerializationFormat::kJson) ==
            nc->ExportCheckpoint(BaselineSerializationFormat::kJson));
 }
 
 // Decorate real task results to verify that diagnostic text cannot control output validity.
 struct Calls {
-    int legacy = 0, typed = 0, closed = 0, bound = 0;
+    int submitted = 0, closed = 0, bound = 0;
     int diagnostics = 0;
     bool mismatch = false, unavailable = false;
 };
@@ -337,10 +335,16 @@ struct ValueProxy : IBaselineValueTask, ProxyRoot {
         ++calls->closed;
         return inner->Close();
     }
-    RollingBaselineResult SubmitObservation(const ValueRollingObservation& obs,
-                                            const RollingSubmitOptions& options) override {
-        ++calls->legacy;
-        return inner->SubmitObservation(obs, options);
+    BaselineEvaluationResult SubmitObservation(const ValueRollingObservation& obs,
+                                               const RollingSubmitOptions& options) override {
+        ++calls->submitted;
+        auto output = inner->SubmitObservation(obs, options);
+        Diagnostics(output.result, calls->diagnostics);
+        if (calls->unavailable) {
+            output.readiness = Readiness::kUnavailable;
+            output.result.status = BaselineStatus::kNotTrained;
+        }
+        return output;
     }
     RollingPrediction PredictRolling(std::string_view series_key, int64_t bucket_id) const override {
         return inner->PredictRolling(series_key, bucket_id);
@@ -369,22 +373,6 @@ struct ValueProxy : IBaselineValueTask, ProxyRoot {
         return inner->ExportBootstrapSeed(format);
     }
 };
-struct TypedValueProxy final : ValueProxy, IBaselineValueEvaluationV1 {
-    using ValueProxy::ValueProxy;
-    BaselineEvaluationResultV1 SubmitObservationWithReadiness(const ValueRollingObservation& obs,
-                                                              const RollingSubmitOptions& options) override {
-        ++calls->typed;
-        auto* evaluation = dynamic_cast<IBaselineValueEvaluationV1*>(inner.get());
-        assert(evaluation);
-        auto output = evaluation->SubmitObservationWithReadiness(obs, options);
-        Diagnostics(output.result, calls->diagnostics);
-        if (calls->unavailable) {
-            output.readiness = Readiness::kUnavailable;
-            output.result.status = BaselineStatus::kNotTrained;
-        }
-        return output;
-    }
-};
 struct RatioProxy : IBaselineRatioTask, ProxyRoot {
     std::shared_ptr<IBaselineRatioTask> inner;
     std::shared_ptr<Calls> calls;
@@ -408,10 +396,16 @@ struct RatioProxy : IBaselineRatioTask, ProxyRoot {
         ++calls->closed;
         return inner->Close();
     }
-    RollingBaselineResult SubmitObservation(const RatioRollingObservation& obs,
-                                            const RollingSubmitOptions& options) override {
-        ++calls->legacy;
-        return inner->SubmitObservation(obs, options);
+    BaselineEvaluationResult SubmitObservation(const RatioRollingObservation& obs,
+                                               const RollingSubmitOptions& options) override {
+        ++calls->submitted;
+        auto output = inner->SubmitObservation(obs, options);
+        Diagnostics(output.result, calls->diagnostics);
+        if (calls->unavailable) {
+            output.readiness = Readiness::kUnavailable;
+            output.result.status = BaselineStatus::kNotTrained;
+        }
+        return output;
     }
     RollingPrediction PredictRolling(std::string_view series_key, int64_t bucket_id) const override {
         return inner->PredictRolling(series_key, bucket_id);
@@ -440,22 +434,6 @@ struct RatioProxy : IBaselineRatioTask, ProxyRoot {
         return inner->ExportBootstrapSeed(format);
     }
 };
-struct TypedRatioProxy final : RatioProxy, IBaselineRatioEvaluationV1 {
-    using RatioProxy::RatioProxy;
-    BaselineEvaluationResultV1 SubmitObservationWithReadiness(const RatioRollingObservation& obs,
-                                                              const RollingSubmitOptions& options) override {
-        ++calls->typed;
-        auto* evaluation = dynamic_cast<IBaselineRatioEvaluationV1*>(inner.get());
-        assert(evaluation);
-        auto output = evaluation->SubmitObservationWithReadiness(obs, options);
-        Diagnostics(output.result, calls->diagnostics);
-        if (calls->unavailable) {
-            output.readiness = Readiness::kUnavailable;
-            output.result.status = BaselineStatus::kNotTrained;
-        }
-        return output;
-    }
-};
 struct RelationProxy : IBaselineRelationTask, ProxyRoot {
     std::shared_ptr<IBaselineRelationTask> inner;
     std::shared_ptr<Calls> calls;
@@ -479,10 +457,13 @@ struct RelationProxy : IBaselineRelationTask, ProxyRoot {
         ++calls->closed;
         return inner->Close();
     }
-    RelationRollingResult SubmitObservation(const RelationRollingObservation& obs,
-                                            const RelationRollingSubmitOptions& options) override {
-        ++calls->legacy;
-        return inner->SubmitObservation(obs, options);
+    BaselineRelationEvaluationResult SubmitObservation(const RelationRollingObservation& obs,
+                                                       const RelationRollingSubmitOptions& options) override {
+        ++calls->submitted;
+        auto output = inner->SubmitObservation(obs, options);
+        for (auto& r : output.result.routed_results) Diagnostics(r.rolling, calls->diagnostics);
+        if (calls->mismatch && !output.routed_readiness.empty()) output.routed_readiness.pop_back();
+        return output;
     }
     RollingPrediction PredictRoutedSummary(const RelationRoutedSummaryQuery& query, int64_t bucket_id) const override {
         return inner->PredictRoutedSummary(query, bucket_id);
@@ -505,34 +486,17 @@ struct RelationProxy : IBaselineRelationTask, ProxyRoot {
         return inner->QueryBootstrapBasis(format);
     }
 };
-struct TypedRelationProxy final : RelationProxy, IBaselineRelationEvaluationV1 {
-    using RelationProxy::RelationProxy;
-    BaselineRelationEvaluationResultV1 SubmitObservationWithReadiness(
-        const RelationRollingObservation& obs, const RelationRollingSubmitOptions& options) override {
-        ++calls->typed;
-        auto* evaluation = dynamic_cast<IBaselineRelationEvaluationV1*>(inner.get());
-        assert(evaluation);
-        auto output = evaluation->SubmitObservationWithReadiness(obs, options);
-        for (auto& r : output.result.routed_results) Diagnostics(r.rolling, calls->diagnostics);
-        if (calls->mismatch && !output.routed_readiness.empty()) output.routed_readiness.pop_back();
-        return output;
-    }
-};
 
-struct ProxyService final : IBaselineService, IBaselineStateControlServiceV1 {
+struct ProxyService final : IBaselineService, IBaselineStateControlService {
     baseline::BaselinePlugin& plugin;
-    bool typed;
     std::shared_ptr<Calls> calls = std::make_shared<Calls>();
-    ProxyService(Environment& e, bool ready) : plugin(e.plugin), typed(ready) {}
+    explicit ProxyService(Environment& e) : plugin(e.plugin) {}
     std::pair<BaselineStatus, std::shared_ptr<IBaselineValueTask>> CreateValueTask(
         std::string_view config, BaselineSerializationFormat format) override {
         auto created = plugin.CreateValueTask(config, format);
         assert(created.first == BaselineStatus::kOk && created.second);
         std::shared_ptr<IBaselineValueTask> proxy;
-        if (typed)
-            proxy = std::make_shared<TypedValueProxy>(created.second, calls);
-        else
-            proxy = std::make_shared<ValueProxy>(created.second, calls);
+        proxy = std::make_shared<ValueProxy>(created.second, calls);
         return {created.first, std::move(proxy)};
     }
     std::pair<BaselineStatus, std::shared_ptr<IBaselineRatioTask>> CreateRatioTask(
@@ -540,10 +504,7 @@ struct ProxyService final : IBaselineService, IBaselineStateControlServiceV1 {
         auto created = plugin.CreateRatioTask(config, format);
         assert(created.first == BaselineStatus::kOk && created.second);
         std::shared_ptr<IBaselineRatioTask> proxy;
-        if (typed)
-            proxy = std::make_shared<TypedRatioProxy>(created.second, calls);
-        else
-            proxy = std::make_shared<RatioProxy>(created.second, calls);
+        proxy = std::make_shared<RatioProxy>(created.second, calls);
         return {created.first, std::move(proxy)};
     }
     std::pair<BaselineStatus, std::shared_ptr<IBaselineRelationTask>> CreateRelationTask(
@@ -551,36 +512,20 @@ struct ProxyService final : IBaselineService, IBaselineStateControlServiceV1 {
         auto created = plugin.CreateRelationTask(config, format);
         assert(created.first == BaselineStatus::kOk && created.second);
         std::shared_ptr<IBaselineRelationTask> proxy;
-        if (typed)
-            proxy = std::make_shared<TypedRelationProxy>(created.second, calls);
-        else
-            proxy = std::make_shared<RelationProxy>(created.second, calls);
+        proxy = std::make_shared<RelationProxy>(created.second, calls);
         return {created.first, std::move(proxy)};
     }
     BaselineSerializationResult QueryServiceSnapshot(BaselineSerializationFormat format) const override {
         return plugin.QueryServiceSnapshot(format);
     }
-    std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControlV1>> Bind(
-        std::shared_ptr<IBaselineTask> task, const BaselineStateLimitsV1& limits) override {
+    std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControl>> Bind(
+        std::shared_ptr<IBaselineTask> task, const BaselineStateLimits& limits) override {
         ++calls->bound;
         auto* proxy = dynamic_cast<ProxyRoot*>(task.get());
         assert(proxy);
         return plugin.Bind(proxy->Inner(), limits);
     }
 };
-void MissingCapability() {
-    for (auto kind : {BaselineTaskKind::kValue, BaselineTaskKind::kRatio, BaselineTaskKind::kRelation}) {
-        Environment env;
-        ProxyService service(env, false);
-        EvaluationEngine e;
-        assert(e.Open(Config(kind), &service, &service) != 0);
-        assert(e.LastError().find("V1 capability") != std::string::npos);
-        assert(service.calls->legacy == 0 && service.calls->typed == 0 && service.calls->bound == 0 &&
-               service.calls->closed == 1);
-        EvaluationOutput out;
-        assert(e.Submit(Input(kind, 0), &out) != 0 && out.results.empty());
-    }
-}
 void OutputEqual(const EvaluationOutput& a, const EvaluationOutput& b) {
     assert(a.results.size() == b.results.size() && a.forecasts.size() == b.forecasts.size());
     auto equal = [](const EvaluationRow& x, const EvaluationRow& y) {
@@ -596,7 +541,7 @@ void DiagnosticIndependence() {
         for (int mode : {1, 2}) {
             auto options = RelationOptions();
             Environment original(options.c_str()), decorated(options.c_str());
-            ProxyService left(original, true), right(decorated, true);
+            ProxyService left(original), right(decorated);
             right.calls->diagnostics = mode;
             EvaluationEngine a, b;
             auto c = Config(kind);
@@ -614,13 +559,12 @@ void DiagnosticIndependence() {
                     assert(y.forecasts.size() == 2 && y.forecasts[0].values.expected);
                 }
             }
-            assert(left.calls->typed == 6 && right.calls->typed == 6 && left.calls->legacy == 0 &&
-                   right.calls->legacy == 0);
+            assert(left.calls->submitted == 6 && right.calls->submitted == 6);
         }
     }
     for (auto kind : {BaselineTaskKind::kValue, BaselineTaskKind::kRatio}) {
         Environment env;
-        ProxyService service(env, true);
+        ProxyService service(env);
         service.calls->unavailable = true;
         service.calls->diagnostics = 2;
         EvaluationEngine e;
@@ -631,7 +575,7 @@ void DiagnosticIndependence() {
                out.results[0].values.status == BaselineStatus::kNotTrained);
     }
     Environment env;
-    ProxyService broken(env, true);
+    ProxyService broken(env);
     broken.calls->mismatch = true;
     EvaluationEngine e;
     assert(e.Open(Config(BaselineTaskKind::kRelation), &broken, &broken) == 0);
@@ -642,13 +586,12 @@ void DiagnosticIndependence() {
 
 }  // namespace
 int main() {
-    ScalarParity<Value>();
-    ScalarParity<Ratio>();
+    ScalarDeterminism<Value>();
+    ScalarDeterminism<Ratio>();
     BootstrapReadiness<Value>();
     BootstrapReadiness<Ratio>();
     LowSupportAndInitialization();
     RelationReadiness();
-    MissingCapability();
     DiagnosticIndependence();
     std::cout << "readiness contracts passed\n";
 }

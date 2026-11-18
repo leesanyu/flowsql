@@ -123,7 +123,7 @@ int64_t Scalar(Runtime& runtime, const std::string& sql) {
 void CheckNpm(Runtime& runtime, const std::string& run, const std::string& family) {
     const auto where = " WHERE __npm_run_id='" + run + "'";
     for (const auto* entity : {"basic_", "session_"}) {
-        const auto table = "npm_" + std::string(entity) + family + "_final_v1";
+        const auto table = "npm_" + std::string(entity) + family + "_final";
         const auto count = Scalar(runtime, "SELECT SUM(packets_ab+packets_ba) FROM " + table + where);
         const auto bytes = Scalar(runtime, "SELECT SUM(wire_bytes_ab+wire_bytes_ba) FROM " + table + where);
         if (count != 50 || bytes != 3200)
@@ -162,14 +162,14 @@ int main(int argc, char** argv) {
               "capture_channels");
         runtime.Call("/channels/kafka/connections/add", profile["PLAINTEXT"]["connection"]);
         auto sink = Parse(
-            R"({"name":"out","connection_name":"real","role":"sink","topic":"events","payload_kind":"packet","payload_options":{"sink":{"encoding":"flowsql_packet_v1","stream_id":"probe-a","delivery_timeout_ms":5000}}})");
+            R"({"name":"out","connection_name":"real","role":"sink","topic":"events","payload_kind":"packet","payload_options":{"sink":{"encoding":"flowsql_packet","stream_id":"probe-a","delivery_timeout_ms":5000}}})");
         String(sink, "topic", topic, sink.GetAllocator());
         runtime.Call("/channels/kafka/channels/add", sink);
         runtime.Submit("publish", "SELECT * FROM netadapter.edge INTO kafka.out");
         const auto ready = WaitPublication(runtime, "publish");
         const auto& binding = ready["binding"];
         auto source = Parse(
-            R"({"name":"in","connection_name":"real","role":"source","topic":"events","consumer_group":"analysis","payload_kind":"packet","payload_options":{"source":{"encoding":"flowsql_packet_v1","stream_id":"probe-a"}}})");
+            R"({"name":"in","connection_name":"real","role":"source","topic":"events","consumer_group":"analysis","payload_kind":"packet","payload_options":{"source":{"encoding":"flowsql_packet","stream_id":"probe-a"}}})");
         auto& sa = source.GetAllocator();
         String(source, "topic", topic, sa);
         String(source, "consumer_group", group, sa);
@@ -194,7 +194,26 @@ int main(int argc, char** argv) {
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const auto captureReady = [&](uint64_t packets) {
+            bool ready = false;
+            manager->QueryChannels([&](const auto& type, const auto& name, const auto& option, const auto& state) {
+                if (type != "netadapter" || name != "local" || state != "busy") return;
+                const auto details = Parse(option);
+                const auto& readers = details["readers"];
+                if (readers.Empty()) return;
+                uint64_t delivered = 0;
+                for (const auto& input : readers[0]["inputs"].GetArray())
+                    delivered += input["delivered_packets"].GetUint64();
+                ready = delivered >= packets && (packets || !readers[0]["inputs"][0]["received_packets"].IsNull());
+                if (!ready && Clock::now() >= deadline) std::cerr << "local_capture=" << option << '\n';
+            });
+            return ready;
+        };
+        while (!captureReady(0)) {
+            Check(Clock::now() < deadline, "local_capture_start_timeout");
+            Check(Text(runtime.Status("local"), "status") == "running", "local_capture_start_failed");
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
         Send(argv[2]);
         const auto publication = WaitPublication(runtime, "publish", 100);
         runtime.Status("publish", "stop");
@@ -204,6 +223,12 @@ int main(int argc, char** argv) {
         Check(result["packets"]["confirmed"].GetUint64() == 100 &&
                   result["capture_counters"][0]["source_dropped_packets"].GetUint64() == 0,
               "capture_no_loss");
+        while (!captureReady(100)) {
+            if (Clock::now() >= deadline) std::cerr << Encode(runtime.Status("local")) << '\n';
+            Check(Clock::now() < deadline, "local_capture_delivery_timeout");
+            Check(Text(runtime.Status("local"), "status") == "running", "local_capture_delivery_failed");
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
         runtime.Status("local", "stop");
         const auto local = runtime.Terminal("local");
         if (Text(local, "status") != "stopped") std::cerr << Encode(local) << '\n';
@@ -215,7 +240,7 @@ int main(int argc, char** argv) {
         runtime.Submit("remote",
                        "SELECT * FROM kafka.in USING npm.basic WITH features='basic,session' INTO sqlite.results");
         // Wait for source acknowledgement, not an elapsed-time guess or a fabricated remote EOF.
-        auto* factory = static_cast<IKafkaConnectionServiceV1*>(runtime.loader->First(IID_KAFKA_CONNECTION_SERVICE_V1));
+        auto* factory = static_cast<IKafkaConnectionService*>(runtime.loader->First(IID_KAFKA_CONNECTION_SERVICE));
         Check(factory, "sessions");
         const auto consumed_deadline = Clock::now() + std::chrono::seconds(15);
         for (;;) {

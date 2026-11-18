@@ -27,7 +27,8 @@ struct Runtime {
         const char* options[]{config.c_str(), nullptr, catalog.c_str()};
         const int skip = semantics ? 0 : 1;
         assert(loader->Load(".", libraries + skip, options + skip, 3 - skip) == 0);
-        assert(loader->StartAll() == 0);
+        const int started = loader->StartAll();
+        assert(semantics ? started == 0 : started != 0);
     }
     ~Runtime() { loader->Unload(); }
 };
@@ -46,13 +47,13 @@ void VerifyPassthrough(Runtime& runtime) {
     auto* registry = static_cast<IBuiltinRegistry*>(runtime.loader->First(IID_BUILTIN_REGISTRY));
     assert(registry);
     std::unique_ptr<IOperator> op(registry->CreateBuiltinOperator("builtin", "passthrough"));
-    auto* identity = dynamic_cast<IOperatorContractIdentityV1*>(op.get());
+    auto* identity = dynamic_cast<IOperatorContractIdentity*>(op.get());
     assert(identity && op->Category() == "builtin" && op->Name() == "passthrough");
     const auto component = identity->ContractIdentity();
     assert(component.contract_state == "declared" && component.component_revision.size() == 64);
     Json request(rapidjson::kObjectType), response;
     Set(request, "exact_reference", component.contract_ref, request.GetAllocator());
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     assert(contracts::Control(runtime.loader, "resolve", request, &response, &error) == 0);
     const auto& schema = response["data"]["document"]["configuration"]["invocation_schema"];
     assert(schema.HasMember("properties"));
@@ -103,20 +104,19 @@ void VerifyPassthrough(Runtime& runtime) {
 int main() {
     char path[] = "/tmp/flowsql_contract_registration_XXXXXX";
     assert(mkdtemp(path));
-    OperatorComponentContractV1 held;
+    OperatorComponentContract held;
     {
         Runtime runtime(path);
         VerifyPassthrough(runtime);
-        auto* catalog =
-            static_cast<IOperatorContractCatalogV1*>(runtime.loader->First(IID_OPERATOR_CONTRACT_CATALOG_V1));
+        auto* catalog = static_cast<IOperatorContractCatalog*>(runtime.loader->First(IID_OPERATOR_CONTRACT_CATALOG));
         assert(catalog);
-        DataSemanticsErrorV1 e;
-        OperatorComponentContractV1 current;
+        DataSemanticsError e;
+        OperatorComponentContract current;
         assert(catalog->Lookup("fixture", "copy", &current, &e) == 0);
         assert(current.contract_state == "missing" && current.component_revision.empty());
         const auto original = Contract();
-        OperatorContractDeclarationV1 d{"fixture", "copy", std::string(64, 'a'), original, ""};
-        std::vector<PreparedOperatorContractV1> ready;
+        OperatorContractDeclaration d{"fixture", "copy", std::string(64, 'a'), original, ""};
+        std::vector<PreparedOperatorContract> ready;
         assert(catalog->Prepare({d}, &ready, &e) == 0);
         assert(ready.size() == 1 && ready[0].association.contract_ref == "operator_contract.fixture.copy@1");
         // Saving the definition does not claim the component is associated.
@@ -160,12 +160,12 @@ int main() {
         auto first = d, second = d;
         first.component_revision = std::string(64, 'b');
         second.component_revision = std::string(64, 'c');
-        std::vector<PreparedOperatorContractV1> a, b;
+        std::vector<PreparedOperatorContract> a, b;
         assert(catalog->Prepare({first}, &a, &e) == 0);
         assert(catalog->Prepare({second}, &b, &e) == 0);
         std::atomic<int> won{0}, conflicted{0};
         auto commit = [&](const auto& candidate) {
-            DataSemanticsErrorV1 error;
+            DataSemanticsError error;
             if (catalog->Commit(candidate, &error) == 0)
                 ++won;
             else {
@@ -180,7 +180,7 @@ int main() {
         assert(catalog->Lookup("fixture", "copy", &current, &e) == 0);
         assert(current.component_revision != held.component_revision && current.contract_ref == held.contract_ref);
         // Failed batch rolls back a previously inserted row in the same transaction.
-        OperatorContractDeclarationV1 legacy{"legacy", "old", std::string(64, 'd'), "", ""};
+        OperatorContractDeclaration legacy{"legacy", "old", std::string(64, 'd'), "", ""};
         assert(catalog->Prepare({legacy}, &ready, &e) == 0);
         ready.push_back(a[0]);  // stale compare-and-swap, following a new legacy row
         assert(catalog->Commit(ready, &e) != 0 && e.code == "COMPONENT_CHANGED");
@@ -208,10 +208,9 @@ int main() {
     }
     {
         Runtime restarted(path);
-        auto* catalog =
-            static_cast<IOperatorContractCatalogV1*>(restarted.loader->First(IID_OPERATOR_CONTRACT_CATALOG_V1));
-        OperatorComponentContractV1 current;
-        DataSemanticsErrorV1 e;
+        auto* catalog = static_cast<IOperatorContractCatalog*>(restarted.loader->First(IID_OPERATOR_CONTRACT_CATALOG));
+        OperatorComponentContract current;
+        DataSemanticsError e;
         assert(catalog->Lookup("fixture", "copy", &current, &e) == 0);
         assert(current.contract_ref == held.contract_ref && current.component_revision != held.component_revision);
         assert(held.component_revision == std::string(64, 'a'));
@@ -219,18 +218,18 @@ int main() {
     {
         Runtime unavailable(path, false);
         auto* catalog =
-            static_cast<IOperatorContractCatalogV1*>(unavailable.loader->First(IID_OPERATOR_CONTRACT_CATALOG_V1));
-        OperatorComponentContractV1 current;
-        DataSemanticsErrorV1 e;
+            static_cast<IOperatorContractCatalog*>(unavailable.loader->First(IID_OPERATOR_CONTRACT_CATALOG));
+        OperatorComponentContract current;
+        DataSemanticsError e;
         assert(catalog->Lookup("fixture", "copy", &current, &e) == 0);
-        std::vector<PreparedOperatorContractV1> ready;
-        OperatorContractDeclarationV1 changed{"fixture", "copy", std::string(64, 'e'), Contract(),
-                                              current.component_revision};
+        std::vector<PreparedOperatorContract> ready;
+        OperatorContractDeclaration changed{"fixture", "copy", std::string(64, 'e'), Contract(),
+                                            current.component_revision};
         assert(catalog->Prepare({changed}, &ready, &e) != 0 && e.code == "UNAVAILABLE" && ready.empty());
-        OperatorComponentContractV1 after;
+        OperatorComponentContract after;
         assert(catalog->Lookup("fixture", "copy", &after, &e) == 0);
         assert(after.component_revision == current.component_revision && after.contract_ref == held.contract_ref);
     }
     std::cout << "PASS: actual plugins, definition/association separation, component CAS, batch rollback, restart, "
-                 "legacy ABI\n";
+                 "missing required semantics dependency rejected\n";
 }

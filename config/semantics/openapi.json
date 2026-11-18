@@ -299,7 +299,7 @@
                 "name": "request.duration",
                 "expected_current_revision": 0,
                 "document": {
-                  "schema_id": "flowsql.data-standard.v1",
+                  "schema_id": "flowsql.data-standard",
                   "title": "请求耗时",
                   "definition": {
                     "state": "declared",
@@ -598,7 +598,7 @@
                 "kind": "standard",
                 "name": "request.duration",
                 "format": "json",
-                "content": "{\n  \"schema_id\": \"flowsql.data-standard.v1\",\n  \"title\": \"请求耗时\",\n  \"definition\": {\n    \"state\": \"declared\",\n    \"value\": \"一次请求从开始到结束的经过时间\",\n    \"origin\": \"manual\"\n  },\n  \"scope\": {\n    \"state\": \"declared\",\n    \"value\": \"应用请求\",\n    \"origin\": \"manual\"\n  },\n  \"unit\": {\n    \"state\": \"declared\",\n    \"value\": {\n      \"code\": \"ms\",\n      \"label\": \"毫秒\"\n    },\n    \"origin\": \"manual\"\n  }\n}\n"
+                "content": "{\n  \"schema_id\": \"flowsql.data-standard\",\n  \"title\": \"请求耗时\",\n  \"definition\": {\n    \"state\": \"declared\",\n    \"value\": \"一次请求从开始到结束的经过时间\",\n    \"origin\": \"manual\"\n  },\n  \"scope\": {\n    \"state\": \"declared\",\n    \"value\": \"应用请求\",\n    \"origin\": \"manual\"\n  },\n  \"unit\": {\n    \"state\": \"declared\",\n    \"value\": {\n      \"code\": \"ms\",\n      \"label\": \"毫秒\"\n    },\n    \"origin\": \"manual\"\n  }\n}\n"
               }
             }
           }
@@ -1460,7 +1460,7 @@
             }
           }
         },
-        "description": "Save object-local channel descriptions with captured basis. Supply exactly one of legacy changes or editor_changes. Omitted edit keys preserve existing semantics; null or blank text clears a manual declaration to unknown. The editor supports text, units and typed time edits (Unix, native datetime, duration). describe context.editor_fields supplies read-only source facts and conflicts without writes. Relation arrays replace the object relation set; omission preserves it and [] removes it. Source names are mapped to stable IDs; each exact target dictionary and its fields must resolve, with no repeated source or target per relation. No target description is implicitly created."
+        "description": "Save object-local channel descriptions with captured basis. Supply editor_changes. Omitted edit keys preserve existing semantics; null or blank text clears a manual declaration to unknown. The editor supports text, units and typed time edits (Unix, native datetime, duration). describe context.editor_fields supplies read-only source facts and conflicts without writes. Relation arrays replace the object relation set; omission preserves it and [] removes it. Source names are mapped to stable IDs; each exact target dictionary and its fields must resolve, with no repeated source or target per relation. No target description is implicitly created."
       }
     },
     "/operators/save-description": {

@@ -10,5 +10,5 @@ class AfPacketPlugin final : public CaptureBackendPlugin {
 }  // namespace flowsql::channels::netadapter
 BEGIN_PLUGIN_REGIST(flowsql::channels::netadapter::AfPacketPlugin)
 ____INTERFACE(flowsql::IID_PLUGIN, flowsql::IPlugin)
-____INTERFACE(flowsql::IID_CAPTURE_BACKEND_PROVIDER_V1, flowsql::ICaptureBackendProviderV1)
+____INTERFACE(flowsql::IID_CAPTURE_BACKEND_PROVIDER, flowsql::ICaptureBackendProvider)
 END_PLUGIN_REGIST()

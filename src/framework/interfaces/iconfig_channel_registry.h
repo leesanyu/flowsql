@@ -14,8 +14,7 @@
 namespace flowsql {
 
 // {7a25ee39-9f46-4ad7-b924-d84dd45efa42}
-const Guid IID_CONFIG_CHANNEL_REGISTRY_V1 = {
-    0x7a25ee39, 0x9f46, 0x4ad7, {0xb9, 0x24, 0xd8, 0x4d, 0xd4, 0x5e, 0xfa, 0x42}};
+const Guid IID_CONFIG_CHANNEL_REGISTRY = {0x7a25ee39, 0x9f46, 0x4ad7, {0xb9, 0x24, 0xd8, 0x4d, 0xd4, 0x5e, 0xfa, 0x42}};
 
 struct ConfigChannelSnapshot {
     std::string channel_name;
@@ -29,8 +28,8 @@ struct ConfigChannelSnapshot {
 };
 
 /** Read-only, thread-safe snapshot lookup; independent of the SQL channel registry. */
-interface IConfigChannelRegistryV1 {
-    virtual ~IConfigChannelRegistryV1() = default;
+interface IConfigChannelRegistry {
+    virtual ~IConfigChannelRegistry() = default;
 
     /**
      * Resolve an exact config.<name>@<revision> reference into an owned snapshot.

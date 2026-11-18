@@ -31,12 +31,12 @@ struct RollingEventContext {
 RollingBaselineResult RunValueRollingSubmit(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
                                             RollingStateMap* states, const ValueRollingObservation& obs,
                                             const RollingSubmitOptions& options, RollingEventContext* events = nullptr,
-                                            BaselineEvaluationReadinessV1* readiness = nullptr);
+                                            BaselineEvaluationReadiness* readiness = nullptr);
 
 RollingBaselineResult RunRatioRollingSubmit(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
                                             RollingStateMap* states, const RatioRollingObservation& obs,
                                             const RollingSubmitOptions& options, RollingEventContext* events = nullptr,
-                                            BaselineEvaluationReadinessV1* readiness = nullptr);
+                                            BaselineEvaluationReadiness* readiness = nullptr);
 
 RollingPrediction PredictRollingForSeries(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
                                           const RollingStateMap& states, std::string_view series_key, int64_t bucket_id,

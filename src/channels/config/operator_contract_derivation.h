@@ -7,5 +7,5 @@ namespace flowsql::channels::config {
 // Pure metadata derivation. No row reads, algorithm execution, or persistence.
 int DeriveOperatorOutputs(DataSemanticsRegistry& registry, const dataset::Value& contract,
                           const dataset::Value& invocation, const dataset::Value& role_map, dataset::Value* previews,
-                          dataset::Alloc& allocator, DataSemanticsErrorV1* error);
+                          dataset::Alloc& allocator, DataSemanticsError* error);
 }  // namespace flowsql::channels::config

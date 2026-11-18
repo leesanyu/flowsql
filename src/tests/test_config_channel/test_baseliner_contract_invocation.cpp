@@ -35,8 +35,8 @@ int main() {
     const auto db = "config_file=" + root + "/database.yml";
     const char* options[]{config.c_str(), nullptr, catalog.c_str(), db.c_str(), nullptr};
     assert(loader->Load(".", libraries, options, 5) == 0 && loader->StartAll() == 0);
-    auto* provider = static_cast<IBlockTransformOperatorV2*>(loader->First(IID_BLOCK_TRANSFORM_OPERATOR_V2));
-    auto* adapter = dynamic_cast<IOperatorConfigAdapterV1*>(provider);
+    auto* provider = static_cast<IBlockTransformOperator*>(loader->First(IID_BLOCK_TRANSFORM_OPERATOR));
+    auto* adapter = dynamic_cast<IOperatorConfigAdapter*>(provider);
     auto* channels = static_cast<IChannelRegistry*>(loader->First(IID_CHANNEL_REGISTRY));
     auto* databases = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
     assert(provider && adapter && channels && databases);
@@ -74,12 +74,11 @@ int main() {
     const std::string fixture_text{std::istreambuf_iterator<char>(fixture), {}};
     Json fixtures;
     fixtures.Parse(fixture_text.c_str());
-    DataSemanticsErrorV1 error;
-    auto invoke = [&](const Value& parameters, const std::string& source,
-                      IOperatorConfigAdapterV1* selected = nullptr) {
+    DataSemanticsError error;
+    auto invoke = [&](const Value& parameters, const std::string& source, IOperatorConfigAdapter* selected = nullptr) {
         contracts::Invocation invocation;
-        assert(contracts::Component(loader, dynamic_cast<IOperatorContractIdentityV1*>(provider), "explore",
-                                    "baseliner", &invocation.component, &error) == 0);
+        assert(contracts::Component(loader, dynamic_cast<IOperatorContractIdentity*>(provider), "explore", "baseliner",
+                                    &invocation.component, &error) == 0);
         Json inputs(rapidjson::kArrayType), context(rapidjson::kObjectType);
         Set(context, "source", source, context.GetAllocator());
         int rc = contracts::CheckInvocation(loader, &invocation, selected ? selected : adapter, parameters, inputs,
@@ -108,7 +107,7 @@ int main() {
             baseliner::ConfigSnapshot parsed;
             assert(baseliner::ParseConfig(Encode(fixture.value["config"]), &parsed).ok());
             auto* leases =
-                static_cast<IDatabaseChannelLeaseProviderV1*>(loader->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1));
+                static_cast<IDatabaseChannelLeaseProvider*>(loader->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER));
             baseliner::SnapshotReader reader;
             assert(leases && reader.Open(parsed.config, leases->AcquireChannel("sqlite", "example"), source) == 0);
             size_t rows = 0;
@@ -148,7 +147,7 @@ int main() {
     auto& pa = publish.GetAllocator();
     Set(publish, "name", "contract_input", pa);
     Set(publish, "format", "json", pa);
-    Set(publish, "schema_id", "flowsql.baseliner.task.v1", pa);
+    Set(publish, "schema_id", "flowsql.baseliner.task", pa);
     Set(publish, "content_base64", encoded, pa);
     publish.AddMember("expected_current_revision", 0, pa);
     Json published;
@@ -173,13 +172,13 @@ int main() {
         checked_config |= ref == "config.contract_input@1";
     assert(checked_config);
     const auto with = Encode(exact);
-    BlockTransformTaskConfigV2 creation{kBlockTransformTaskConfigV2Size, kBlockTransformContractVersionV2, "frozen",
-                                        with.c_str(), ""};
-    IBlockTransformTaskV2* raw = nullptr;
+    BlockTransformTaskConfig creation{kBlockTransformTaskConfigSize, kBlockTransformContractVersion, "frozen",
+                                      with.c_str(), ""};
+    IBlockTransformTask* raw = nullptr;
     assert(provider->CreateTask(creation, &raw) == 0 && raw);
-    std::unique_ptr<IBlockTransformTaskV2, std::function<void(IBlockTransformTaskV2*)>> task(
+    std::unique_ptr<IBlockTransformTask, std::function<void(IBlockTransformTask*)>> task(
         raw, [&](auto* t) { provider->ReleaseTask(t); });
-    auto* task_adapter = dynamic_cast<IOperatorConfigAdapterV1*>(task.get());
+    auto* task_adapter = dynamic_cast<IOperatorConfigAdapter*>(task.get());
     assert(task_adapter);
     Json hostile;
     hostile.CopyFrom(saved_parameters, hostile.GetAllocator());

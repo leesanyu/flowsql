@@ -34,20 +34,20 @@ std::shared_ptr<arrow::RecordBatch> Batch() {
                        arrow::field("value", arrow::int64())}),
         3, {id.Finish().ValueOrDie(), revision.Finish().ValueOrDie(), value.Finish().ValueOrDie()});
 }
-struct Session final : IKafkaClientSessionV1, IKafkaProducerSessionV1 {
-    KafkaBindingSnapshotV1 snapshot;
-    std::vector<KafkaProduceMessageV1> messages;
+struct Session final : IKafkaClientSession, IKafkaProducerSession {
+    KafkaBindingSnapshot snapshot;
+    std::vector<KafkaProduceMessage> messages;
     std::atomic<bool> cancelled{false}, entered{false};
     bool fail = false, block = false;
     int drains = 0;
-    const KafkaBindingSnapshotV1& Snapshot() const override { return snapshot; }
+    const KafkaBindingSnapshot& Snapshot() const override { return snapshot; }
     int QueryInterface(const Guid&, void** out) override {
-        *out = static_cast<IKafkaProducerSessionV1*>(this);
+        *out = static_cast<IKafkaProducerSession*>(this);
         return 0;
     }
     void Cancel() override { cancelled = true; }
     int Probe(uint32_t, std::string*) override { return cancelled ? ECANCELED : 0; }
-    int Produce(const std::vector<KafkaProduceMessageV1>& m, uint32_t, KafkaDeliveryV1* out) override {
+    int Produce(const std::vector<KafkaProduceMessage>& m, uint32_t, KafkaDelivery* out) override {
         entered = true;
         while (block && !cancelled) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         if (cancelled) {
@@ -68,15 +68,15 @@ struct Session final : IKafkaClientSessionV1, IKafkaProducerSessionV1 {
         return 0;
     }
 };
-struct Factory final : IResultSinkFactoryV1, IKafkaChannelCatalogV1 {
+struct Factory final : IResultSinkFactory, IKafkaChannelCatalog {
     std::shared_ptr<Session> session = std::make_shared<Session>();
     int created = 0;
-    int DescribeChannel(const char* name, KafkaChannelDescriptionV1* d) override {
+    int DescribeChannel(const char* name, KafkaChannelDescription* d) override {
         d->role = std::string(name) == "source" ? "source" : "sink";
         d->sink_adapter_available = true;
         return 0;
     }
-    int CreateWriter(const ResultSinkContextV1& context, std::unique_ptr<IResultSinkWriterV1>* out) override {
+    int CreateWriter(const ResultSinkContext& context, std::unique_ptr<IResultSinkWriter>* out) override {
         ++created;
         auto c = ParseSinkConfig(Parse(
             R"({"encoding":"json","entity":"alert","schema_version":1,"record_kind":"upsert","key_fields":["id"],"revision_field":"revision"})"));
@@ -85,7 +85,7 @@ struct Factory final : IResultSinkFactoryV1, IKafkaChannelCatalogV1 {
     }
     void Reset() { session = std::make_shared<Session>(); }
 };
-struct Source final : IBlockStreamChannel, IBlockStreamSchemaV1, IBlockStreamAcknowledgementV1, IBlockStreamFactory {
+struct Source final : IBlockStreamChannel, IBlockStreamSchema, IBlockStreamAcknowledgement, IBlockStreamFactory {
     std::shared_ptr<arrow::RecordBatch> batch = Batch();
     int polls = 0, acks = 0, releases = 0;
     std::atomic<bool> cancelled{false};
@@ -133,9 +133,9 @@ struct Source final : IBlockStreamChannel, IBlockStreamSchemaV1, IBlockStreamAck
         session = std::move(s);
     }
 };
-struct Transform final : IBlockTransformOperatorV1 {
+struct Transform final : IBlockTransformOperator {
     bool flush_fail = false;
-    class Task final : public IBlockTransformTaskV1 {
+    class Task final : public IBlockTransformTask {
         bool fail_;
 
      public:
@@ -145,22 +145,22 @@ struct Transform final : IBlockTransformOperatorV1 {
             return 0;
         }
         int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& b, int64_t ts,
-                         std::vector<BlockTransformOutputV1>* out) override {
+                         std::vector<BlockTransformOutput>* out) override {
             out->push_back({b, ts});
             return 0;
         }
-        int Flush(std::vector<BlockTransformOutputV1>*) override { return fail_ ? EIO : 0; }
+        int Flush(std::vector<BlockTransformOutput>*) override { return fail_ ? EIO : 0; }
         void Cancel() override {}
         std::string LastError() const override { return "fixture_flush_failed"; }
     };
     std::string Category() const override { return "fixture"; }
     std::string Name() const override { return "echo"; }
     std::string Description() const override { return "single schema output fixture"; }
-    int CreateTask(const BlockTransformTaskConfigV1&, IBlockTransformTaskV1** out) override {
+    int CreateTask(const BlockTransformTaskConfig&, IBlockTransformTask** out) override {
         *out = new Task(flush_fail);
         return 0;
     }
-    void ReleaseTask(IBlockTransformTaskV1* p) override { delete p; }
+    void ReleaseTask(IBlockTransformTask* p) override { delete p; }
 };
 Json Call(PluginLoader* loader, const std::string& path, const std::string& request, int expected = error::OK) {
     fnRouterHandler handler;
@@ -188,20 +188,22 @@ int main() {
     Source source;
     Transform transform;
     auto* loader = PluginLoader::Single();
-    loader->Regist(IID_RESULT_SINK_FACTORY_V1, &factory);
-    loader->Regist(IID_KAFKA_CHANNEL_CATALOG_V1, static_cast<IKafkaChannelCatalogV1*>(&factory));
+    loader->Regist(IID_RESULT_SINK_FACTORY, &factory);
+    loader->Regist(IID_KAFKA_CHANNEL_CATALOG, static_cast<IKafkaChannelCatalog*>(&factory));
     loader->Regist(IID_BLOCK_STREAM_FACTORY, static_cast<IBlockStreamFactory*>(&source));
-    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &transform);
+    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR, &transform);
     const auto root = flowsql::test::WorkspacePath("runtime");
     std::filesystem::create_directories(root);
     const std::string db = "type=sqlite;name=local;path=" + root + "/results.db";
     const std::string catalog = "data_dir=" + root + "/frames;operator_db_path=" + root + "/operators.db";
-    const char* libs[] = {"libflowsql_database.so", "libflowsql_builtin.so", "libflowsql_catalog.so",
-                          "libflowsql_scheduler.so", "libflowsql_task.so"};
+    const char* libs[] = {"libflowsql_database.so",  "libflowsql_builtin.so", "libflowsql_catalog.so",
+                          "libflowsql_scheduler.so", "libflowsql_task.so",    "libflowsql_config_channel.so"};
     const std::string task_db = "db_path=" + root + "/tasks.db";
-    const char* options[] = {db.c_str(), nullptr, catalog.c_str(), "batch_workers=1", task_db.c_str()};
+    const std::string config_db = "db_path=" + root + "/config.db";
+    const char* options[] = {db.c_str(),        nullptr,         catalog.c_str(),
+                             "batch_workers=1", task_db.c_str(), config_db.c_str()};
     std::string persisted_task, persisted_publication;
-    assert(loader->Load(get_absolute_process_path(), libs, options, 5) == 0 && loader->StartAll() == 0);
+    assert(loader->Load(get_absolute_process_path(), libs, options, 6) == 0 && loader->StartAll() == 0);
     {
         auto* registry = static_cast<IChannelRegistry*>(loader->First(IID_CHANNEL_REGISTRY));
         assert(registry);
@@ -340,7 +342,11 @@ int main() {
             assert(detail["result_target"] == "kafka.alerts");
             assert(Encode(detail["result"]) == Encode(response["result"]));
             persisted_task = response["task_id"].GetString();
-            persisted_publication = Encode(response["result"]);
+            auto persisted = Parse(Encode(response["result"]));
+            persisted.AddMember("contract_checks",
+                                rapidjson::Value(response["contract_checks"], persisted.GetAllocator()),
+                                persisted.GetAllocator());
+            persisted_publication = Encode(persisted);
         }
         for (bool cancel : {false, true}) {
             factory.Reset();

@@ -18,7 +18,7 @@ struct State {
          stale_counters = false;
 };
 template <class Base>
-struct Reader final : Base, IBlockStreamSchemaV1 {
+struct Reader final : Base, IBlockStreamSchema {
     std::shared_ptr<State> state;
     bool finished = false;
     explicit Reader(std::shared_ptr<State> s) : state(std::move(s)) {}
@@ -42,12 +42,12 @@ struct Reader final : Base, IBlockStreamSchemaV1 {
     std::shared_ptr<arrow::Schema> ArrowSchema() const override {
         return state->schema_bad ? arrow::schema({}) : packet::PacketFamilySchema();
     }
-    int DescribeSources(CaptureSourceSetV2* s) const {
+    int DescribeSources(CaptureSourceSet* s) const {
         *s = Sources();
         if (state->oversize) s->limits.max_bytes_per_batch = 2097152;
         return 0;
     }
-    int ReadInputCounters(uint32_t id, CaptureCountersV1* c) const {
+    int ReadInputCounters(uint32_t id, CaptureCounters* c) const {
         c->generation = state->stale_counters ? 10 : 9;
         c->available_mask = kCaptureDeliveredPacketsAvailable | kCaptureQueueDroppedPacketsAvailable;
         c->delivered_packets = id == 0 && state->polls ? 3 : 0;
@@ -55,22 +55,22 @@ struct Reader final : Base, IBlockStreamSchemaV1 {
         return 0;
     }
     BlockPollEvent PollBlock(int ms) override { return PollCapture(ms).block; }
-    CapturePollEventV2 PollCapture(int) {
+    CapturePollEvent PollCapture(int) {
         if (finished) {
-            CapturePollEventV2 e;
+            CapturePollEvent e;
             e.block.kind = BlockPollEvent::kEof;
             return e;
         }
         const int n = state->polls++;
         if (n == 0) return Event();
         if (state->error) {
-            CapturePollEventV2 e;
+            CapturePollEvent e;
             e.block.kind = BlockPollEvent::kError;
             e.block.err = EIO;
             return e;
         }
         if (n == 1) return Event(2, 0);
-        CapturePollEventV2 e;
+        CapturePollEvent e;
         if (!state->continuous)
             e.block.kind = BlockPollEvent::kEof;
         else
@@ -83,7 +83,7 @@ struct Reader final : Base, IBlockStreamSchemaV1 {
         return 0;
     }
 };
-struct Source final : IBlockStreamFactory, IBlockStreamReaderFactoryV1 {
+struct Source final : IBlockStreamFactory, IBlockStreamReaderFactory {
     std::shared_ptr<State> state = std::make_shared<State>();
     Reader<IBlockStreamChannel> definition{state};
     int creates = 0;
@@ -91,14 +91,14 @@ struct Source final : IBlockStreamFactory, IBlockStreamReaderFactoryV1 {
         return std::string(type) == "netadapter" && std::string(name) == "edge" ? &definition : nullptr;
     }
     void List(std::function<void(const char*, const char*, IBlockStreamChannel*)>) override {}
-    int CreateReader(const BlockStreamReaderConfigV1& c, IBlockStreamChannel** out) override {
+    int CreateReader(const BlockStreamReaderConfig& c, IBlockStreamChannel** out) override {
         *out = nullptr;
         if (std::string(c.source_category) != "netadapter") return ENOTSUP;
         ++creates;
         if (state->missing)
             *out = new Reader<IBlockStreamChannel>(state);
         else
-            *out = new Reader<ICaptureBlockStreamReaderV2>(state);
+            *out = new Reader<ICaptureBlockStreamReader>(state);
         return 0;
     }
     void ReleaseReader(IBlockStreamChannel* r) override {
@@ -110,15 +110,15 @@ struct Source final : IBlockStreamFactory, IBlockStreamReaderFactoryV1 {
         creates = 0;
     }
 };
-struct Factory final : IPacketSinkFactoryV1, IKafkaChannelCatalogV1 {
+struct Factory final : IPacketSinkFactory, IKafkaChannelCatalog {
     std::shared_ptr<FakeSession> session = std::make_shared<FakeSession>();
     bool available = true;
-    int DescribeChannel(const char*, KafkaChannelDescriptionV1* d) override {
+    int DescribeChannel(const char*, KafkaChannelDescription* d) override {
         d->role = "sink";
         d->sink_adapter_available = true;
         return 0;
     }
-    int CreateWriter(const PacketSinkContextV1& c, std::unique_ptr<IPacketSinkWriterV1>* out) override {
+    int CreateWriter(const PacketSinkContext& c, std::unique_ptr<IPacketSinkWriter>* out) override {
         out->reset();
         if (!available) return ENOTSUP;
         *out = std::make_unique<PacketWriter>(Config(), c, session);
@@ -170,10 +170,10 @@ int main() {
     Factory factory;
     Source source;
     auto* loader = PluginLoader::Single();
-    loader->Regist(IID_PACKET_SINK_FACTORY_V1, &factory);
-    loader->Regist(IID_KAFKA_CHANNEL_CATALOG_V1, static_cast<IKafkaChannelCatalogV1*>(&factory));
+    loader->Regist(IID_PACKET_SINK_FACTORY, &factory);
+    loader->Regist(IID_KAFKA_CHANNEL_CATALOG, static_cast<IKafkaChannelCatalog*>(&factory));
     loader->Regist(IID_BLOCK_STREAM_FACTORY, static_cast<IBlockStreamFactory*>(&source));
-    loader->Regist(IID_BLOCK_STREAM_READER_FACTORY_V1, static_cast<IBlockStreamReaderFactoryV1*>(&source));
+    loader->Regist(IID_BLOCK_STREAM_READER_FACTORY, static_cast<IBlockStreamReaderFactory*>(&source));
     struct Libraries {
         PluginLoader* l;
         ~Libraries() {
@@ -185,10 +185,11 @@ int main() {
     std::filesystem::create_directories(root);
     const std::string db = "type=sqlite;name=local;path=" + root + "/results.db",
                       catalog = "data_dir=" + root + "/data;operator_db_path=" + root + "/operators.db";
-    const char* names[] = {"libflowsql_database.so", "libflowsql_builtin.so", "libflowsql_catalog.so",
-                           "libflowsql_scheduler.so"};
-    const char* options[] = {db.c_str(), nullptr, catalog.c_str(), "batch_workers=1"};
-    assert(!loader->Load(get_absolute_process_path(), names, options, 4) && !loader->StartAll());
+    const char* names[] = {"libflowsql_config_channel.so", "libflowsql_database.so", "libflowsql_builtin.so",
+                           "libflowsql_catalog.so", "libflowsql_scheduler.so"};
+    const std::string semantics_option = "db_path=" + root + "/semantics.db";
+    const char* options[] = {semantics_option.c_str(), db.c_str(), nullptr, catalog.c_str(), "batch_workers=1"};
+    assert(!loader->Load(get_absolute_process_path(), names, options, 5) && !loader->StartAll());
     int id = 0;
     for (const char* sql : {"SELECT captured_len FROM netadapter.edge INTO kafka.packets",
                             "SELECT * FROM netadapter.edge WHERE source_id = 0 INTO kafka.packets",

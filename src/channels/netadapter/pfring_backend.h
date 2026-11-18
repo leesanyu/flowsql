@@ -4,6 +4,6 @@
 #define FLOWSQL_CHANNELS_NETADAPTER_PFRING_BACKEND_H_
 #include <framework/interfaces/icapture_backend.h>
 namespace flowsql::channels::netadapter {
-int OpenPfringClassic(const CaptureBackendConfigV1&, std::shared_ptr<ICaptureBackendSessionV1>*, std::string*);
+int OpenPfringClassic(const CaptureBackendConfig&, std::shared_ptr<ICaptureBackendSession>*, std::string*);
 }
 #endif

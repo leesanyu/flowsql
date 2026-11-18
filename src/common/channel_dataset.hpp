@@ -70,7 +70,7 @@ inline std::string Token() {
     if (RAND_bytes(bytes, sizeof(bytes)) != 1) throw std::runtime_error("identity entropy unavailable");
     return Hex(bytes, sizeof(bytes));
 }
-inline int Fail(DataSemanticsErrorV1* e, const std::string& code, const std::string& message,
+inline int Fail(DataSemanticsError* e, const std::string& code, const std::string& message,
                 const std::string& path = "") {
     if (e) *e = {code, message, path};
     return -1;
@@ -93,7 +93,7 @@ inline Json Snapshot(const std::string& provider, const std::string& id, const V
                      const std::string& state = "known") {
     Json d(rapidjson::kObjectType);
     auto& a = d.GetAllocator();
-    Set(d, "schema_id", "flowsql.channel-dataset.v1", a);
+    Set(d, "schema_id", "flowsql.channel-dataset", a);
     Value key(rapidjson::kObjectType);
     Set(key, "provider_id", provider, a);
     Set(key, "object_id", id, a);
@@ -113,12 +113,12 @@ inline int64_t Now() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
         .count();
 }
-inline int32_t DescriptorControl(IChannelDatasetDescriptorV1& provider, const std::string& request,
+inline int32_t DescriptorControl(IChannelDatasetDescriptor& provider, const std::string& request,
                                  std::string& response) {
     Json req;
     if (JsonNestingWithin(request, 64)) req.Parse(request.c_str());
-    ChannelDatasetSnapshotV1 snapshot;
-    DataSemanticsErrorV1 e;
+    ChannelDatasetSnapshot snapshot;
+    DataSemanticsError e;
     int rc = -1;
     if (!req.IsObject() || !req.HasMember("locator") || !req["locator"].IsObject() ||
         (req.HasMember("timeout_ms") &&

@@ -14,7 +14,7 @@
 namespace flowsql::channels::config {
 namespace {
 using namespace dataset;
-int Error(const DataSemanticsErrorV1& e, std::string* response) {
+int Error(const DataSemanticsError& e, std::string* response) {
     Json d(rapidjson::kObjectType);
     auto& a = d.GetAllocator();
     Value v(rapidjson::kObjectType);
@@ -33,7 +33,7 @@ int Error(const DataSemanticsErrorV1& e, std::string* response) {
     if (e.code == "LIMIT_EXCEEDED") return error::PAYLOAD_TOO_LARGE;
     return error::BAD_REQUEST;
 }
-int Parse(const char* text, const std::string& key, Json* req, DataSemanticsErrorV1* e) {
+int Parse(const char* text, const std::string& key, Json* req, DataSemanticsError* e) {
     if (ParseSemanticsJson(text ? text : "", req, e)) return -1;
     Json s;
     s.Parse(kSemanticsApiSchema);
@@ -78,14 +78,14 @@ Value EditorValue(const Value& edit, bool unit, Alloc& a) {
     v.AddMember("value", value, a);
     return v;
 }
-int EditorChanges(const Value& editor, Json* changes, DataSemanticsErrorV1*) {
-    changes->SetObject();
-    auto& a = changes->GetAllocator();
-    if (editor.HasMember("description")) Set(*changes, "description", EditorValue(editor["description"], false, a), a);
+Json EditorChanges(const Value& editor) {
+    Json changes(rapidjson::kObjectType);
+    auto& a = changes.GetAllocator();
+    if (editor.HasMember("description")) Set(changes, "description", EditorValue(editor["description"], false, a), a);
     if (editor.HasMember("row_meaning")) {
         Value entity(rapidjson::kObjectType);
         Set(entity, "row_meaning", EditorValue(editor["row_meaning"], false, a), a);
-        Set(*changes, "entity", std::move(entity), a);
+        Set(changes, "entity", std::move(entity), a);
     }
     if (editor.HasMember("fields")) {
         Value fields(rapidjson::kObjectType);
@@ -96,15 +96,15 @@ int EditorChanges(const Value& editor, Json* changes, DataSemanticsErrorV1*) {
                     Set(field, m.name.GetString(), EditorValue(m.value, Text(m.name) == "unit", a), a);
             Set(fields, item.name.GetString(), std::move(field), a);
         }
-        Set(*changes, "fields", std::move(fields), a);
+        Set(changes, "fields", std::move(fields), a);
     }
-    return 0;
+    return changes;
 }
-std::string NotesName(const OperatorComponentContractV1& c) {
+std::string NotesName(const OperatorComponentContract& c) {
     return "n" + Hash(c.category + "\n" + c.name + "\n" + c.component_revision).substr(0, 63);
 }
-int ReadNotes(ConfigChannelProvider& configs, const OperatorComponentContractV1& c, Json* notes, std::string* ref,
-              DataSemanticsErrorV1* e) {
+int ReadNotes(ConfigChannelProvider& configs, const OperatorComponentContract& c, Json* notes, std::string* ref,
+              DataSemanticsError* e) {
     std::vector<ConfigRevisionListItem> versions;
     uint64_t next;
     std::string detail;
@@ -120,7 +120,7 @@ int ReadNotes(ConfigChannelProvider& configs, const OperatorComponentContractV1&
     ConfigChannelSnapshot snap;
     if (configs.Resolve(ref->c_str(), &snap, &detail)) return Fail(e, "STORAGE_ERROR", detail);
     Json document;
-    if (snap.schema_id != "flowsql.operator-description.v1" || !snap.content ||
+    if (snap.schema_id != "flowsql.operator-description" || !snap.content ||
         ParseSemanticsJson(*snap.content, &document, e))
         return Fail(e, "STORAGE_ERROR", "invalid operator description resource");
     if (!document.IsObject() || Get(document, "category") != c.category || Get(document, "name") != c.name ||
@@ -135,7 +135,7 @@ int MetadataDescriptionService::Describe(const char* text, std::string* response
     using namespace dataset;
     const auto started = std::chrono::steady_clock::now();
     Json req;
-    DataSemanticsErrorV1 e;
+    DataSemanticsError e;
     if (Parse(text, "describeRequest", &req, &e)) return Error(e, response);
     const auto deadline =
         started + std::chrono::milliseconds(req.HasMember("timeout_ms") ? req["timeout_ms"].GetUint() : 5000);
@@ -158,8 +158,8 @@ int MetadataDescriptionService::Describe(const char* text, std::string* response
     Set(checks, "data_validation", "not_run", a);
     if (Get(req["target"], "kind") == "channel") {
         const auto& locator = req["target"]["locator"];
-        ChannelDatasetRequestV1 request{Encode(locator), remaining()};
-        ChannelDatasetSnapshotV1 snap;
+        ChannelDatasetRequest request{Encode(locator), remaining()};
+        ChannelDatasetSnapshot snap;
         if (!request.timeout_ms || !describe_)
             return Error({"SOURCE_TIMEOUT", "metadata deadline exceeded", ""}, response);
         if (describe_(request, &snap, &e)) {
@@ -223,7 +223,7 @@ int MetadataDescriptionService::Describe(const char* text, std::string* response
             Set(description, "origin", "bound_dictionary", a);
             context.CopyFrom(result["data"], a);
             context.RemoveMember("document");
-            DataSemanticsSnapshotV1 bound;
+            DataSemanticsSnapshot bound;
             if (registry_.Resolve(Get(basis, "binding_ref").c_str(), &bound, &e)) return Error(e, response);
             Json binding;
             binding.Parse(bound.document_json->c_str());
@@ -266,7 +266,7 @@ int MetadataDescriptionService::Describe(const char* text, std::string* response
         Set(context, "editor_fields", std::move(editor_fields), a);
         gaps.CopyFrom(checks["semantic_gaps"], a);
         // Reject mixed observations, including a changed current binding while resolving context.
-        ChannelDatasetSnapshotV1 after;
+        ChannelDatasetSnapshot after;
         request.timeout_ms = remaining();
         if (!request.timeout_ms) return Error({"SOURCE_TIMEOUT", "metadata deadline exceeded", ""}, response);
         if (describe_(request, &after, &e)) return Error(e, response);
@@ -275,7 +275,7 @@ int MetadataDescriptionService::Describe(const char* text, std::string* response
         if (!current.IsObject() || current["object_key"] != source["object_key"] ||
             Get(current, "source_revision") != Get(source, "source_revision"))
             return Error({"SOURCE_CHANGED", "object changed while describing", ""}, response);
-        DataSemanticsSnapshotV1 binding;
+        DataSemanticsSnapshot binding;
         const int br = registry_.BindingLookup(Get(source["object_key"], "provider_id"),
                                                Get(source["object_key"], "object_id"), &binding, &e);
         if (br && e.code != "NOT_FOUND") return Error(e, response);
@@ -283,7 +283,7 @@ int MetadataDescriptionService::Describe(const char* text, std::string* response
             return Error({"REVISION_CONFLICT", "binding changed while describing", ""}, response);
         data.AddMember("structure", Copy(source, a), a);
     } else {
-        OperatorComponentContractV1 c;
+        OperatorComponentContract c;
         if (!lookup_) return Error({"UNAVAILABLE", "operator catalog unavailable", ""}, response);
         const auto lookup_budget = remaining();
         if (!lookup_budget) return Error({"SOURCE_TIMEOUT", "metadata deadline exceeded", ""}, response);
@@ -325,7 +325,7 @@ int MetadataDescriptionService::Describe(const char* text, std::string* response
             Set(description, "origin",
                 c.contract_state == "declared" ? "component_author_and_local_notes" : "local_notes", a);
         }
-        OperatorComponentContractV1 after;
+        OperatorComponentContract after;
         const auto recheck_budget = remaining();
         if (!recheck_budget) return Error({"SOURCE_TIMEOUT", "metadata deadline exceeded", ""}, response);
         if (lookup_(Get(req["target"], "name"), recheck_budget, &after, &e)) return Error(e, response);
@@ -357,7 +357,7 @@ int MetadataDescriptionService::Describe(const char* text, std::string* response
 int MetadataDescriptionService::SaveChannel(const char* text, std::string* response) {
     const auto started = std::chrono::steady_clock::now();
     Json req;
-    DataSemanticsErrorV1 e;
+    DataSemanticsError e;
     if (Parse(text, "channels_save-descriptionRequest", &req, &e)) return Error(e, response);
     const auto deadline =
         started + std::chrono::milliseconds(req.HasMember("timeout_ms") ? req["timeout_ms"].GetUint() : 5000);
@@ -398,10 +398,8 @@ int MetadataDescriptionService::SaveChannel(const char* text, std::string* respo
             return Error(
                 {"SOURCE_CHANGED", "source changed; refresh and review the retained draft", std::string("/basis/") + k},
                 response);
-    Json editor_changes;
-    if (req.HasMember("editor_changes") && EditorChanges(req["editor_changes"], &editor_changes, &e))
-        return Error(e, response);
-    const auto& changes = req.HasMember("changes") ? req["changes"] : editor_changes;
+    const auto& editor = req["editor_changes"];
+    auto changes = EditorChanges(editor);
     Json candidate;
     candidate.CopyFrom(view["dictionary"], candidate.GetAllocator());
     auto& ca = candidate.GetAllocator();
@@ -413,7 +411,7 @@ int MetadataDescriptionService::SaveChannel(const char* text, std::string* respo
         return false;
     };
     Json previous;
-    DataSemanticsSnapshotV1 old;
+    DataSemanticsSnapshot old;
     if (!view["base_dictionary_ref"].IsNull()) {
         if (registry_.Resolve(Get(view, "base_dictionary_ref").c_str(), &old, &e)) return Error(e, response);
         previous.Parse(old.document_json->c_str());
@@ -447,16 +445,13 @@ int MetadataDescriptionService::SaveChannel(const char* text, std::string* respo
                 Set(f, m.name.GetString(), Copy(m.value, ca), ca);
             edited.insert(name);
         }
-        if (req.HasMember("editor_changes")) {
-            const auto& editor = req["editor_changes"];
-            const Value* edit = editor.HasMember("fields") && editor["fields"].HasMember(name.c_str())
-                                    ? &editor["fields"][name.c_str()]
-                                    : nullptr;
-            auto facts = description_time::Facts(*physical, source, name);
-            bool touched = false;
-            if (description_time::Apply(f, facts, edit, !existing, &touched, ca, &e)) return Error(e, response);
-            if (touched) time_touched.insert(id);
-        }
+        const Value* edit = editor.HasMember("fields") && editor["fields"].HasMember(name.c_str())
+                                ? &editor["fields"][name.c_str()]
+                                : nullptr;
+        auto facts = description_time::Facts(*physical, source, name);
+        bool touched = false;
+        if (description_time::Apply(f, facts, edit, !existing, &touched, ca, &e)) return Error(e, response);
+        if (touched) time_touched.insert(id);
         Set(next_map, id.c_str(), name, ca);
         next_fields.PushBack(Copy(f, ca), ca);
     }
@@ -469,9 +464,8 @@ int MetadataDescriptionService::SaveChannel(const char* text, std::string* respo
     if (changes.HasMember("entity"))
         for (const auto& m : changes["entity"].GetObject())
             Set(candidate["entity"], m.name.GetString(), Copy(m.value, ca), ca);
-    if (req.HasMember("editor_changes"))
-        description_time::Summary(candidate["entity"], candidate["fields"], time_touched, ca);
-    if (req.HasMember("editor_changes") && req["editor_changes"].HasMember("relations")) {
+    description_time::Summary(candidate["entity"], candidate["fields"], time_touched, ca);
+    if (editor.HasMember("relations")) {
         Value relations(rapidjson::kArrayType);
         size_t index = 0;
         for (const auto& relation : req["editor_changes"]["relations"].GetArray()) {
@@ -481,7 +475,7 @@ int MetadataDescriptionService::SaveChannel(const char* text, std::string* respo
             if (!ParseSemanticsReference(exact, &identity) || identity.kind != "dictionary")
                 return Error({"INVALID_REFERENCE", "an exact target dictionary is required", path + "/dictionary_ref"},
                              response);
-            DataSemanticsSnapshotV1 target;
+            DataSemanticsSnapshot target;
             if (registry_.Resolve(exact.c_str(), &target, &e)) {
                 e.field_path = path + "/dictionary_ref";
                 return Error(e, response);
@@ -529,12 +523,11 @@ int MetadataDescriptionService::SaveChannel(const char* text, std::string* respo
     // The sole stale-write exception is an already applied, identical submission for this exact source.
     if (req["basis"] != basis) {
         if (identical && !view["binding_ref"].IsNull()) {
-            DataSemanticsSnapshotV1 binding;
+            DataSemanticsSnapshot binding;
             if (registry_.Resolve(Get(view, "binding_ref").c_str(), &binding, &e)) return Error(e, response);
             Json document;
             document.Parse(binding.document_json->c_str());
-            if (document.HasMember("source_snapshot") &&
-                Get(document["source_snapshot"], "source_revision") == Get(source, "source_revision"))
+            if (Get(document["source_snapshot"], "source_revision") == Get(source, "source_revision"))
                 return finish("applied", Get(view, "base_dictionary_ref"), Get(view, "binding_ref"), nullptr);
         }
         return Error(
@@ -596,10 +589,10 @@ int MetadataDescriptionService::SaveChannel(const char* text, std::string* respo
 }
 int MetadataDescriptionService::SaveOperator(const char* text, std::string* response) {
     Json req;
-    DataSemanticsErrorV1 e;
+    DataSemanticsError e;
     if (Parse(text, "operators_save-descriptionRequest", &req, &e)) return Error(e, response);
     if (!lookup_) return Error({"UNAVAILABLE", "operator catalog unavailable", ""}, response);
-    OperatorComponentContractV1 component;
+    OperatorComponentContract component;
     if (lookup_(Get(req, "name"), 5000, &component, &e)) return Error(e, response);
     if (component.component_revision != Get(req, "expected_component_revision"))
         return Error({"SOURCE_CHANGED", "operator component changed; retain and review the draft",
@@ -634,7 +627,7 @@ int MetadataDescriptionService::SaveOperator(const char* text, std::string* resp
                      response);
     if (!same) publish.expected_current_revision = expected_revision;
     publish.format = "json";
-    publish.schema_id = "flowsql.operator-description.v1";
+    publish.schema_id = "flowsql.operator-description";
     Json document(rapidjson::kObjectType);
     auto& a = document.GetAllocator();
     Set(document, "category", component.category, a);
@@ -642,7 +635,7 @@ int MetadataDescriptionService::SaveOperator(const char* text, std::string* resp
     Set(document, "component_revision", component.component_revision, a);
     document.AddMember("notes", Copy(req["notes"], a), a);
     publish.content = Canonical(document);
-    OperatorComponentContractV1 before;
+    OperatorComponentContract before;
     if (lookup_(Get(req, "name"), 5000, &before, &e)) return Error(e, response);
     if (before.component_revision != component.component_revision)
         return Error({"SOURCE_CHANGED", "component changed before saving notes", ""}, response);
@@ -650,7 +643,7 @@ int MetadataDescriptionService::SaveOperator(const char* text, std::string* resp
     std::string detail;
     const int rc = configs_.Publish(publish, &saved, &detail);
     if (rc) return Error({rc == EAGAIN ? "REVISION_CONFLICT" : "STORAGE_ERROR", detail, ""}, response);
-    OperatorComponentContractV1 after;
+    OperatorComponentContract after;
     if (lookup_(Get(req, "name"), 5000, &after, &e)) return Error(e, response);
     if (after.component_revision != component.component_revision)
         return Error({"SOURCE_CHANGED", "notes retained for the old component; current component changed", ""},

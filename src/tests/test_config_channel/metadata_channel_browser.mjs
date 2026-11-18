@@ -25,6 +25,19 @@ async function mouse(expression) {
 const click = async (label,scope='document') => {await wait(()=>ev(`!!(${find(label,scope)})`),label);await mouse(find(label,scope))}
 const set = async (label,value) => ev(`(()=>{const e=document.querySelector(${JSON.stringify('[aria-label="'+label+'"]')});if(!e||e.disabled)throw Error('missing input '+${JSON.stringify(label)});e.value=${JSON.stringify(value)};e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}))})()`)
 const api = async (path,payload,status=200) => {const r=await fetch(base+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();assert.equal(r.status,status,JSON.stringify(d));return d.data||d}
+async function seedCompleteDictionary(locator, before, edits, name) {
+  const document = structuredClone(before.description.document)
+  for (const field of document.fields) Object.assign(field, edits[field.name] || {})
+  const saved = await api('semantics/v1/save', { kind: 'dictionary', name, expected_current_revision: 0, document })
+  const observed = await api('semantics/v1/channels/describe', { locator })
+  const reference = before.basis.binding_ref?.match(/^binding\.(.+)@(\d+)$/)
+  const field_map = Object.fromEntries(document.fields.map(field => [field.field_id, field.name]))
+  await api('semantics/v1/channels/apply', {
+    locator, name: reference?.[1] || name, expected_current_revision: reference ? Number(reference[2]) : 0,
+    dictionary_ref: saved.exact_reference, field_map,
+    source_basis: Object.fromEntries(['object_key', 'source_revision', 'schema_fingerprint'].map(key => [key, observed.source_snapshot[key]])), confirmations: before.checks.required_confirmations
+  })
+}
 const counts = () => ev(`(()=>{const a=window.__requests;return {describe:a.filter(x=>x.url.endsWith('/semantics/v1/describe')).length,rows:a.filter(x=>x.url.includes('/dataframe/preview')||x.url.includes('/database/preview')).length,consume:a.filter(x=>['consume','batch/execute','stream/execute'].some(p=>x.url.includes(p))).length}})()`)
 async function navigate() { await send('Page.navigate',{url:base+'/channels'});await text('DataFrame 通道');await pause(400) }
 async function layout() {
@@ -135,15 +148,15 @@ try {
       assert.ok(!(await ev('document.querySelector("[data-testid=description-json]").textContent')).includes('search draft'))
       await saveMeaning('value','CSV object meaning')
       const locator={kind:'dataframe',name:'sample'}, before=await api('semantics/v1/describe',{target:{kind:'channel',locator}})
-      await api('semantics/v1/channels/save-description',{locator,basis:before.basis,changes:{fields:{value:{null_meaning:{state:'declared',origin:'imported',value:'not measured'},validity:{state:'declared',origin:'manual',value:{mode:'descriptive',description:'positive values only',field_ids:[]}}}}},confirmations:before.checks.required_confirmations})
+      await seedCompleteDictionary(locator,before,{value:{null_meaning:{state:'declared',origin:'imported',value:'not measured'},validity:{state:'declared',origin:'manual',value:{mode:'descriptive',description:'positive values only',field_ids:[]}}}},'fixture.channel.advanced')
       await click('刷新',descriptionActions);await text('not measured');await text('positive values only')
       assert.equal(await ev('document.querySelector("[aria-label=\\"value 字段说明\\"]").value'),'CSV object meaning')
       assert.ok(await ev('!document.querySelector("[data-testid=channel-description] [aria-label*=来源], [data-testid=channel-description] [aria-label*=状态]")'))
       const current=await api('semantics/v1/describe',{target:{kind:'channel',locator}})
-      await ev(`sessionStorage.setItem('flowsql.channel-description.'+JSON.stringify(${JSON.stringify(locator)}),JSON.stringify({basis:${JSON.stringify(current.basis)},changes:{fields:{value:{definition:{state:'declared',origin:'manual',value:'legacy draft'}}}}}))`)
+      await ev(`sessionStorage.setItem('flowsql.channel-description.'+JSON.stringify(${JSON.stringify(locator)}),JSON.stringify({basis:${JSON.stringify(current.basis)},editor_changes:{fields:{value:{definition:'restored draft'}}}}))`)
       await closeDialog();await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='sample')`)
-      await text('检测到旧版草稿');assert.equal(await ev('document.querySelector(".heading-actions button").disabled'),true);await click('保存旧版草稿');await text('说明已保存');await ready()
-      assert.equal(await ev('document.querySelector("[aria-label=\\"value 字段说明\\"]").value'),'legacy draft')
+      await ready();assert.equal(await ev(`document.querySelector('[aria-label="value 字段说明"]').value`),'restored draft');await saveDescription();await text('说明已保存');await ready()
+      assert.equal(await ev('document.querySelector("[aria-label=\\"value 字段说明\\"]").value'),'restored draft')
       await ev(`(()=>{const f=window.fetch;let once=true;window.fetch=function(u,o){if(once&&String(u).endsWith('/channels/save-description')){once=false;return Promise.resolve(new Response(JSON.stringify({data:{status:'definition_saved_not_applied',dictionary_ref:'dictionary.fixture@1',error:{code:'SOURCE_UNAVAILABLE',message:'fixture apply failure'}}}),{status:200}))}return f.apply(this,arguments)}})()`)
       await set('value 字段说明','partial draft');await saveDescription();await text('尚未应用')
       await closeDialog();await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='sample')`);await ready()
@@ -307,7 +320,7 @@ try {
   await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='sample')`);await ready()
   await set('value 字段说明','retained conflict draft')
   const locator={kind:'dataframe',name:'sample'}, d=await api('semantics/v1/describe',{target:{kind:'channel',locator}})
-  await api('semantics/v1/channels/save-description',{locator,basis:d.basis,changes:{description:{state:'declared',origin:'manual',value:'external edit'}}})
+  await api('semantics/v1/channels/save-description',{locator,basis:d.basis,editor_changes:{description:'external edit'}})
   await saveDescription();await text('REVISION_CONFLICT');assert.equal(await ev('document.querySelector("[aria-label=\\"value 字段说明\\"]").value'),'retained conflict draft')
   await closeDialog();await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim().startsWith('long_channel_name'))`)
   await ready();assert.equal(await ev('document.querySelector("[aria-label=对象说明]").value'),'');await closeDialog()

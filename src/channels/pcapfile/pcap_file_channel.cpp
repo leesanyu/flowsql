@@ -990,21 +990,21 @@ int PcapFilePlugin::Stop() {
     return StopChannelsLocked();
 }
 
-int PcapFilePlugin::Resolve(const FilterDomainResolveRequestV1& request, FilterDomainResolveResultV1* result) const {
+int PcapFilePlugin::Resolve(const FilterDomainResolveRequest& request, FilterDomainResolveResult* result) const {
     return filter_domain_resolver_.Resolve(request, result);
 }
 
-int PcapFilePlugin::EvaluatePushdown(const FilterPushdownRequestV1& request, FilterPushdownResultV1* result) const {
+int PcapFilePlugin::EvaluatePushdown(const FilterPushdownRequest& request, FilterPushdownResult* result) const {
     if (!result) return EINVAL;
     *result = {};
     if (!request.target_category) {
         result->diagnostic = "pcapfile pushdown target category is required";
         return EINVAL;
     }
-    if (request.target_kind != FilterPushdownTargetKindV1::kSource || Lower(request.target_category) != "pcapfile") {
+    if (request.target_kind != FilterPushdownTargetKind::kSource || Lower(request.target_category) != "pcapfile") {
         return ENOTSUP;
     }
-    if (request.contract_version != kFilterPushdownContractVersionV1 || !request.target_name ||
+    if (request.contract_version != kFilterPushdownContractVersion || !request.target_name ||
         request.target_name[0] == '\0' || !request.output_schema || !request.canonical_plan_json ||
         request.canonical_plan_json[0] == '\0') {
         result->diagnostic = "pcapfile pushdown request is incomplete or has the wrong version";
@@ -1029,10 +1029,10 @@ int PcapFilePlugin::EvaluatePushdown(const FilterPushdownRequestV1& request, Fil
     return 0;
 }
 
-int PcapFilePlugin::CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** reader) {
+int PcapFilePlugin::CreateReader(const BlockStreamReaderConfig& config, IBlockStreamChannel** reader) {
     if (!reader) return EINVAL;
     *reader = nullptr;
-    if (config.contract_version != kBlockStreamReaderContractVersionV1 || !config.task_id || !config.source_category ||
+    if (config.contract_version != kBlockStreamReaderContractVersion || !config.task_id || !config.source_category ||
         !config.source_name || !config.pushed_filter_plan_json || config.task_id[0] == '\0' ||
         config.source_category[0] == '\0' || config.source_name[0] == '\0' ||
         config.pushed_filter_plan_json[0] == '\0') {

@@ -18,12 +18,12 @@ set_target_properties(fixture_bad_abi PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
 
-add_library(fixture_cpp_operator_v2 SHARED
-    fixtures/fixture_cpp_operator_v2.cpp
+add_library(fixture_cpp_operator_capabilities SHARED
+    fixtures/fixture_cpp_operator_capabilities.cpp
 )
-target_include_directories(fixture_cpp_operator_v2 PUBLIC ${CMAKE_SOURCE_DIR})
-target_compile_options(fixture_cpp_operator_v2 PRIVATE -fvisibility=hidden)
-set_target_properties(fixture_cpp_operator_v2 PROPERTIES
+target_include_directories(fixture_cpp_operator_capabilities PUBLIC ${CMAKE_SOURCE_DIR})
+target_compile_options(fixture_cpp_operator_capabilities PRIVATE -fvisibility=hidden)
+set_target_properties(fixture_cpp_operator_capabilities PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output
 )
 
@@ -46,12 +46,12 @@ find_package(OpenSSL REQUIRED)
 target_link_libraries(${PROJECT_NAME} OpenSSL::Crypto)
 
 add_dependencies(${PROJECT_NAME} flowsql_common)
-add_dependencies(${PROJECT_NAME} fixture_cpp_operator fixture_bad_abi fixture_cpp_operator_v2)
+add_dependencies(${PROJECT_NAME} fixture_cpp_operator fixture_bad_abi fixture_cpp_operator_capabilities)
 target_link_libraries(${PROJECT_NAME} flowsql_common)
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     FIXTURE_CPP_SO_PATH="$<TARGET_FILE:fixture_cpp_operator>"
     FIXTURE_BAD_ABI_SO_PATH="$<TARGET_FILE:fixture_bad_abi>"
-    FIXTURE_CPP_V2_SO_PATH="$<TARGET_FILE:fixture_cpp_operator_v2>"
+    FIXTURE_CPP_CAPABILITIES_SO_PATH="$<TARGET_FILE:fixture_cpp_operator_capabilities>"
 )
 
 target_compile_options(${PROJECT_NAME} PRIVATE -UNDEBUG)
@@ -76,17 +76,15 @@ add_dependencies(test_operator_contract_registration flowsql_config_channel flow
 add_test(NAME test_operator_contract_registration COMMAND $<TARGET_FILE:test_operator_contract_registration>)
 set_tests_properties(test_operator_contract_registration PROPERTIES TIMEOUT 60)
 
-foreach(variant IN ITEMS v1 v2 reference invalid too_long throw)
+foreach(variant IN ITEMS declared reference invalid too_long throw)
     add_library(fixture_contract_${variant} SHARED fixtures/fixture_contract_operator.cpp)
     target_include_directories(fixture_contract_${variant} PRIVATE ${CMAKE_SOURCE_DIR})
     target_compile_options(fixture_contract_${variant} PRIVATE -fvisibility=hidden)
     set_target_properties(fixture_contract_${variant} PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
-    if(variant STREQUAL "v2")
-        target_compile_definitions(fixture_contract_${variant} PRIVATE FIXTURE_ABI=2 FIXTURE_NAME="v2")
-    elseif(variant STREQUAL "reference")
+    if(variant STREQUAL "reference")
         target_compile_definitions(fixture_contract_${variant} PRIVATE FIXTURE_NAME="reference")
     else()
-        target_compile_definitions(fixture_contract_${variant} PRIVATE FIXTURE_NAME="v1")
+        target_compile_definitions(fixture_contract_${variant} PRIVATE FIXTURE_NAME="declared")
     endif()
     string(TOUPPER ${variant} upper)
     target_compile_definitions(fixture_contract_${variant} PRIVATE FIXTURE_${upper}=1)
@@ -104,7 +102,7 @@ foreach(component IN ITEMS config_channel builtin catalog binaddon baseliner)
     target_compile_definitions(test_operator_contract_cpp PRIVATE ${upper}_PLUGIN_PATH="$<TARGET_FILE:flowsql_${component}>")
     add_dependencies(test_operator_contract_cpp flowsql_${component})
 endforeach()
-foreach(variant IN ITEMS v1 v2 reference invalid too_long throw)
+foreach(variant IN ITEMS declared reference invalid too_long throw)
     string(TOUPPER ${variant} upper)
     target_compile_definitions(test_operator_contract_cpp PRIVATE FIXTURE_${upper}_PATH="$<TARGET_FILE:fixture_contract_${variant}>")
     add_dependencies(test_operator_contract_cpp fixture_contract_${variant})
@@ -112,8 +110,6 @@ endforeach()
 add_test(NAME test_operator_contract_cpp COMMAND $<TARGET_FILE:test_operator_contract_cpp>)
 set_tests_properties(test_operator_contract_cpp PROPERTIES TIMEOUT 90)
 
-target_compile_definitions(test_operator_contract_cpp PRIVATE FIXTURE_PAIR_PATH="$<TARGET_FILE:fixture_cpp_operator_v2>")
-add_dependencies(test_operator_contract_cpp fixture_cpp_operator_v2)
 
 add_library(fixture_contract_execution SHARED fixtures/fixture_contract_operator.cpp)
 target_include_directories(fixture_contract_execution PRIVATE ${CMAKE_SOURCE_DIR})

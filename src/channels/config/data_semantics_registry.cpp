@@ -6,6 +6,7 @@
 #include <sqlite3.h>
 #include <chrono>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <unordered_set>
 
@@ -52,10 +53,10 @@ std::string Exact(const std::string& kind, const std::string& name, uint64_t rev
 }
 }  // namespace
 DataSemanticsRegistry::~DataSemanticsRegistry() { Close(); }
-int DataSemanticsRegistry::StorageError(DataSemanticsErrorV1* e) {
+int DataSemanticsRegistry::StorageError(DataSemanticsError* e) {
     return SemanticsFail(e, "STORAGE_ERROR", db_ ? sqlite3_errmsg(db_) : "database closed");
 }
-int DataSemanticsRegistry::Open(const std::string& path, DataSemanticsErrorV1* e) {
+int DataSemanticsRegistry::Open(const std::string& path, DataSemanticsError* e) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (e) *e = {};
     if (db_ || path.empty() || path == ":memory:")
@@ -109,7 +110,7 @@ void DataSemanticsRegistry::Close() {
     if (db_) sqlite3_close(db_);
     db_ = nullptr;
 }
-int DataSemanticsRegistry::Read(const std::string& reference, DataSemanticsSnapshotV1* out, DataSemanticsErrorV1* e) {
+int DataSemanticsRegistry::Read(const std::string& reference, DataSemanticsSnapshot* out, DataSemanticsError* e) {
     *out = {};
     SemanticsIdentity id;
     if (!ParseSemanticsReference(reference, &id))
@@ -131,7 +132,7 @@ int DataSemanticsRegistry::Read(const std::string& reference, DataSemanticsSnaps
     *out = {reference, d["schema_id"].GetString(), digest, std::make_shared<const std::string>(content)};
     return 0;
 }
-int DataSemanticsRegistry::Resolve(const char* reference, DataSemanticsSnapshotV1* out, DataSemanticsErrorV1* e) {
+int DataSemanticsRegistry::Resolve(const char* reference, DataSemanticsSnapshot* out, DataSemanticsError* e) {
     if (e) *e = {};
     if (!out) return SemanticsFail(e, "INVALID_REFERENCE", "snapshot is required");
     std::lock_guard<std::mutex> lock(mutex_);
@@ -139,11 +140,14 @@ int DataSemanticsRegistry::Resolve(const char* reference, DataSemanticsSnapshotV
 }
 int DataSemanticsRegistry::ValidateLinks(const std::string& kind, const rapidjson::Value& d,
                                          const std::vector<SemanticsReference>& refs, std::string* check,
-                                         DataSemanticsErrorV1* e) {
+                                         DataSemanticsError* e) {
     check->clear();
+    // Repeated exact references share one integrity check within this locked invocation.
+    std::map<std::string, DataSemanticsSnapshot> targets;
     for (const auto& ref : refs) {
-        DataSemanticsSnapshotV1 target;
-        if (Read(ref.target, &target, e)) {
+        auto entry = targets.try_emplace(ref.target);
+        auto& target = entry.first->second;
+        if (entry.second && Read(ref.target, &target, e)) {
             if (e) e->field_path = ref.path;
             return -1;
         }
@@ -166,7 +170,7 @@ int DataSemanticsRegistry::ValidateLinks(const std::string& kind, const rapidjso
     return 0;
 }
 int DataSemanticsRegistry::Preview(const std::string& kind, const std::string& content, rapidjson::Document* out,
-                                   std::string* check, DataSemanticsErrorV1* e) {
+                                   std::string* check, DataSemanticsError* e) {
     if (e) *e = {};
     std::vector<SemanticsReference> refs;
     if (NormalizeSemantics(kind, content, out, &refs, e)) return -1;
@@ -174,7 +178,7 @@ int DataSemanticsRegistry::Preview(const std::string& kind, const std::string& c
     if (!db_) return SemanticsFail(e, "UNAVAILABLE", "registry closed");
     return ValidateLinks(kind, *out, refs, check, e);
 }
-int DataSemanticsRegistry::Save(const SemanticsSaveRequest& r, SemanticsSaveResult* out, DataSemanticsErrorV1* e) {
+int DataSemanticsRegistry::Save(const SemanticsSaveRequest& r, SemanticsSaveResult* out, DataSemanticsError* e) {
     if (out) *out = {};
     if (!out) return SemanticsFail(e, "INVALID_DOCUMENT", "save output required");
     std::vector<SemanticsSaveResult> results;
@@ -183,11 +187,11 @@ int DataSemanticsRegistry::Save(const SemanticsSaveRequest& r, SemanticsSaveResu
     return 0;
 }
 int DataSemanticsRegistry::SaveBatch(const std::vector<SemanticsSaveRequest>& requests,
-                                     std::vector<SemanticsSaveResult>* out, DataSemanticsErrorV1* e) {
+                                     std::vector<SemanticsSaveResult>* out, DataSemanticsError* e) {
     return WriteBatch(requests, true, out, e);
 }
 int DataSemanticsRegistry::WriteBatch(const std::vector<SemanticsSaveRequest>& requests, bool execution_owned,
-                                      std::vector<SemanticsSaveResult>* out, DataSemanticsErrorV1* e) {
+                                      std::vector<SemanticsSaveResult>* out, DataSemanticsError* e) {
     if (e) *e = {};
     if (!out) return SemanticsFail(e, "INVALID_DOCUMENT", "batch output required");
     out->clear();
@@ -207,7 +211,7 @@ int DataSemanticsRegistry::WriteBatch(const std::vector<SemanticsSaveRequest>& r
     return 0;
 }
 int DataSemanticsRegistry::SaveUnlocked(const SemanticsSaveRequest& r, bool execution_owned, SemanticsSaveResult* out,
-                                        DataSemanticsErrorV1* e) {
+                                        DataSemanticsError* e) {
     if (e) *e = {};
     if (!out) return SemanticsFail(e, "INVALID_DOCUMENT", "save output required");
     *out = {};
@@ -222,7 +226,7 @@ int DataSemanticsRegistry::SaveUnlocked(const SemanticsSaveRequest& r, bool exec
     if (r.kind == "operator_contract" &&
         r.name != std::string(d["operator"]["category"].GetString()) + "." + d["operator"]["name"].GetString())
         return SemanticsFail(e, "CONTRACT_INVALID", "contract name must match its operator identity", "/operator");
-    if (r.source_observed && (r.kind != "binding" || !d.HasMember("source_snapshot")))
+    if (r.source_observed && r.kind != "binding")
         return SemanticsFail(e, "INVALID_DOCUMENT", "observed binding required");
     const auto content = SemanticsJson(d), digest = Digest(content);
     std::string binding_check;
@@ -240,11 +244,11 @@ int DataSemanticsRegistry::SaveUnlocked(const SemanticsSaveRequest& r, bool exec
             return StorageError(e);
     }
     if (r.base_revision) {
-        DataSemanticsSnapshotV1 base;
+        DataSemanticsSnapshot base;
         if (Read(Exact(r.kind, r.name, r.base_revision), &base, e)) return -1;
     }
     if (current) {
-        DataSemanticsSnapshotV1 previous;
+        DataSemanticsSnapshot previous;
         if (Read(Exact(r.kind, r.name, current), &previous, e)) return -1;
         if (r.kind == "binding") {
             rapidjson::Document prior;
@@ -326,7 +330,7 @@ int DataSemanticsRegistry::SaveUnlocked(const SemanticsSaveRequest& r, bool exec
     return 0;
 }
 int DataSemanticsRegistry::BindingLookup(const std::string& provider, const std::string& object,
-                                         DataSemanticsSnapshotV1* out, DataSemanticsErrorV1* e) {
+                                         DataSemanticsSnapshot* out, DataSemanticsError* e) {
     if (e) *e = {};
     if (!out) return SemanticsFail(e, "INVALID_DOCUMENT", "snapshot required");
     *out = {};
@@ -345,7 +349,7 @@ int DataSemanticsRegistry::BindingLookup(const std::string& provider, const std:
     if (rc != SQLITE_ROW) return StorageError(e);
     return Read(Exact("binding", Text(s.get(), 0), sqlite3_column_int64(s.get(), 1)), out, e);
 }
-int DataSemanticsRegistry::ObservationTrusted(const std::string& reference, bool* trusted, DataSemanticsErrorV1* e) {
+int DataSemanticsRegistry::ObservationTrusted(const std::string& reference, bool* trusted, DataSemanticsError* e) {
     if (e) *e = {};
     if (!trusted) return SemanticsFail(e, "INVALID_DOCUMENT", "observation output required");
     *trusted = false;
@@ -360,11 +364,11 @@ int DataSemanticsRegistry::ObservationTrusted(const std::string& reference, bool
     return 0;
 }
 int DataSemanticsRegistry::References(const std::string& target, bool history, std::vector<SemanticsReferenceItem>* out,
-                                      DataSemanticsErrorV1* e) {
+                                      DataSemanticsError* e) {
     if (e) *e = {};
     out->clear();
     std::lock_guard<std::mutex> lock(mutex_);
-    DataSemanticsSnapshotV1 snapshot;
+    DataSemanticsSnapshot snapshot;
     if (Read(target, &snapshot, e)) return -1;
     auto s = Prepare(db_,
                      "SELECT x.source,x.field_path,o.current_revision=r.revision FROM semantics_reference x "

@@ -14,12 +14,12 @@ constexpr uint64_t kSessionIdentityCharge = sizeof(NpmTransactionIdentity) + 6 *
 
 }  // namespace
 
-NpmHttp1ProtocolModuleV1::NpmHttp1ProtocolModuleV1(NpmHttp1ConfigV1 config, std::shared_ptr<INpmTaskBudget> budget)
+NpmHttp1ProtocolModule::NpmHttp1ProtocolModule(NpmHttp1Config config, std::shared_ptr<INpmTaskBudget> budget)
     : budget_(std::move(budget)), transactions_(std::move(config), budget_) {}
 
-NpmHttp1ProtocolModuleV1::~NpmHttp1ProtocolModuleV1() { Abort(); }
+NpmHttp1ProtocolModule::~NpmHttp1ProtocolModule() { Abort(); }
 
-int NpmHttp1ProtocolModuleV1::RememberSession(const NpmSessionView& session) {
+int NpmHttp1ProtocolModule::RememberSession(const NpmSessionView& session) {
     if (!budget_ || !session.key || session.session_id == 0) return EINVAL;
     if (identities_.find(session.session_id) != identities_.end()) return 0;
     const uint64_t charge = kSessionIdentityCharge + session.key->OwnedKeyBytes();
@@ -41,14 +41,14 @@ int NpmHttp1ProtocolModuleV1::RememberSession(const NpmSessionView& session) {
     }
 }
 
-void NpmHttp1ProtocolModuleV1::ForgetSession(uint64_t session_id) noexcept {
+void NpmHttp1ProtocolModule::ForgetSession(uint64_t session_id) noexcept {
     const auto found = identities_.find(session_id);
     if (found == identities_.end()) return;
     budget_->Release(NpmBudgetCategory::kModuleState, found->second.charge);
     identities_.erase(found);
 }
 
-int NpmHttp1ProtocolModuleV1::EmitRows(std::vector<NpmHttp1TransactionResultV1>* rows, INpmResultEmitterV1& emitter) {
+int NpmHttp1ProtocolModule::EmitRows(std::vector<NpmHttp1TransactionResult>* rows, INpmResultEmitter& emitter) {
     int error = 0;
     for (auto& row : *rows) {
         const auto identity = identities_.find(row.session_id);
@@ -64,7 +64,7 @@ int NpmHttp1ProtocolModuleV1::EmitRows(std::vector<NpmHttp1TransactionResultV1>*
             family_result.b_port = key.b_port;
 
             family_result.transaction = std::move(row);
-            return EmitNpmHttp1TransactionV1(family_result, budget_, emitter);
+            return EmitNpmHttp1Transaction(family_result, budget_, emitter);
         };
         const auto& key = identity->second.key;
         error = key.Get4() ? emit(NpmHttp1Result4{}, *key.Get4()) : emit(NpmHttp1Result6{}, *key.Get6());
@@ -74,18 +74,18 @@ int NpmHttp1ProtocolModuleV1::EmitRows(std::vector<NpmHttp1TransactionResultV1>*
     return error;
 }
 
-int NpmHttp1ProtocolModuleV1::OnInput(const NpmInputEventV1& input, INpmResultEmitterV1&) {
-    if (finished_ || aborted_ || input.kind != NpmInputKindV1::kTcpPacket || !input.session || !input.transport)
+int NpmHttp1ProtocolModule::OnInput(const NpmInputEvent& input, INpmResultEmitter&) {
+    if (finished_ || aborted_ || input.kind != NpmInputKind::kTcpPacket || !input.session || !input.transport)
         return EINVAL;
     return RememberSession(*input.session);
 }
 
-int NpmHttp1ProtocolModuleV1::OnSessionSnapshot(const NpmSessionView&, int64_t, INpmResultEmitterV1&) { return 0; }
+int NpmHttp1ProtocolModule::OnSessionSnapshot(const NpmSessionView&, int64_t, INpmResultEmitter&) { return 0; }
 
-int NpmHttp1ProtocolModuleV1::OnSessionEnd(const NpmSessionView& session, NpmSessionEndReason reason,
-                                           int64_t observed_at_ns, INpmResultEmitterV1& emitter) {
+int NpmHttp1ProtocolModule::OnSessionEnd(const NpmSessionView& session, NpmSessionEndReason reason,
+                                         int64_t observed_at_ns, INpmResultEmitter& emitter) {
     if (finished_ || aborted_) return EINVAL;
-    std::vector<NpmHttp1TransactionResultV1> rows;
+    std::vector<NpmHttp1TransactionResult> rows;
     const int error = transactions_.OnSessionEnd(session.session_id, reason, observed_at_ns, &rows);
     if (error) {
         transactions_.ReleaseResults(&rows);
@@ -97,13 +97,13 @@ int NpmHttp1ProtocolModuleV1::OnSessionEnd(const NpmSessionView& session, NpmSes
     return 0;
 }
 
-std::optional<int64_t> NpmHttp1ProtocolModuleV1::NextEventDeadlineNs() const {
+std::optional<int64_t> NpmHttp1ProtocolModule::NextEventDeadlineNs() const {
     return finished_ || aborted_ ? std::nullopt : transactions_.NextEventDeadlineNs();
 }
 
-int NpmHttp1ProtocolModuleV1::OnTime(const NpmModuleTimeV1& time, INpmResultEmitterV1& emitter) {
+int NpmHttp1ProtocolModule::OnTime(const NpmModuleTime& time, INpmResultEmitter& emitter) {
     if (finished_ || aborted_) return EINVAL;
-    std::vector<NpmHttp1TransactionResultV1> rows;
+    std::vector<NpmHttp1TransactionResult> rows;
     const int error = transactions_.OnCaptureWatermark(time.watermark_ns, &rows);
     if (error) {
         transactions_.ReleaseResults(&rows);
@@ -112,34 +112,34 @@ int NpmHttp1ProtocolModuleV1::OnTime(const NpmModuleTimeV1& time, INpmResultEmit
     return EmitRows(&rows, emitter);
 }
 
-int NpmHttp1ProtocolModuleV1::Finish(int64_t, INpmResultEmitterV1&) {
+int NpmHttp1ProtocolModule::Finish(int64_t, INpmResultEmitter&) {
     if (finished_ || aborted_ || !identities_.empty() || transactions_.ActiveSessions() != 0) return EINVAL;
     finished_ = true;
     return 0;
 }
 
-void NpmHttp1ProtocolModuleV1::Abort() noexcept {
+void NpmHttp1ProtocolModule::Abort() noexcept {
     if (aborted_) return;
     aborted_ = true;
     transactions_.Abort();
     while (!identities_.empty()) ForgetSession(identities_.begin()->first);
 }
 
-int NpmHttp1ProtocolModuleV1::OnTcpStreamReadable(const NpmTcpStreamContextV1& context, INpmTcpStreamCursorV1& cursor,
-                                                  INpmResultEmitterV1& emitter) {
+int NpmHttp1ProtocolModule::OnTcpStreamReadable(const NpmTcpStreamContext& context, INpmTcpStreamCursor& cursor,
+                                                INpmResultEmitter& emitter) {
     if (finished_ || aborted_ || !context.session) return EINVAL;
     const int remembered = RememberSession(*context.session);
     if (remembered) return remembered;
-    NpmTcpStreamEventV1 event;
+    NpmTcpStreamEvent event;
     while (cursor.Peek(&event)) {
-        std::vector<NpmHttp1TransactionResultV1> rows;
+        std::vector<NpmHttp1TransactionResult> rows;
         const int error = transactions_.OnStreamEvent(context.session->session_id, context.direction, context.origin,
                                                       event, context.observed_at_ns, &rows);
         if (error) {
             transactions_.ReleaseResults(&rows);
             return error;
         }
-        const int consumed = cursor.Consume(event.kind == NpmTcpStreamEventKindV1::kData ? event.bytes.size : 0);
+        const int consumed = cursor.Consume(event.kind == NpmTcpStreamEventKind::kData ? event.bytes.size : 0);
         if (consumed) {
             transactions_.ReleaseResults(&rows);
             return consumed;

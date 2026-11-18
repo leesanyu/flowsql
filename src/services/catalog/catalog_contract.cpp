@@ -35,8 +35,8 @@ Json Request(const std::string& category, const std::string& name) {
     Set(r, "name", category + "." + name, r.GetAllocator());
     return r;
 }
-int DefinitionIdentity(const rapidjson::Value& d, OperatorComponentContractV1* c, DataSemanticsErrorV1* e) {
-    if (dataset::Get(d, "schema_id") != "flowsql.operator-data-contract.v1" || !d.HasMember("operator") ||
+int DefinitionIdentity(const rapidjson::Value& d, OperatorComponentContract* c, DataSemanticsError* e) {
+    if (dataset::Get(d, "schema_id") != "flowsql.operator-data-contract" || !d.HasMember("operator") ||
         dataset::Get(d["operator"], "category") != c->category || dataset::Get(d["operator"], "name") != c->name)
         return Fail(e, "CONTRACT_INVALID", "declaration and actual component operator identity differ", "/operator");
     c->operator_version = dataset::Get(d["operator"], "version");
@@ -45,16 +45,16 @@ int DefinitionIdentity(const rapidjson::Value& d, OperatorComponentContractV1* c
 }
 }  // namespace
 
-int CatalogPlugin::Prepare(const std::vector<OperatorContractDeclarationV1>& declarations,
-                           std::vector<PreparedOperatorContractV1>* prepared, DataSemanticsErrorV1* e) {
-    DataSemanticsErrorV1 local_error;
+int CatalogPlugin::Prepare(const std::vector<OperatorContractDeclaration>& declarations,
+                           std::vector<PreparedOperatorContract>* prepared, DataSemanticsError* e) {
+    DataSemanticsError local_error;
     if (!e) e = &local_error;
     *e = {};
     if (!prepared) return dataset::Fail(e, "INVALID_REQUEST", "preparation output required");
     prepared->clear();
     if (declarations.empty() || declarations.size() > 256)
         return dataset::Fail(e, "CONTRACT_INVALID", "component must contain 1..256 operator declarations");
-    std::vector<PreparedOperatorContractV1> candidates;
+    std::vector<PreparedOperatorContract> candidates;
     std::vector<std::string> documents;
     std::set<std::string> identities;
     // Validate the entire component before the first definition write. No catalog lock.
@@ -67,7 +67,7 @@ int CatalogPlugin::Prepare(const std::vector<OperatorContractDeclarationV1>& dec
         std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return std::tolower(c); });
         if (!identities.insert(key).second)
             return dataset::Fail(e, "CONTRACT_INVALID", "duplicate component operator declaration");
-        PreparedOperatorContractV1 candidate;
+        PreparedOperatorContract candidate;
         candidate.expected_component_revision = x.expected_component_revision;
         auto& association = candidate.association;
         association.category = x.category;
@@ -131,7 +131,7 @@ int CatalogPlugin::Prepare(const std::vector<OperatorContractDeclarationV1>& dec
     return 0;
 }
 
-int CatalogPlugin::Commit(const std::vector<PreparedOperatorContractV1>& prepared, DataSemanticsErrorV1* e) {
+int CatalogPlugin::Commit(const std::vector<PreparedOperatorContract>& prepared, DataSemanticsError* e) {
     if (e) *e = {};
     if (prepared.empty() || prepared.size() > 256)
         return dataset::Fail(e, "CONTRACT_INVALID", "association batch must contain 1..256 operators");
@@ -148,10 +148,9 @@ int CatalogPlugin::Commit(const std::vector<PreparedOperatorContractV1>& prepare
             return dataset::Fail(e, "CONTRACT_INVALID", "invalid prepared component association");
         if (c.contract_state == "declared") {
             auto* definitions =
-                querier_ ? static_cast<IDataSemanticsRegistryV1*>(querier_->First(IID_DATA_SEMANTICS_REGISTRY_V1))
-                         : nullptr;
+                querier_ ? static_cast<IDataSemanticsRegistry*>(querier_->First(IID_DATA_SEMANTICS_REGISTRY)) : nullptr;
             if (!definitions) return dataset::Fail(e, "UNAVAILABLE", "declared contract provider unavailable");
-            DataSemanticsSnapshotV1 snapshot;
+            DataSemanticsSnapshot snapshot;
             if (definitions->Resolve(c.contract_ref.c_str(), &snapshot, e)) return -1;
             Json document;
             document.Parse(snapshot.document_json->c_str());
@@ -204,8 +203,8 @@ int CatalogPlugin::Commit(const std::vector<PreparedOperatorContractV1>& prepare
     return 0;
 }
 
-int CatalogPlugin::Lookup(const char* category, const char* name, OperatorComponentContractV1* out,
-                          DataSemanticsErrorV1* e) {
+int CatalogPlugin::Lookup(const char* category, const char* name, OperatorComponentContract* out,
+                          DataSemanticsError* e) {
     if (e) *e = {};
     if (!out) return dataset::Fail(e, "INVALID_REQUEST", "association output required");
     *out = {};

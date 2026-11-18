@@ -14,7 +14,7 @@ int main() {
       {"name":"value","path":"/value","type":"float64","nullable":true},
       {"name":"flag","path":"/flag","type":"bool","nullable":true}]})";
     auto config = ParseStructuredConfig(Parse(definition));
-    KafkaMessageV1 m;
+    KafkaMessage m;
     m.topic = "metrics";
     m.partition = 2;
     m.offset = 91;

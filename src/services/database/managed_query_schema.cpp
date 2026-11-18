@@ -155,7 +155,7 @@ arrow::Result<std::shared_ptr<arrow::Schema>> ManagedQuerySchema(IDbSession* ses
     }
     if (from + 1 >= tokens.size()) return physical;
     const auto& relation = tokens[from + 1].text;
-    static const std::regex managed("npm_[a-z][a-z0-9_]*_(history_v[0-9]+|latest_v[0-9]+|final_v[0-9]+|v[0-9]+_data)");
+    static const std::regex managed("npm_[a-z][a-z0-9_]*_(history|latest|final|data)");
     if (!std::regex_match(relation, managed)) return physical;
     // Joins and subqueries require column provenance and are outside this single-relation contract.
     depth = 0;

@@ -36,14 +36,12 @@ int main(int argc, char** argv) {
         libraries.push_back(std::move(lib));
         options.push_back(std::move(option));
     };
-    if (mode != "sources" && mode != "iid") add("libflowsql_gateway.so", "host=127.0.0.1;port=" + gateway);
+    if (mode != "iid") add("libflowsql_gateway.so", "host=127.0.0.1;port=" + gateway);
     if (mode != "iid") add("libflowsql_router.so", "host=127.0.0.1;port=" + router + ";gateway=127.0.0.1:" + gateway);
-    if (mode != "sources") {
-        add("libflowsql_config_channel.so", "db_path=" + root + "/config.db;gateway=127.0.0.1:" + gateway);
-        if (mode != "iid")
-            add("libflowsql_web.so", "host=127.0.0.1;port=" + web + ";gateway=127.0.0.1:" + gateway +
-                                         ";db_path=" + root + "/web.db;upload_dir=" + root + "/uploads");
-    }
+    add("libflowsql_config_channel.so", "db_path=" + root + "/config.db;gateway=127.0.0.1:" + gateway);
+    if (mode != "sources" && mode != "iid")
+        add("libflowsql_web.so", "host=127.0.0.1;port=" + web + ";gateway=127.0.0.1:" + gateway + ";db_path=" + root +
+                                     "/web.db;upload_dir=" + root + "/uploads");
     if (mode != "control") {
         add("libflowsql_builtin.so", "");
         add("libflowsql_catalog.so", "data_dir=" + root + "/frames;operator_db_path=" + root + "/catalog.db");
@@ -119,8 +117,8 @@ int main(int argc, char** argv) {
                                          : kind == "dataframe"  ? "dataframe"
                                                                 : "database";
             bool found = false;
-            runtime.loader->Traverse(IID_CHANNEL_DATASET_DESCRIPTOR_V1, [&](void* p) {
-                auto* descriptor = static_cast<IChannelDatasetDescriptorV1*>(p);
+            runtime.loader->Traverse(IID_CHANNEL_DATASET_DESCRIPTOR, [&](void* p) {
+                auto* descriptor = static_cast<IChannelDatasetDescriptor*>(p);
                 if (provider == descriptor->ProviderId()) {
                     found = true;
                     assert(DescriptorControl(*descriptor, "{\"locator\":" + line + "}", response) == 0);

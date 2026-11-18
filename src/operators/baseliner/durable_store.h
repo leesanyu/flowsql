@@ -10,18 +10,18 @@ std::string RestoreCompatibilityHash(const ConfigSnapshot& config);
 struct StoredGeneration {
     int64_t generation = 0;
     std::string checkpoint;
-    BlockInputProgressV1 progress;
+    BlockInputProgress progress;
 };
 class DurableStore {
  public:
     int Open(const ConfigSnapshot& config, IDatabaseChannel* channel, const std::string& owner);
     int Load(StoredGeneration* output);
-    int Publish(const std::string& checkpoint, const BlockInputProgressV1& progress,
+    int Publish(const std::string& checkpoint, const BlockInputProgress& progress,
                 const std::vector<std::shared_ptr<arrow::RecordBatch>>& results);
     int Renew() { return fence_.Renew() == 0 ? 0 : Fail(fence_.LastError()); }
     void Close() {
         fence_.Release();
-        std::atomic_store(&session_, std::shared_ptr<IDatabaseAtomicSessionV1>{});
+        std::atomic_store(&session_, std::shared_ptr<IDatabaseAtomicSession>{});
     }
     void Cancel() {
         cancelled_ = true;
@@ -38,7 +38,7 @@ class DurableStore {
     std::string Quote(const std::string& id) const;
     ConfigSnapshot config_;
     std::string backend_, error_;
-    std::shared_ptr<IDatabaseAtomicSessionV1> session_;
+    std::shared_ptr<IDatabaseAtomicSession> session_;
     WriterFence fence_;
     std::atomic<bool> cancelled_{false};
     bool failed_ = false;

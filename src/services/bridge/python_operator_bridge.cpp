@@ -116,7 +116,7 @@ int PythonOperatorBridge::Work(IChannel* in, IChannel* out) {
             .AddMember("inputs", rapidjson::Value(rapidjson::kArrayType), a)
             .AddMember("execution_context", rapidjson::Value(rapidjson::kObjectType), a);
         std::string resolved;
-        DataSemanticsErrorV1 error;
+        DataSemanticsError error;
         if (ResolveInvocation(dataset::Encode(request).c_str(), &resolved, &error)) {
             last_error_ = error.code + ": " + error.message;
             return -1;
@@ -205,7 +205,7 @@ int PythonOperatorBridge::Configure(const char* key, const char* value) {
     parameters_[key] = value;
     return 0;
 }
-int PythonOperatorBridge::ResolveInvocation(const char* text, std::string* out, DataSemanticsErrorV1* error) {
+int PythonOperatorBridge::ResolveInvocation(const char* text, std::string* out, DataSemanticsError* error) {
     using namespace dataset;
     if (out) out->clear();
     if (error) *error = {};

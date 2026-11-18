@@ -35,7 +35,7 @@ const load = async () => {
   const current = ++generation
   error.value = ''; ready.value = false; src.value = ''; clearTimeout(timer)
   try {
-    const response = await fetch('/api/visualization/v1/capabilities', { signal: AbortSignal.timeout(5000), cache: 'no-store' })
+    const response = await fetch('/api/visualization/capabilities', { signal: AbortSignal.timeout(5000), cache: 'no-store' })
     if (!response.ok) throw new Error((await response.text()) || '数据探索服务暂不可用')
     const api = await response.json()
     if (api.api_version !== 1 || api.workflow_version !== 'graphic-walker-0.5.3') throw new Error('数据探索版本不兼容')

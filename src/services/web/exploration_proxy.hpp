@@ -16,14 +16,13 @@ inline bool ValidExplorationUpstream(const std::string& upstream) {
 }
 
 inline bool IsExplorationPath(const std::string& path) {
-    return path == "/exploration" || path.rfind("/exploration/", 0) == 0 ||
-           path.rfind("/api/visualization/v1/", 0) == 0;
+    return path == "/exploration" || path.rfind("/exploration/", 0) == 0 || path.rfind("/api/visualization/", 0) == 0;
 }
 
 inline bool IsExplorationPostPath(const std::string& path) {
-    return path == "/api/visualization/v1/compute" || path == "/api/visualization/v1/cancel" ||
-           path == "/api/visualization/v1/snapshots/acquire" || path == "/api/visualization/v1/snapshots/renew" ||
-           path == "/api/visualization/v1/snapshots/release";
+    return path == "/api/visualization/compute" || path == "/api/visualization/cancel" ||
+           path == "/api/visualization/snapshots/acquire" || path == "/api/visualization/snapshots/renew" ||
+           path == "/api/visualization/snapshots/release";
 }
 
 inline void ProxyExploration(const std::string& upstream, const httplib::Request& req, httplib::Response& res) {
@@ -33,9 +32,8 @@ inline void ProxyExploration(const std::string& upstream, const httplib::Request
         return;
     }
     const bool asset = req.path == "/exploration" || req.path.rfind("/exploration/", 0) == 0;
-    const bool api_get = req.path == "/api/visualization/v1/capabilities" ||
-                         req.path == "/api/visualization/v1/sources" ||
-                         req.path.rfind("/api/visualization/v1/sources/", 0) == 0;
+    const bool api_get = req.path == "/api/visualization/capabilities" || req.path == "/api/visualization/sources" ||
+                         req.path.rfind("/api/visualization/sources/", 0) == 0;
     const bool api_post = IsExplorationPostPath(req.path);
     if (!(((asset || api_get) && (req.method == "GET" || req.method == "HEAD")) ||
           (api_post && req.method == "POST"))) {

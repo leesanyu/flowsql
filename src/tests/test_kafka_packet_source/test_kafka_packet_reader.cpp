@@ -20,7 +20,7 @@ using Clock = std::chrono::steady_clock;
 namespace {
 PacketSourceConfig Config() {
     return ParsePacketSourceConfig(Parse(
-        R"({"encoding":"flowsql_packet_v1","stream_id":"probe","observation_domain_id":"7","inputs":[{"source_id":0,"queue_id":2,"source_name":"a"},
+        R"({"encoding":"flowsql_packet","stream_id":"probe","observation_domain_id":"7","inputs":[{"source_id":0,"queue_id":2,"source_name":"a"},
       {"source_id":1,"queue_id":3,"source_name":"b"}]})"));
 }
 PacketEnvelope Envelope(uint64_t poll = 8, bool idle = false) {
@@ -30,26 +30,26 @@ PacketEnvelope Envelope(uint64_t poll = 8, bool idle = false) {
     e.capture_generation = 45;
     e.poll_sequence = poll;
     if (!idle) e.packets.push_back({{100, 3, 64, 1, 0, poll * 2}, std::string("\0\xff\0", 3)});
-    CaptureProgressV1 fact;
+    CaptureProgress fact;
     fact.source_id = 0;
     fact.queue_id = 2;
     fact.fact_sequence = poll;
     fact.capture_time_ns = 100;
     fact.packet_observed = !idle;
     fact.source_idle_confirmed = idle;
-    fact.backlog = CaptureBacklogV1::kEmpty;
+    fact.backlog = CaptureBacklog::kEmpty;
     e.progress.push_back(fact);
     return e;
 }
-KafkaMessageV1 Message(const PacketEnvelope& e, int64_t offset) {
+KafkaMessage Message(const PacketEnvelope& e, int64_t offset) {
     auto m = EncodePacket(Config(), e).ValueOrDie();
     m.topic = "packets";
     m.offset = offset;
     return m;
 }
-struct Fake final : IKafkaClientSessionV1, IKafkaConsumerSessionV1 {
-    KafkaBindingSnapshotV1 snapshot;
-    std::deque<KafkaMessageV1> messages;
+struct Fake final : IKafkaClientSession, IKafkaConsumerSession {
+    KafkaBindingSnapshot snapshot;
+    std::deque<KafkaMessage> messages;
     std::atomic<bool> cancelled{false};
     int commits = 0, commit_error = 0, poll_error = 0;
     int64_t committed = -1;
@@ -60,11 +60,11 @@ struct Fake final : IKafkaClientSessionV1, IKafkaConsumerSessionV1 {
         snapshot.topic = "packets";
         snapshot.payload_kind = "packet";
     }
-    const KafkaBindingSnapshotV1& Snapshot() const override { return snapshot; }
+    const KafkaBindingSnapshot& Snapshot() const override { return snapshot; }
     int Probe(uint32_t, std::string*) override { return ENOTSUP; }
     int QueryInterface(const Guid& iid, void** p) override {
-        assert(std::memcmp(&iid, &IID_KAFKA_CONSUMER_SESSION_V1, sizeof(Guid)) == 0);
-        *p = static_cast<IKafkaConsumerSessionV1*>(this);
+        assert(std::memcmp(&iid, &IID_KAFKA_CONSUMER_SESSION, sizeof(Guid)) == 0);
+        *p = static_cast<IKafkaConsumerSession*>(this);
         return 0;
     }
     void Cancel() override {
@@ -72,7 +72,7 @@ struct Fake final : IKafkaClientSessionV1, IKafkaConsumerSessionV1 {
         wake.notify_all();
     }
     int StartConsumer(const char*, uint32_t) override { return 0; }
-    int PollMessage(uint32_t timeout, KafkaMessageV1* m) override {
+    int PollMessage(uint32_t timeout, KafkaMessage* m) override {
         std::unique_lock<std::mutex> lock(mutex);
         if (wait) wake.wait_for(lock, std::chrono::milliseconds(timeout), [&] { return cancelled.load(); });
         if (cancelled) return ECANCELED;
@@ -82,7 +82,7 @@ struct Fake final : IKafkaClientSessionV1, IKafkaConsumerSessionV1 {
         messages.pop_front();
         return 0;
     }
-    int CommitOffsets(const std::vector<KafkaOffsetV1>& offsets, uint32_t) override {
+    int CommitOffsets(const std::vector<KafkaOffset>& offsets, uint32_t) override {
         assert(offsets.size() == 1 && offsets[0].partition == 0);
         committed = offsets[0].next_offset;
         ++commits;
@@ -99,9 +99,9 @@ void FakeCases() {
         std::shared_ptr<arrow::RecordBatch> retained;
         {
             PacketReader reader("fake", config, fake, nullptr);
-            CaptureSourceSetV2 sources;
+            CaptureSourceSet sources;
             assert(reader.DescribeSources(&sources) == 0);
-            assert(ValidateCaptureSourceSetV2(sources) == CaptureDescriptionErrorV1::kNone);
+            assert(ValidateCaptureSourceSet(sources) == CaptureDescriptionError::kNone);
             assert(sources.inputs.size() == 2 && sources.limits.max_outstanding_batches == 1);
             assert(reader.Open() == 0);
             auto event = reader.PollCapture(0);
@@ -124,7 +124,7 @@ void FakeCases() {
             } else if (mode == 4)
                 assert(reader.AcknowledgeBlock(retained) == ECANCELED);
             assert(reader.ReleaseBlock(retained) == 0 && reader.ReleaseBlock(retained) == EINVAL);
-            CaptureCountersV1 counters;
+            CaptureCounters counters;
             assert(reader.ReadInputCounters(0, &counters) == 0 && counters.delivered_packets == 1);
             assert(!(counters.available_mask & kCaptureSourceDroppedPacketsAvailable));
             assert(fake->commits == ((mode == 0 || mode == 3) ? 1 : 0));
@@ -223,7 +223,7 @@ void MockCases() {
         const auto opened = reader.Open();
         recovered.join();
         assert(opened == 0 && Clock::now() - opened_at < std::chrono::seconds(4));
-        CapturePollEventV2 event;
+        CapturePollEvent event;
         const auto deadline = Clock::now() + std::chrono::seconds(15);
         do {
             event = reader.PollCapture(100);
@@ -247,7 +247,7 @@ void MockCases() {
         PacketReader first("ownership", Config(), Session(brokers, "packet-owner", "packets"), nullptr);
         assert(first.Open() == 0);
         auto deadline = Clock::now() + std::chrono::seconds(15);
-        CapturePollEventV2 data;
+        CapturePollEvent data;
         do {
             data = first.PollCapture(100);
         } while (data.block.kind == BlockPollEvent::kTimeout && Clock::now() < deadline);
@@ -258,7 +258,7 @@ void MockCases() {
         deadline = Clock::now() + std::chrono::seconds(20);
         BlockPollEvent event;
         do {
-            KafkaMessageV1 message;
+            KafkaMessage message;
             second->PollMessage(100, &message);
             event = first.PollBlock(100);
         } while (event.kind == BlockPollEvent::kTimeout && Clock::now() < deadline);
@@ -281,6 +281,6 @@ int main() {
     }
     close(listener);
     MockCases();
-    std::cout << "PASS packet Capture V2, middle/replay/order/epoch, explicit commit/none/uncertain, cancellation, "
+    std::cout << "PASS packet Capture, middle/replay/order/epoch, explicit commit/none/uncertain, cancellation, "
                  "mock topology\n";
 }

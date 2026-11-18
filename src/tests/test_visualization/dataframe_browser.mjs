@@ -49,7 +49,7 @@ try {
     await wait(() => snapshotId(), 'snapshot id')
     const first = await snapshotId()
     checks.push('snapshot_bar')
-    const renewal = await evaluate(`fetch('/api/visualization/v1/snapshots/renew',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({snapshot_id:${JSON.stringify(first)}})}).then(async r=>({status:r.status,body:await r.json()}))`)
+    const renewal = await evaluate(`fetch('/api/visualization/snapshots/renew',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({snapshot_id:${JSON.stringify(first)}})}).then(async r=>({status:r.status,body:await r.json()}))`)
     assert.equal(renewal.status, 200, JSON.stringify(renewal))
     assert(renewal.body.expires_at_unix > 0, JSON.stringify(renewal))
     checks.push('snapshot_renewed')
@@ -119,7 +119,7 @@ try {
     const closing = second
     await evaluate(`document.querySelector('button[aria-label="关闭 dataframe.sales"]').click()`)
     await wait(() => evaluate('document.querySelectorAll(".workspace-tab").length===1'), 'page closed')
-    const released = await evaluate(`fetch('/api/visualization/v1/snapshots/renew',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({snapshot_id:${JSON.stringify(closing)}})}).then(r=>r.status)`)
+    const released = await evaluate(`fetch('/api/visualization/snapshots/renew',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({snapshot_id:${JSON.stringify(closing)}})}).then(r=>r.status)`)
     assert.equal(released, 409, String(released))
     checks.push('close_releases_snapshot')
     assert.equal(browser.exceptions.length, 0, JSON.stringify(browser.exceptions))

@@ -138,8 +138,8 @@ int DataFrameTransferStore::Init(const std::string& directory, std::chrono::seco
     return 0;
 }
 
-int DataFrameTransferStore::Acquire(IDataFrameSnapshotProviderV1& provider, const std::string& request_id,
-                                    const DataFrameSnapshotRequestV1& request, DataFrameTransferInfoV1* output,
+int DataFrameTransferStore::Acquire(IDataFrameSnapshotProvider& provider, const std::string& request_id,
+                                    const DataFrameSnapshotRequest& request, DataFrameTransferInfo* output,
                                     std::string* error) {
     if (!output || !error) return -1;
     *output = {};
@@ -193,11 +193,11 @@ int DataFrameTransferStore::Acquire(IDataFrameSnapshotProviderV1& provider, cons
         wake_.notify_all();
     };
 
-    DataFrameSnapshotRequestV1 bounded_request = request;
+    DataFrameSnapshotRequest bounded_request = request;
     bounded_request.max_bytes = std::min(request.max_bytes, kMaxSnapshotBytes);
     bounded_request.cancelled = cancelled;
-    DataFrameSnapshotV1 snapshot;
-    std::vector<DataFrameSourceV1> sources;
+    DataFrameSnapshot snapshot;
+    std::vector<DataFrameSource> sources;
     int status = provider.List(&sources, error);
     if (!status && std::none_of(sources.begin(), sources.end(),
                                 [&](const auto& source) { return source.source_id == request.source_id; })) {

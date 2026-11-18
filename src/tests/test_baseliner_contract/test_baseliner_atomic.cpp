@@ -12,48 +12,48 @@
 #include <sstream>
 #include <thread>
 using namespace flowsql;
-class LostAck final : public IDatabaseAtomicSessionV1 {
+class LostAck final : public IDatabaseAtomicSession {
  public:
-    explicit LostAck(std::shared_ptr<IDatabaseAtomicSessionV1> session) : session_(std::move(session)) {}
+    explicit LostAck(std::shared_ptr<IDatabaseAtomicSession> session) : session_(std::move(session)) {}
     bool armed = false;
-    DatabaseAtomicStatusV1 Begin() override { return session_->Begin(); }
-    DatabaseAtomicStatusV1 ExecutePrepared(const char* sql, const DatabaseParameterV1* p, size_t n,
-                                           uint64_t* affected) override {
+    DatabaseAtomicStatus Begin() override { return session_->Begin(); }
+    DatabaseAtomicStatus ExecutePrepared(const char* sql, const DatabaseParameter* p, size_t n,
+                                         uint64_t* affected) override {
         return session_->ExecutePrepared(sql, p, n, affected);
     }
-    DatabaseAtomicStatusV1 CreateReader(const char* sql, const DatabaseParameterV1* p, size_t n,
-                                        IBatchReader** r) override {
+    DatabaseAtomicStatus CreateReader(const char* sql, const DatabaseParameter* p, size_t n,
+                                      IBatchReader** r) override {
         return session_->CreateReader(sql, p, n, r);
     }
-    DatabaseAtomicStatusV1 ReadDatabaseTime(int64_t* t) override { return session_->ReadDatabaseTime(t); }
-    DatabaseCommitResultV1 Commit() override {
+    DatabaseAtomicStatus ReadDatabaseTime(int64_t* t) override { return session_->ReadDatabaseTime(t); }
+    DatabaseCommitResult Commit() override {
         auto result = session_->Commit();
         if (armed && result.status.ok()) {
             armed = false;
             session_->Close();
-            return {{DatabaseAtomicCodeV1::kCommitUnknown, "lost acknowledgement"}, DatabaseCommitOutcomeV1::kUnknown};
+            return {{DatabaseAtomicCode::kCommitUnknown, "lost acknowledgement"}, DatabaseCommitOutcome::kUnknown};
         }
         return result;
     }
-    DatabaseAtomicStatusV1 Rollback() override { return session_->Rollback(); }
+    DatabaseAtomicStatus Rollback() override { return session_->Rollback(); }
     void Cancel() override { session_->Cancel(); }
     void Close() override { session_->Close(); }
 
  private:
-    std::shared_ptr<IDatabaseAtomicSessionV1> session_;
+    std::shared_ptr<IDatabaseAtomicSession> session_;
 };
 void Test(std::shared_ptr<IDatabaseChannel> channel, const std::string& backend) {
     assert(channel);
-    auto* target = dynamic_cast<IDatabaseAtomicTargetV1*>(channel.get());
+    auto* target = dynamic_cast<IDatabaseAtomicTarget*>(channel.get());
     assert(target);
-    std::shared_ptr<IDatabaseAtomicSessionV1> a, b;
+    std::shared_ptr<IDatabaseAtomicSession> a, b;
     assert(target->AcquireAtomicSession({}, &a).ok());
-    DatabaseAtomicSessionOptionsV1 short_timeout;
+    DatabaseAtomicSessionOptions short_timeout;
     short_timeout.operation_timeout_ms = 50;
     assert(target->AcquireAtomicSession(short_timeout, &b).ok() && a != b);
     auto invalid = short_timeout;
     invalid.contract_version = 2;
-    std::shared_ptr<IDatabaseAtomicSessionV1> rejected = a;
+    std::shared_ptr<IDatabaseAtomicSession> rejected = a;
     assert(!target->AcquireAtomicSession(invalid, &rejected).ok() && !rejected);
     uint64_t n = 0;
     {
@@ -63,7 +63,7 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, const std::string& backend)
     }
     assert(a->ExecutePrepared("CREATE TABLE IF NOT EXISTS atomic_test(id BIGINT PRIMARY KEY,v TEXT)", nullptr, 0, &n)
                .ok());
-    assert(a->Commit().outcome == DatabaseCommitOutcomeV1::kCommitted);
+    assert(a->Commit().outcome == DatabaseCommitOutcome::kCommitted);
     assert(a->Begin().ok());
     assert(a->ExecutePrepared("DELETE FROM atomic_test", nullptr, 0, &n).ok());
     assert(a->ExecutePrepared("INSERT INTO atomic_test VALUES(1,'uncommitted')", nullptr, 0, &n).ok() && n == 1);
@@ -78,9 +78,9 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, const std::string& backend)
     assert(b->Rollback().ok());
     assert(b->Begin().ok());
     auto busy = b->ExecutePrepared("INSERT INTO atomic_test VALUES(1,'busy')", nullptr, 0, &n);
-    if (busy.ok() || busy.code != DatabaseAtomicCodeV1::kTimeout)
+    if (busy.ok() || busy.code != DatabaseAtomicCode::kTimeout)
         std::cerr << backend << ": busy code=" << static_cast<int>(busy.code) << " " << busy.message << std::endl;
-    assert(!busy.ok() && busy.code == DatabaseAtomicCodeV1::kTimeout && n == 0);
+    assert(!busy.ok() && busy.code == DatabaseAtomicCode::kTimeout && n == 0);
     if (backend == "sqlite")
         assert(b->Rollback().ok());
     else
@@ -106,11 +106,11 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, const std::string& backend)
         assert(a->Begin().ok());
         assert(a->ExecutePrepared("INSERT INTO atomic_child VALUES(777)", nullptr, 0, &n).ok());
         auto failed_commit = a->Commit();
-        assert(failed_commit.outcome == DatabaseCommitOutcomeV1::kRolledBack && !failed_commit.status.ok());
+        assert(failed_commit.outcome == DatabaseCommitOutcome::kRolledBack && !failed_commit.status.ok());
     }
     assert(a->Begin().ok());
-    DatabaseParameterV1 p;
-    p.kind = DatabaseParameterKindV1::kUInt64;
+    DatabaseParameter p;
+    p.kind = DatabaseParameterKind::kUInt64;
     p.uint64_value = UINT64_MAX;
     assert(a->ExecutePrepared("INSERT INTO atomic_test VALUES(42,?)", &p, 1, &n).ok());
     std::shared_ptr<arrow::RecordBatch> exact;
@@ -126,7 +126,7 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, const std::string& backend)
     {
         using namespace flowsql::baseliner;
         auto fresh = [&] {
-            std::shared_ptr<IDatabaseAtomicSessionV1> s;
+            std::shared_ptr<IDatabaseAtomicSession> s;
             assert(target->AcquireAtomicSession({}, &s).ok());
             return s;
         };
@@ -151,15 +151,15 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, const std::string& backend)
         assert(next.Stage() == 0 && next.Confirm(next.Session().Commit()) == 0);
         // Rollback the staged generation: durable current must remain 2.
         assert(next.Stage() == 0 && next.Session().Rollback().ok());
-        DatabaseCommitResultV1 rollback{{DatabaseAtomicCodeV1::kError, "injected rollback"},
-                                        DatabaseCommitOutcomeV1::kRolledBack};
+        DatabaseCommitResult rollback{{DatabaseAtomicCode::kError, "injected rollback"},
+                                      DatabaseCommitOutcome::kRolledBack};
         assert(next.Confirm(rollback) != 0);
     }
 
     {
         using namespace flowsql::baseliner;
         auto fresh = [&] {
-            std::shared_ptr<IDatabaseAtomicSessionV1> s;
+            std::shared_ptr<IDatabaseAtomicSession> s;
             assert(target->AcquireAtomicSession({}, &s).ok());
             return s;
         };
@@ -170,7 +170,7 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, const std::string& backend)
         wrapped->armed = true;
         assert(writer.Stage() == 0);
         auto unknown = wrapped->Commit();
-        assert(unknown.outcome == DatabaseCommitOutcomeV1::kUnknown && ValidDatabaseCommitResultV1(unknown));
+        assert(unknown.outcome == DatabaseCommitOutcome::kUnknown && ValidDatabaseCommitResult(unknown));
         assert(writer.Confirm(unknown) != 0 && writer.Generation() == 0 && writer.Stage() != 0);
         auto inspection = fresh();
         std::shared_ptr<arrow::RecordBatch> state;
@@ -201,7 +201,7 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, const std::string& backend)
             assert(interrupted->Begin().ok());
             interrupted->Cancel();
             auto outcome = interrupted->Commit();
-            assert(outcome.outcome == DatabaseCommitOutcomeV1::kUnknown && ValidDatabaseCommitResultV1(outcome));
+            assert(outcome.outcome == DatabaseCommitOutcome::kUnknown && ValidDatabaseCommitResult(outcome));
             assert(!interrupted->Rollback().ok());
         }
     }
@@ -228,8 +228,8 @@ int main() {
         Test(plugin.AcquireChannel(backend, ("t2" + std::string(backend)).c_str()), backend);
     auto clickhouse = plugin.AcquireChannel("clickhouse", "t2clickhouse");
     assert(clickhouse);
-    std::shared_ptr<IDatabaseAtomicSessionV1> session;
-    assert(!dynamic_cast<IDatabaseAtomicTargetV1*>(clickhouse.get())->AcquireAtomicSession({}, &session).ok() &&
+    std::shared_ptr<IDatabaseAtomicSession> session;
+    assert(!dynamic_cast<IDatabaseAtomicTarget*>(clickhouse.get())->AcquireAtomicSession({}, &session).ok() &&
            !session);
     clickhouse.reset();
     plugin.Stop();

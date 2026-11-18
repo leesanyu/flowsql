@@ -5,5 +5,5 @@
 
 BEGIN_PLUGIN_REGIST(flowsql::FlowLabelingPlugin)
 ____INTERFACE(flowsql::IID_PLUGIN, flowsql::IPlugin)
-____INTERFACE(flowsql::IID_FLOW_LABELING_PROVIDER_V1, flowsql::IFlowLabelingProviderV1)
+____INTERFACE(flowsql::IID_FLOW_LABELING_PROVIDER, flowsql::IFlowLabelingProvider)
 END_PLUGIN_REGIST()

@@ -16,12 +16,12 @@ void Case(size_t count, uint32_t horizon, size_t page_rows, bool baseline) {
     auto task = Task(library, config);
     auto model_sink = std::make_shared<DataFrameChannel>("dataframe", "models");
     Check(model_sink->Open() == 0, "model sink");
-    auto* model_task = dynamic_cast<IBlockTransformModelOutputTaskV1*>(task.get());
-    BlockModelOutputBindingV1 binding;
+    auto* model_task = dynamic_cast<IBlockTransformModelOutputTask*>(task.get());
+    BlockModelOutputBinding binding;
     binding.primary_target = "dataframe.results";
     binding.dataframe = model_sink;
     Check(model_task && model_task->BindModelOutput(binding) == 0, task->LastError());
-    Check(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("dataframe.samples") == 0,
+    Check(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("dataframe.samples") == 0,
           task->LastError());
     std::shared_ptr<arrow::Schema> schema;
     Check(task->Open(MakeSchema(SchemaKind::kObservation), &schema) == 0, task->LastError());
@@ -41,7 +41,7 @@ void Case(size_t count, uint32_t horizon, size_t page_rows, bool baseline) {
             for (auto& row : evaluated.results) expected_rows.push_back(std::move(row));
             for (auto& row : evaluated.forecasts) expected_rows.push_back(std::move(row));
         }
-        std::vector<BlockTransformOutputV1> outputs;
+        std::vector<BlockTransformOutput> outputs;
         const int64_t timestamp = 123 + callbacks++;
         Check(task->ProcessBlock(Wire(page), timestamp, &outputs) == 0, task->LastError());
         size_t rows = 0, nonempty = 0;
@@ -60,7 +60,7 @@ void Case(size_t count, uint32_t horizon, size_t page_rows, bool baseline) {
             Check(nonempty == (rows + 4095) / 4096, "expected bounded page-local batch count");
         batches += nonempty;
     }
-    std::vector<BlockTransformOutputV1> tail;
+    std::vector<BlockTransformOutput> tail;
     Check(task->Flush(&tail) == 0, task->LastError());
     Check(tail.empty(), "no delayed rows across callbacks or EOF");
     Check(reference.Finish() == 0, reference.LastError());
@@ -138,13 +138,13 @@ void BudgetAndOwnership() {
     auto limited = Config(0, 2097152);
     auto library = std::make_shared<Library>();
     auto task = Task(library, limited, false);
-    Check(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("dataframe.samples") == 0,
+    Check(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("dataframe.samples") == 0,
           task->LastError());
     std::shared_ptr<arrow::Schema> schema;
     Check(task->Open(MakeSchema(SchemaKind::kObservation), &schema) == 0, task->LastError());
     std::vector<Observation> page;
     for (size_t i = 0; i < 8193; ++i) page.push_back(Input(limited, i));
-    std::vector<BlockTransformOutputV1> outputs;
+    std::vector<BlockTransformOutput> outputs;
     auto wire = Wire(page);
     std::vector<Observation> decoded;
     Check(DecodeObservations(wire, limited.config.read.max_pending_bytes, &decoded, &error) == 0, error);
@@ -159,9 +159,8 @@ void AnalysisKinds() {
             auto config = Config(horizon, 268435456, kind);
             auto library = std::make_shared<Library>();
             auto task = Task(library, config, false);
-            Check(
-                dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("dataframe.samples") == 0,
-                task->LastError());
+            Check(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("dataframe.samples") == 0,
+                  task->LastError());
             std::shared_ptr<arrow::Schema> schema;
             Check(task->Open(MakeSchema(SchemaKind::kObservation), &schema) == 0, task->LastError());
             Querier owner;
@@ -197,7 +196,7 @@ void AnalysisKinds() {
                     Check(EncodeResults(config, pending, 268435456, &results, &error) == 0, error);
                     expected.push_back(results);
                 }
-                std::vector<BlockTransformOutputV1> outputs;
+                std::vector<BlockTransformOutput> outputs;
                 Check(task->ProcessBlock(Wire(page), offset, &outputs) == 0, task->LastError());
                 for (const auto& out : outputs) {
                     Check(out.ts_ms == static_cast<int64_t>(offset), "analysis callback timestamp");
@@ -206,14 +205,14 @@ void AnalysisKinds() {
             }
             Check(actual.size() == expected.size(), "Schema boundaries and fusion order");
             for (size_t i = 0; i < actual.size(); ++i) Equal(actual[i], expected[i]);
-            std::vector<BlockTransformOutputV1> tail;
+            std::vector<BlockTransformOutput> tail;
             Check(task->Flush(&tail) == 0 && tail.empty(), task->LastError());
             std::cout << "PASS analysis=" << kind << " horizon=" << horizon << " multi-series/fusion order"
                       << std::endl;
         }
 }
 // A controlled service exercises cancellation/codec failure after a full output batch was staged.
-struct HookValue final : IBaselineValueTask, IBaselineValueEvaluationV1 {
+struct HookValue final : IBaselineValueTask {
     size_t count = 0;
     std::function<void(size_t)> on_submit;
     bool invalid = false;
@@ -226,9 +225,6 @@ struct HookValue final : IBaselineValueTask, IBaselineValueEvaluationV1 {
         return {};
     }
     BaselineStatus Close() override { return BaselineStatus::kOk; }
-    RollingBaselineResult SubmitObservation(const ValueRollingObservation&, const RollingSubmitOptions&) override {
-        return {};
-    }
     RollingPrediction PredictRolling(std::string_view, int64_t) const override { return {}; }
     RollingPredictionSequence PredictRolling(std::string_view, int64_t, uint32_t) const override { return {}; }
     BootstrapTrainResult Bootstrap(const ValueBootstrapInput&) override { return {}; }
@@ -244,19 +240,19 @@ struct HookValue final : IBaselineValueTask, IBaselineValueEvaluationV1 {
         return BaselineStatus::kInvalidArgument;
     }
     BaselineSerializationResult ExportBootstrapSeed(BaselineSerializationFormat) const override { return {}; }
-    BaselineEvaluationResultV1 SubmitObservationWithReadiness(const ValueRollingObservation& input,
-                                                              const RollingSubmitOptions&) override {
+    BaselineEvaluationResult SubmitObservation(const ValueRollingObservation& input,
+                                               const RollingSubmitOptions&) override {
         ++count;
         if (on_submit) on_submit(count);
-        BaselineEvaluationResultV1 result;
-        result.readiness = BaselineEvaluationReadinessV1::kColdStart;
+        BaselineEvaluationResult result;
+        result.readiness = BaselineEvaluationReadiness::kColdStart;
         result.result.observed = invalid && count == 4097 ? std::numeric_limits<double>::quiet_NaN() : input.value;
         return result;
     }
 };
 struct HookService final : IBaselineService,
-                           IBaselineStateControlServiceV1,
-                           IBaselineTaskStateControlV1,
+                           IBaselineStateControlService,
+                           IBaselineTaskStateControl,
                            std::enable_shared_from_this<HookService> {
     std::shared_ptr<HookValue> value = std::make_shared<HookValue>();
     std::pair<BaselineStatus, std::shared_ptr<IBaselineValueTask>> CreateValueTask(
@@ -272,14 +268,12 @@ struct HookService final : IBaselineService,
         return {BaselineStatus::kInvalidArgument, nullptr};
     }
     BaselineSerializationResult QueryServiceSnapshot(BaselineSerializationFormat) const override { return {}; }
-    std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControlV1>> Bind(
-        std::shared_ptr<IBaselineTask>, const BaselineStateLimitsV1&) override {
+    std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControl>> Bind(std::shared_ptr<IBaselineTask>,
+                                                                               const BaselineStateLimits&) override {
         return {BaselineStatus::kOk, shared_from_this()};
     }
-    BaselineStatus ReleaseIdentity(std::string_view, BaselineStateReleaseScopeV1) override {
-        return BaselineStatus::kOk;
-    }
-    std::pair<BaselineStatus, BaselineStateUsageV1> QueryUsage() const override { return {BaselineStatus::kOk, {}}; }
+    BaselineStatus ReleaseIdentity(std::string_view, BaselineStateReleaseScope) override { return BaselineStatus::kOk; }
+    std::pair<BaselineStatus, BaselineStateUsage> QueryUsage() const override { return {BaselineStatus::kOk, {}}; }
 };
 void StagedFailure() {
     for (bool cancel : {false, true}) {
@@ -289,7 +283,7 @@ void StagedFailure() {
         library->querier->service = service.get();
         library->querier->control = service.get();
         auto task = Task(library, config, false);
-        Check(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("dataframe.samples") == 0,
+        Check(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("dataframe.samples") == 0,
               task->LastError());
         std::shared_ptr<arrow::Schema> schema;
         Check(task->Open(MakeSchema(SchemaKind::kObservation), &schema) == 0, task->LastError());
@@ -299,7 +293,7 @@ void StagedFailure() {
         };
         std::vector<Observation> page;
         for (size_t i = 0; i < 8193; ++i) page.push_back(Input(config, i));
-        std::vector<BlockTransformOutputV1> outputs;
+        std::vector<BlockTransformOutput> outputs;
         Check(task->ProcessBlock(Wire(page), 0, &outputs) != 0 && outputs.empty(),
               "no partial staged output on error/cancel");
         Check(service->value->count == 4097, "one Submit per accepted row; no retry after failure/cancel");

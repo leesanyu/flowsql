@@ -21,7 +21,7 @@ std::string Param(const std::unordered_map<std::string, std::string>& p, const s
     auto it = p.find(key);
     return it == p.end() ? fallback : it->second;
 }
-std::string Cell(const ExplorationValueV1& v) {
+std::string Cell(const ExplorationValue& v) {
     if (const auto* s = std::get_if<std::string>(&v)) return *s;
     if (const auto* n = std::get_if<int64_t>(&v)) return std::to_string(*n);
     if (const auto* b = std::get_if<std::vector<uint8_t>>(&v)) return {b->begin(), b->end()};
@@ -29,7 +29,7 @@ std::string Cell(const ExplorationValueV1& v) {
 }
 class QueryBudget {
  public:
-    QueryBudget(std::shared_ptr<IDatabaseExplorationSessionV1> query, int64_t deadline)
+    QueryBudget(std::shared_ptr<IDatabaseExplorationSession> query, int64_t deadline)
         : timer_([this, query, deadline] {
               std::unique_lock<std::mutex> lock(mutex_);
               if (!changed_.wait_until(lock, std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline)),
@@ -60,8 +60,8 @@ void Gap(Value& gaps, const std::string& path, Alloc& a) {
     gaps.PushBack(gap, a);
 }
 }  // namespace
-int DatabasePlugin::Describe(const ChannelDatasetRequestV1& request, ChannelDatasetSnapshotV1* out,
-                             DataSemanticsErrorV1* error) {
+int DatabasePlugin::Describe(const ChannelDatasetRequest& request, ChannelDatasetSnapshot* out,
+                             DataSemanticsError* error) {
     using namespace dataset;
     if (!out) return Fail(error, "INVALID_REQUEST", "output required");
     *out = {};
@@ -110,23 +110,23 @@ int DatabasePlugin::Describe(const ChannelDatasetRequestV1& request, ChannelData
                         "metadata connection failed; verify authentication and catalog permissions");
         auto* factory = dynamic_cast<IDbSessionFactoryProvider*>(driver.get());
         auto session = factory ? factory->CreateSession() : nullptr;
-        auto query = std::dynamic_pointer_cast<IDatabaseExplorationSessionV1>(session);
+        auto query = std::dynamic_pointer_cast<IDatabaseExplorationSession>(session);
         auto* snapshot = dynamic_cast<IDbSnapshotSession*>(session.get());
         if (!query || !snapshot || MetadataIoNow() >= deadline)
             return Fail(error, MetadataIoNow() >= deadline ? "SOURCE_TIMEOUT" : "SOURCE_UNAVAILABLE",
                         "metadata session unavailable");
-        DatabaseSnapshotOptionsV1 options;
+        DatabaseSnapshotOptions options;
         options.consistent_transaction = type != "clickhouse";
         options.operation_timeout_ms = static_cast<uint32_t>(deadline - MetadataIoNow());
         if (snapshot->BeginSnapshot(options))
             return Fail(error, MetadataIoNow() >= deadline ? "SOURCE_TIMEOUT" : "SOURCE_UNAVAILABLE",
                         "read-only metadata session failed");
         QueryBudget budget(query, deadline);
-        auto run = [&](const std::string& sql, const std::vector<std::string>& values, ExplorationResultV1* result) {
-            std::vector<DatabaseParameterV1> params;
+        auto run = [&](const std::string& sql, const std::vector<std::string>& values, ExplorationResult* result) {
+            std::vector<DatabaseParameter> params;
             for (const auto& value : values) {
-                DatabaseParameterV1 p;
-                p.kind = DatabaseParameterKindV1::kString;
+                DatabaseParameter p;
+                p.kind = DatabaseParameterKind::kString;
                 p.data = value.data();
                 p.size = value.size();
                 params.push_back(p);
@@ -142,11 +142,11 @@ int DatabasePlugin::Describe(const ChannelDatasetRequestV1& request, ChannelData
             }
             return 0;
         };
-        ExplorationResultV1 columns;
+        ExplorationResult columns;
         std::string native_identity;
         bool identity_known = false;
         if (type == "sqlite") {
-            ExplorationResultV1 object;
+            ExplorationResult object;
             if (run("SELECT rootpage,sql FROM main.sqlite_schema WHERE type IN ('table','view') AND name=?", {table},
                     &object))
                 return -1;
@@ -159,7 +159,7 @@ int DatabasePlugin::Describe(const ChannelDatasetRequestV1& request, ChannelData
                     "'main') ORDER BY cid",
                     {table}, &columns))
                 return -1;
-            ExplorationResultV1 primary;
+            ExplorationResult primary;
             if (run("SELECT wr,strict,(SELECT count(*) FROM pragma_index_list(?, 'main') WHERE origin='pk') FROM "
                     "pragma_table_list WHERE schema='main' AND name=?",
                     {table, table}, &primary))
@@ -188,7 +188,7 @@ int DatabasePlugin::Describe(const ChannelDatasetRequestV1& request, ChannelData
                 identity_known = true;
             }
         } else {
-            ExplorationResultV1 object;
+            ExplorationResult object;
             if (run("SELECT toString(uuid) FROM system.tables WHERE database=? AND name=?", {database, table}, &object))
                 return -1;
             if (object.rows.empty()) return Fail(error, "NOT_FOUND", "table not found");
@@ -223,7 +223,7 @@ int DatabasePlugin::Describe(const ChannelDatasetRequestV1& request, ChannelData
         // A relation name only narrows the catalog lookup. Ownership is proved
         // by an exact entry in the producer's managed entity directory.
         if (table.rfind("npm_", 0) == 0) {
-            ExplorationResultV1 catalog;
+            ExplorationResult catalog;
             std::string catalog_sql;
             std::vector<std::string> catalog_values;
             if (type == "sqlite") {
@@ -252,7 +252,7 @@ int DatabasePlugin::Describe(const ChannelDatasetRequestV1& request, ChannelData
                 if (table == "npm_result_runs" || table == "npm_result_entities") {
                     resource = table == "npm_result_runs" ? "runs" : "entities";
                 } else {
-                    ExplorationResultV1 entry;
+                    ExplorationResult entry;
                     const auto sql =
                         "SELECT "
                         "entity_id,schema_version,schema_canonical,data_table,history_relation,latest_relation,final_"
@@ -274,7 +274,7 @@ int DatabasePlugin::Describe(const ChannelDatasetRequestV1& request, ChannelData
                             return Fail(error, "SOURCE_CHANGED", "invalid producer entity identity");
                         const char* views[]{"data", "history", "latest", "final"};
                         for (size_t i = 0; i < 4; ++i)
-                            if (Cell(row[i + 3]) == table) resource = entity + "_" + views[i] + "_v" + version;
+                            if (Cell(row[i + 3]) == table) resource = entity + "_" + views[i];
                         canonical = Cell(row[2]);
                     }
                 }

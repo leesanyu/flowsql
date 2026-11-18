@@ -22,12 +22,12 @@ struct OperatorMeta {
     std::string name;
     std::string description;
     OperatorPosition position = OperatorPosition::DATA;
-    OperatorComponentContractV1 contract;
+    OperatorComponentContract contract;
 };
 
 // PythonOperatorBridge — 实现 IOperator，将 Work() 转发给 Python Worker
 // Work() 内部 dynamic_cast 到 IDataFrameChannel，完成 Read/Write + Arrow IPC 序列化
-class PythonOperatorBridge : public IOperator, public IOperatorContractIdentityV1, public IOperatorConfigAdapterV1 {
+class PythonOperatorBridge : public IOperator, public IOperatorContractIdentity, public IOperatorConfigAdapter {
  public:
     PythonOperatorBridge(const OperatorMeta& meta, const std::string& host, int port);
     ~PythonOperatorBridge() override;
@@ -35,9 +35,9 @@ class PythonOperatorBridge : public IOperator, public IOperatorContractIdentityV
     std::shared_ptr<PythonOperatorBridge> NewInvocation() const {
         return std::make_shared<PythonOperatorBridge>(meta_, host_, port_);
     }
-    int ResolveInvocation(const char*, std::string*, DataSemanticsErrorV1*) override;
+    int ResolveInvocation(const char*, std::string*, DataSemanticsError*) override;
 
-    OperatorComponentContractV1 ContractIdentity() const override { return meta_.contract; }
+    OperatorComponentContract ContractIdentity() const override { return meta_.contract; }
 
     // IOperator 元数据
     std::string Category() override { return meta_.category; }

@@ -92,7 +92,7 @@ BaselineSerializationResult BaselineTaskBase::UnsupportedFormatResult(BaselineSe
 
 void BaselineTaskBase::OnClosing() {}
 
-BaselineStatus BaselineTaskBase::BindStateLimits(const BaselineStateLimitsV1& limits) {
+BaselineStatus BaselineTaskBase::BindStateLimits(const BaselineStateLimits& limits) {
     if (closed_ || state_operations_started_ || state_limits_ || limits.max_runtime_identities == 0 ||
         limits.max_model_identities == 0 || limits.max_basis_versions_per_metric == 0 ||
         (kind_ == BaselineTaskKind::kRelation && limits.max_basis_versions_per_metric < 2)) {
@@ -102,16 +102,16 @@ BaselineStatus BaselineTaskBase::BindStateLimits(const BaselineStateLimitsV1& li
     return BaselineStatus::kOk;
 }
 
-BaselineStatus BaselineTaskBase::ReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope) {
+BaselineStatus BaselineTaskBase::ReleaseIdentity(std::string_view key, BaselineStateReleaseScope scope) {
     if (closed_ || !state_limits_ || key.empty() ||
-        (scope != BaselineStateReleaseScopeV1::kRuntimeOnly && scope != BaselineStateReleaseScopeV1::kAllState)) {
+        (scope != BaselineStateReleaseScope::kRuntimeOnly && scope != BaselineStateReleaseScope::kAllState)) {
         return BaselineStatus::kInvalidArgument;
     }
     MarkStateOperation();
     return DoReleaseIdentity(key, scope);
 }
 
-std::pair<BaselineStatus, BaselineStateUsageV1> BaselineTaskBase::QueryStateUsage() const {
+std::pair<BaselineStatus, BaselineStateUsage> BaselineTaskBase::QueryStateUsage() const {
     if (closed_ || !state_limits_) return {BaselineStatus::kInvalidArgument, {}};
     return {BaselineStatus::kOk, DoQueryStateUsage()};
 }

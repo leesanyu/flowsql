@@ -34,24 +34,24 @@
 #include <services/database/database_plugin.h>
 
 namespace {
-int PublishForRun(flowsql::npm::INpmFamilyProgressConsumer* publisher, const flowsql::npm::NpmResultContextV1& context,
+int PublishForRun(flowsql::npm::INpmFamilyProgressConsumer* publisher, const flowsql::npm::NpmResultContext& context,
                   flowsql::npm::NpmFamilyPublicationRequest request) {
-    request.key = {"basic_ipv4", "npm_basic_ipv4_history_v1", context.run_id};
+    request.key = {"basic_ipv4", "npm_basic_ipv4_history", context.run_id};
     flowsql::npm::NpmFamilyPublishedProgress confirmed;
     return publisher->PublishProgress(request, &confirmed);
 }
 
 using flowsql::IDatabaseChannel;
-using flowsql::IDatabasePreparedCommandV1;
+using flowsql::IDatabasePreparedCommand;
 using flowsql::database::DatabasePlugin;
-using flowsql::npm::INpmManagedResultConsumerV1;
-using flowsql::npm::INpmResultConsumerFactoryV1;
+using flowsql::npm::INpmManagedResultConsumer;
+using flowsql::npm::INpmResultConsumerFactory;
 using flowsql::npm::INpmTaskBudget;
 using flowsql::npm::NpmBudgetCategory;
 using flowsql::npm::NpmBudgetError;
 using flowsql::npm::NpmBudgetUsage;
-using flowsql::npm::NpmEntityDescriptorV1;
-using flowsql::npm::NpmResultContextV1;
+using flowsql::npm::NpmEntityDescriptor;
+using flowsql::npm::NpmResultContext;
 
 class BoundedBudget final : public INpmTaskBudget {
  public:
@@ -95,10 +95,10 @@ class BoundedBudget final : public INpmTaskBudget {
 };
 
 // Simulate a lost acknowledgement after the real commit. The writer must not retry or publish position 2.
-class LostPublicationAck final : public IDatabaseChannel, public IDatabasePreparedCommandV1 {
+class LostPublicationAck final : public IDatabaseChannel, public IDatabasePreparedCommand {
  public:
     explicit LostPublicationAck(IDatabaseChannel* channel)
-        : channel_(channel), commands_(dynamic_cast<IDatabasePreparedCommandV1*>(channel)) {}
+        : channel_(channel), commands_(dynamic_cast<IDatabasePreparedCommand*>(channel)) {}
     const char* Category() override { return channel_->Category(); }
     const char* Name() override { return channel_->Name(); }
     const char* Type() override { return channel_->Type(); }
@@ -126,18 +126,18 @@ class LostPublicationAck final : public IDatabaseChannel, public IDatabasePrepar
     int CreateArrowReader(const char* sql, flowsql::IArrowReader** out) override {
         return channel_->CreateArrowReader(sql, out);
     }
-    int ExecutePrepared(const char* sql, const flowsql::DatabaseParameterV1* parameters, size_t count) override {
+    int ExecutePrepared(const char* sql, const flowsql::DatabaseParameter* parameters, size_t count) override {
         const int rc = commands_->ExecutePrepared(sql, parameters, count);
-        return std::string(sql).find("INSERT INTO npm_result_progress_v1") == 0 && rc >= 0 ? -1 : rc;
+        return std::string(sql).find("INSERT INTO npm_result_progress") == 0 && rc >= 0 ? -1 : rc;
     }
-    int ExecutePreparedBatch(const char* sql, const flowsql::DatabaseParameterV1* parameters, size_t width,
+    int ExecutePreparedBatch(const char* sql, const flowsql::DatabaseParameter* parameters, size_t width,
                              size_t count) override {
         return commands_->ExecutePreparedBatch(sql, parameters, width, count);
     }
 
  private:
     IDatabaseChannel* channel_;
-    IDatabasePreparedCommandV1* commands_;
+    IDatabasePreparedCommand* commands_;
 };
 
 class SqliteProbe final {
@@ -186,7 +186,7 @@ class SqliteProbe final {
     sqlite3* db_ = nullptr;
 };
 
-std::shared_ptr<arrow::RecordBatch> MakeRows(const NpmEntityDescriptorV1& entity, uint64_t identity, uint64_t revision,
+std::shared_ptr<arrow::RecordBatch> MakeRows(const NpmEntityDescriptor& entity, uint64_t identity, uint64_t revision,
                                              bool is_final = true, bool null_optionals = false) {
     std::vector<std::shared_ptr<arrow::Array>> columns;
     columns.reserve(entity.schema->num_fields());
@@ -274,11 +274,10 @@ std::shared_ptr<arrow::RecordBatch> DuplicateRows(const std::shared_ptr<arrow::R
     return arrow::RecordBatch::Make(rows->schema(), 2, std::move(columns));
 }
 
-std::unique_ptr<INpmManagedResultConsumerV1> CreateConsumer(INpmResultConsumerFactoryV1* factory,
-                                                            NpmResultContextV1 context,
-                                                            const std::vector<NpmEntityDescriptorV1>& entities,
-                                                            const std::shared_ptr<INpmTaskBudget>& budget) {
-    std::unique_ptr<INpmManagedResultConsumerV1> consumer;
+std::unique_ptr<INpmManagedResultConsumer> CreateConsumer(INpmResultConsumerFactory* factory, NpmResultContext context,
+                                                          const std::vector<NpmEntityDescriptor>& entities,
+                                                          const std::shared_ptr<INpmTaskBudget>& budget) {
+    std::unique_ptr<INpmManagedResultConsumer> consumer;
     const int rc = factory->Create(context, entities, budget, &consumer);
     if (rc != 0) std::fprintf(stderr, "consumer create failed: %s\n", factory->LastError().c_str());
     assert(rc == 0 && consumer != nullptr);
@@ -297,15 +296,15 @@ void AssertSummary(const std::string& json, const char* run_id, const char* stat
     assert(document["entities"].IsArray() && document["entities"].Size() == entity_count);
 }
 
-std::vector<std::pair<NpmEntityDescriptorV1, std::shared_ptr<arrow::RecordBatch>>> RunTypedDelivery(
-    std::shared_ptr<INpmTaskBudget> budget, std::unique_ptr<INpmManagedResultConsumerV1> consumer,
-    const NpmResultContextV1& context) {
+std::vector<std::pair<NpmEntityDescriptor, std::shared_ptr<arrow::RecordBatch>>> RunTypedDelivery(
+    std::shared_ptr<INpmTaskBudget> budget, std::unique_ptr<INpmManagedResultConsumer> consumer,
+    const NpmResultContext& context) {
     using namespace flowsql::npm;
     using flowsql::packet::AddressFamily;
-    std::vector<NpmEntityDescriptorV1> entities;
+    std::vector<NpmEntityDescriptor> entities;
     for (auto family : {AddressFamily::kIPv4, AddressFamily::kIPv6}) {
-        entities.push_back(NpmBasicEntityDescriptorV1(family));
-        entities.push_back(NpmSessionEntityDescriptorV1(family));
+        entities.push_back(NpmBasicEntityDescriptor(family));
+        entities.push_back(NpmSessionEntityDescriptor(family));
     }
     auto router = std::make_shared<NpmResultRouter>(entities, "basic_ipv6", context, budget, std::move(consumer),
                                                     [](const std::function<int()>& call) { return call(); });
@@ -313,8 +312,8 @@ std::vector<std::pair<NpmEntityDescriptorV1, std::shared_ptr<arrow::RecordBatch>
     features.session_enabled = true;
     features.observing_entity = "basic_ipv6";
     NpmBasicResultCollector collector(features, budget, router);
-    std::vector<std::pair<NpmEntityDescriptorV1, std::shared_ptr<arrow::RecordBatch>>> expected;
-    const auto append = [&](auto sample, const NpmEntityDescriptorV1& entity, auto encode) {
+    std::vector<std::pair<NpmEntityDescriptor, std::shared_ptr<arrow::RecordBatch>>> expected;
+    const auto append = [&](auto sample, const NpmEntityDescriptor& entity, auto encode) {
         using Result = decltype(sample);
         std::vector<Result> values;
         for (uint64_t id = 1; id <= 513; ++id) {
@@ -348,13 +347,13 @@ std::vector<std::pair<NpmEntityDescriptorV1, std::shared_ptr<arrow::RecordBatch>
         assert(encoded == decltype(encoded)::kNone);
         expected.emplace_back(entity, std::move(rows));
     };
-    append(NpmBasicResult4{}, NpmBasicEntityDescriptorV1(AddressFamily::kIPv4),
+    append(NpmBasicResult4{}, NpmBasicEntityDescriptor(AddressFamily::kIPv4),
            EncodeNpmBasicResults<flowsql::network::IPv4Address>);
-    append(NpmBasicResult6{}, NpmBasicEntityDescriptorV1(AddressFamily::kIPv6),
+    append(NpmBasicResult6{}, NpmBasicEntityDescriptor(AddressFamily::kIPv6),
            EncodeNpmBasicResults<flowsql::network::IPv6Address>);
-    append(NpmSessionResult4{}, NpmSessionEntityDescriptorV1(AddressFamily::kIPv4),
+    append(NpmSessionResult4{}, NpmSessionEntityDescriptor(AddressFamily::kIPv4),
            EncodeNpmSessionResults<flowsql::network::IPv4Address>);
-    append(NpmSessionResult6{}, NpmSessionEntityDescriptorV1(AddressFamily::kIPv6),
+    append(NpmSessionResult6{}, NpmSessionEntityDescriptor(AddressFamily::kIPv6),
            EncodeNpmSessionResults<flowsql::network::IPv6Address>);
     assert(collector.pending_typed_rows() > 0);
     assert(collector.FlushAccepted() == 0 && collector.pending_typed_rows() == 0);
@@ -407,17 +406,17 @@ int main(int argc, char** argv) {
     assert(plugin.Start() == 0);
     auto channel = plugin.AcquireChannel("sqlite", "result");
     assert(channel && channel->IsOpened() && channel->IsConnected());
-    auto* prepared_commands = dynamic_cast<IDatabasePreparedCommandV1*>(channel.get());
+    auto* prepared_commands = dynamic_cast<IDatabasePreparedCommand*>(channel.get());
     assert(prepared_commands != nullptr);
 
     assert(channel->ExecuteSql("PRAGMA foreign_keys=ON") >= 0);
     assert(channel->ExecuteSql("CREATE TABLE parameter_probe(text_value TEXT,blob_value BLOB)") >= 0);
-    flowsql::DatabaseParameterV1 empty_parameters[2];
-    empty_parameters[0].kind = flowsql::DatabaseParameterKindV1::kString;
-    empty_parameters[1].kind = flowsql::DatabaseParameterKindV1::kBlob;
+    flowsql::DatabaseParameter empty_parameters[2];
+    empty_parameters[0].kind = flowsql::DatabaseParameterKind::kString;
+    empty_parameters[1].kind = flowsql::DatabaseParameterKind::kBlob;
     assert(prepared_commands->ExecutePrepared("INSERT INTO parameter_probe VALUES(?,?)", empty_parameters, 2) == 1);
-    flowsql::DatabaseParameterV1 oversized_string;
-    oversized_string.kind = flowsql::DatabaseParameterKindV1::kString;
+    flowsql::DatabaseParameter oversized_string;
+    oversized_string.kind = flowsql::DatabaseParameterKind::kString;
     oversized_string.data = "x";
     oversized_string.size = static_cast<size_t>(std::numeric_limits<int>::max()) + 1;
     assert(prepared_commands->ExecutePrepared("INSERT INTO parameter_probe(text_value) VALUES(?)", &oversized_string,
@@ -425,17 +424,17 @@ int main(int argc, char** argv) {
     assert(channel->ExecuteSql("CREATE TABLE commit_parent(id INTEGER PRIMARY KEY)") >= 0);
     assert(channel->ExecuteSql("CREATE TABLE commit_child(parent_id INTEGER,FOREIGN KEY(parent_id) REFERENCES "
                                "commit_parent(id) DEFERRABLE INITIALLY DEFERRED)") >= 0);
-    const flowsql::DatabaseParameterV1 invalid_parent = [] {
-        flowsql::DatabaseParameterV1 parameter;
-        parameter.kind = flowsql::DatabaseParameterKindV1::kInt64;
+    const flowsql::DatabaseParameter invalid_parent = [] {
+        flowsql::DatabaseParameter parameter;
+        parameter.kind = flowsql::DatabaseParameterKind::kInt64;
         parameter.int64_value = 999;
         return parameter;
     }();
     assert(prepared_commands->ExecutePreparedBatch("INSERT INTO commit_child(parent_id) VALUES(?)", &invalid_parent, 1,
                                                    1) < 0);
-    const flowsql::DatabaseParameterV1 valid_parent = [] {
-        flowsql::DatabaseParameterV1 parameter;
-        parameter.kind = flowsql::DatabaseParameterKindV1::kInt64;
+    const flowsql::DatabaseParameter valid_parent = [] {
+        flowsql::DatabaseParameter parameter;
+        parameter.kind = flowsql::DatabaseParameterKind::kInt64;
         parameter.int64_value = 1;
         return parameter;
     }();
@@ -453,7 +452,21 @@ int main(int argc, char** argv) {
 
     auto factory = flowsql::npm::MakeNpmDatabaseResultConsumerFactory(channel.get(), "pcapfile.capture");
     {
-        std::vector<NpmEntityDescriptorV1> families;
+        SqliteProbe before(path);
+        const auto ddl = before.Text("SELECT sql FROM sqlite_master WHERE name='npm_result_runs'");
+        std::unique_ptr<INpmManagedResultConsumer> rejected;
+        assert(factory->Create({"rejected-task", "rejected-run"},
+                               {flowsql::npm::NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv4)},
+                               std::make_shared<BoundedBudget>(), &rejected) != 0);
+        assert(!rejected && factory->LastError().find("contract conflict") != std::string::npos);
+        assert(before.Text("SELECT sql FROM sqlite_master WHERE name='npm_result_runs'") == ddl);
+        assert(before.Int64("SELECT COUNT(*) FROM npm_result_runs WHERE run_id='legacy-run' AND status='writing'") ==
+               1);
+        // Explicit one-off fixture preparation, outside the result consumer.
+        assert(channel->ExecuteSql("ALTER TABLE npm_result_runs ADD COLUMN purge_cursor TEXT") >= 0);
+    }
+    {
+        std::vector<NpmEntityDescriptor> families;
         for (const auto kind : {flowsql::npm::NpmFamilyEntityKind::kBasic, flowsql::npm::NpmFamilyEntityKind::kSession,
                                 flowsql::npm::NpmFamilyEntityKind::kDns, flowsql::npm::NpmFamilyEntityKind::kHttp1,
                                 flowsql::npm::NpmFamilyEntityKind::kTls, flowsql::npm::NpmFamilyEntityKind::kIcmp})
@@ -467,7 +480,7 @@ int main(int argc, char** argv) {
             auto expected = MakeRows(entity, UINT64_MAX, 1, true, true);
             assert(router.Emit(entity.module_id, entity.entity_id, *expected) == 0);
             assert(budget->Usage().pending_output_bytes == 0);
-            const auto query = "SELECT * FROM npm_" + entity.entity_id + "_history_v1 WHERE __npm_run_id='run-family'";
+            const auto query = "SELECT * FROM npm_" + entity.entity_id + "_history WHERE __npm_run_id='run-family'";
             flowsql::IBatchReader* raw = nullptr;
             const int opened = channel->CreateReader(query.c_str(), &raw);
             if (opened) std::fprintf(stderr, "family reader failed: %s\n", channel->GetLastError());
@@ -495,7 +508,7 @@ int main(int argc, char** argv) {
             assert(actual->schema()->metadata()->Equals(*entity.schema->metadata()));
             const auto address = entity.schema->GetFieldByName("a_ip") ? "a_ip" : "src_ip";
             const auto type = entity.schema->GetFieldByName(address)->type()->id();
-            const auto table = "npm_" + entity.entity_id + "_v1_data";
+            const auto table = "npm_" + entity.entity_id + "_data";
             if (type == arrow::Type::UINT32) {
                 assert(channel->ExecuteSql(
                            ("UPDATE " + table + " SET " + address + "=-1 WHERE __npm_run_id='run-family'").c_str()) <
@@ -510,13 +523,12 @@ int main(int argc, char** argv) {
             }
         }
         assert(router.Finish() == 0);
-        const NpmResultContextV1 typed_context{"task-typed", "run-typed"};
+        const NpmResultContext typed_context{"task-typed", "run-typed"};
         const auto expected =
             RunTypedDelivery(budget, CreateConsumer(factory.get(), typed_context, families, budget), typed_context);
         for (const auto& [entity, rows] : expected) {
-            const std::string query =
-                "SELECT * FROM npm_" + entity.entity_id +
-                "_history_v1 WHERE __npm_run_id='run-typed' ORDER BY length(session_id),session_id";
+            const std::string query = "SELECT * FROM npm_" + entity.entity_id +
+                                      "_history WHERE __npm_run_id='run-typed' ORDER BY length(session_id),session_id";
             flowsql::IBatchReader* raw = nullptr;
             assert(channel->CreateReader(query.c_str(), &raw) == 0 && raw);
             const auto close = [](flowsql::IBatchReader* reader) {
@@ -547,13 +559,13 @@ int main(int argc, char** argv) {
         std::puts("[PASS] twelve family SQLite storage and exact Schema readback");
         return 0;
     }
-    const auto basic = flowsql::npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
-    const auto session = flowsql::npm::NpmSessionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
-    const std::vector<NpmEntityDescriptorV1> entities = {basic, session};
+    const auto basic = flowsql::npm::NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
+    const auto session = flowsql::npm::NpmSessionEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
+    const std::vector<NpmEntityDescriptor> entities = {basic, session};
 
     {
-        const auto basic6 = flowsql::npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv6);
-        const NpmResultContextV1 context{"router-families", "run-router-families"};
+        const auto basic6 = flowsql::npm::NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv6);
+        const NpmResultContext context{"router-families", "run-router-families"};
         auto budget = std::make_shared<BoundedBudget>();
         auto storage = CreateConsumer(factory.get(), context, {basic, basic6}, budget);
         flowsql::npm::NpmResultRouter router({basic, basic6}, basic.entity_id, context, budget, std::move(storage),
@@ -569,7 +581,7 @@ int main(int argc, char** argv) {
         for (const char* family : {"ipv4", "ipv6"}) {
             flowsql::IBatchReader* raw = nullptr;
             const std::string query = "SELECT a_ip AS endpoint FROM npm_basic_" + std::string(family) +
-                                      "_history_v1 WHERE __npm_run_id='run-router-families'";
+                                      "_history WHERE __npm_run_id='run-router-families'";
             assert(channel->CreateReader(query.c_str(), &raw) == 0 && raw);
             const uint8_t* data = nullptr;
             size_t size = 0;
@@ -587,14 +599,14 @@ int main(int argc, char** argv) {
     }
 
     {
-        const auto basic6 = flowsql::npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv6);
-        const NpmResultContextV1 context{"dual-publication", "run-dual-publication"};
+        const auto basic6 = flowsql::npm::NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv6);
+        const NpmResultContext context{"dual-publication", "run-dual-publication"};
         auto dual = CreateConsumer(factory.get(), context, {basic, basic6}, std::make_shared<BoundedBudget>());
         auto* publisher = dynamic_cast<flowsql::npm::INpmFamilyProgressConsumer*>(dual.get());
         assert(publisher);
-        auto publish = [&](const NpmEntityDescriptorV1& entity, int64_t closed, int64_t position) {
+        auto publish = [&](const NpmEntityDescriptor& entity, int64_t closed, int64_t position) {
             flowsql::npm::NpmFamilyPublicationRequest request{
-                {entity.entity_id, "npm_" + entity.entity_id + "_history_v1", context.run_id}, 30, closed};
+                {entity.entity_id, "npm_" + entity.entity_id + "_history", context.run_id}, 30, closed};
             flowsql::npm::NpmFamilyPublishedProgress fact;
             const int result = publisher->PublishProgress(request, &fact);
             if (!result) {
@@ -608,12 +620,12 @@ int main(int argc, char** argv) {
         assert(publish(basic, 30, 1) == 0 && publish(basic6, 30, 1) == 0);
         assert(publish(basic, 60, 2) == 0);  // Independent relation-local position.
         assert(publish(basic6, 30, 1) == 0);
-        assert(channel->ExecuteSql("CREATE TRIGGER fail_second_family BEFORE INSERT ON npm_result_progress_v1 "
+        assert(channel->ExecuteSql("CREATE TRIGGER fail_second_family BEFORE INSERT ON npm_result_progress "
                                    "WHEN NEW.run_id='run-dual-publication' AND NEW.entity_id='basic_ipv6' "
                                    "BEGIN SELECT RAISE(ABORT,'second family failed'); END") >= 0);
         assert(publish(basic6, 60, 2) == EIO);
         assert(publish(basic, 90, 3) == EPIPE && dual->Finish() == EPIPE);
-        flowsql::npm::NpmResultFailureV1 failure{EIO, "publish", "second family failed"};
+        flowsql::npm::NpmResultFailure failure{EIO, "publish", "second family failed"};
         assert(dual->FailRun(failure) == 0);
         assert(channel->ExecuteSql("DROP TRIGGER fail_second_family") >= 0);
     }
@@ -641,26 +653,26 @@ int main(int argc, char** argv) {
     assert(probe.Int64("SELECT purge_cursor IS NULL FROM npm_result_runs WHERE run_id='legacy-run'") == 1);
     assert(probe.Int64("SELECT COUNT(*) FROM npm_result_entities WHERE entity_id IN ('basic_ipv4','session_ipv4')") ==
            2);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_v1_data WHERE __npm_run_id='run-1'") == 1);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_session_ipv4_v1_data WHERE __npm_run_id='run-1'") == 1);
-    assert(probe.Text("SELECT session_id FROM npm_basic_ipv4_v1_data WHERE __npm_run_id='run-1'") ==
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_data WHERE __npm_run_id='run-1'") == 1);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_session_ipv4_data WHERE __npm_run_id='run-1'") == 1);
+    assert(probe.Text("SELECT session_id FROM npm_basic_ipv4_data WHERE __npm_run_id='run-1'") ==
            std::to_string(maximum));
-    assert(probe.Text("SELECT revision FROM npm_basic_ipv4_v1_data WHERE __npm_run_id='run-1'") ==
+    assert(probe.Text("SELECT revision FROM npm_basic_ipv4_data WHERE __npm_run_id='run-1'") ==
            std::to_string(maximum - 1));
     assert(probe.Text("SELECT status FROM npm_result_runs WHERE run_id='run-1'") == "completed");
     assert(probe.Text("SELECT metadata_status FROM npm_result_runs WHERE run_id='run-1'") == "known");
     assert(probe.Int64("SELECT completed_at_ns IS NOT NULL FROM npm_result_runs WHERE run_id='run-1'") == 1);
-    assert(probe.Text("SELECT type FROM sqlite_master WHERE name='npm_basic_ipv4_history_v1'") == "view");
-    assert(probe.Text("SELECT type FROM sqlite_master WHERE name='npm_basic_ipv4_latest_v1'") == "view");
-    assert(probe.Text("SELECT type FROM sqlite_master WHERE name='npm_basic_ipv4_final_v1'") == "view");
+    assert(probe.Text("SELECT type FROM sqlite_master WHERE name='npm_basic_ipv4_history'") == "view");
+    assert(probe.Text("SELECT type FROM sqlite_master WHERE name='npm_basic_ipv4_latest'") == "view");
+    assert(probe.Text("SELECT type FROM sqlite_master WHERE name='npm_basic_ipv4_final'") == "view");
     assert(probe.Int64("SELECT COUNT(*) FROM sqlite_master WHERE name IN "
-                       "('npm_basic_ipv4_history','npm_basic_ipv4_latest','npm_basic_ipv4_final')") == 0);
+                       "('npm_basic_ipv4_history_v1','npm_basic_ipv4_latest_v1','npm_basic_ipv4_final_v1')") == 0);
 
     auto event = basic;
     event.entity_id = "event_probe";
     event.module_id = "event_probe";
     event.schema_version = 7;
-    event.revision_semantics = flowsql::npm::NpmRevisionSemanticsV1::kEvent;
+    event.revision_semantics = flowsql::npm::NpmRevisionSemantics::kEvent;
     auto relation_run = CreateConsumer(factory.get(), {"task-relations", "run-relations"}, {basic, session, event},
                                        std::make_shared<BoundedBudget>());
     assert(relation_run->Consume({"task-relations", "run-relations"}, basic, *MakeRows(basic, 101, 2, false)) == 0);
@@ -671,21 +683,21 @@ int main(int argc, char** argv) {
     assert(relation_run->Consume({"task-relations", "run-relations"}, event, *MakeRows(event, 101, 1, true)) == 0);
     assert(relation_run->Finish() == 0);
     AssertSummary(relation_run->ResultJson(), "run-relations", "completed", 5, 3);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='run-relations'") == 3);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_latest_v1 WHERE __npm_run_id='run-relations'") == 1);
-    assert(probe.Text("SELECT revision FROM npm_basic_ipv4_latest_v1 WHERE __npm_run_id='run-relations'") ==
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_history WHERE __npm_run_id='run-relations'") == 3);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_latest WHERE __npm_run_id='run-relations'") == 1);
+    assert(probe.Text("SELECT revision FROM npm_basic_ipv4_latest WHERE __npm_run_id='run-relations'") ==
            std::to_string(maximum));
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_final_v1 WHERE __npm_run_id='run-relations'") == 1);
-    assert(probe.Text("SELECT revision FROM npm_basic_ipv4_final_v1 WHERE __npm_run_id='run-relations'") == "10");
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_session_ipv4_latest_v1 WHERE __npm_run_id='run-relations' "
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_final WHERE __npm_run_id='run-relations'") == 1);
+    assert(probe.Text("SELECT revision FROM npm_basic_ipv4_final WHERE __npm_run_id='run-relations'") == "10");
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_session_ipv4_latest WHERE __npm_run_id='run-relations' "
                        "AND session_id='101' AND revision='8'") == 1);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_event_probe_history_v7 WHERE __npm_run_id='run-relations'") == 1);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_event_probe_latest_v7 WHERE __npm_run_id='run-relations'") == 1);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_event_probe_final_v7 WHERE __npm_run_id='run-relations'") == 1);
-    assert(probe.Text("SELECT __npm_run_status FROM npm_event_probe_history_v7 WHERE "
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_event_probe_history WHERE __npm_run_id='run-relations'") == 1);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_event_probe_latest WHERE __npm_run_id='run-relations'") == 1);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_event_probe_final WHERE __npm_run_id='run-relations'") == 1);
+    assert(probe.Text("SELECT __npm_run_status FROM npm_event_probe_history WHERE "
                       "__npm_run_id='run-relations'") == "completed");
 
-    const auto dns = flowsql::npm::NpmDnsTransactionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
+    const auto dns = flowsql::npm::NpmDnsTransactionEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
     auto dns_first = CreateConsumer(factory.get(), {"task-dns", "run-dns-1"}, {dns}, std::make_shared<BoundedBudget>());
     assert(dns_first->Consume({"task-dns", "run-dns-1"}, dns, *MakeRows(dns, 9001, 1)) == 0);
     assert(dns_first->Finish() == 0);
@@ -695,17 +707,17 @@ int main(int argc, char** argv) {
     assert(dns_second->Consume({"task-dns", "run-dns-2"}, dns, *MakeRows(dns, 9001, 1)) == 0);
     assert(dns_second->Finish() == 0);
     for (const char* relation : {"history", "latest", "final"}) {
-        const std::string name = std::string("npm_dns_transaction_ipv4_") + relation + "_v1";
+        const std::string name = std::string("npm_dns_transaction_ipv4_") + relation;
         assert(probe.Text("SELECT type FROM sqlite_master WHERE name='" + name + "'") == "view");
         assert(probe.Int64("SELECT COUNT(*) FROM " + name + " WHERE __npm_run_id='run-dns-1'") == 1);
         assert(probe.Int64("SELECT COUNT(*) FROM " + name + " WHERE __npm_run_id='run-dns-2'") == 1);
         assert(probe.Int64("SELECT COUNT(*) FROM " + name + " WHERE __npm_run_id='run-1'") == 0);
     }
-    assert(probe.Text("SELECT entity_instance_id FROM npm_dns_transaction_ipv4_final_v1 WHERE "
+    assert(probe.Text("SELECT entity_instance_id FROM npm_dns_transaction_ipv4_final WHERE "
                       "__npm_run_id='run-dns-1'") == "9001");
     assert(probe.Int64("SELECT schema_version FROM npm_result_entities WHERE entity_id='dns_transaction_ipv4'") == 1);
 
-    const auto http1 = flowsql::npm::NpmHttp1TransactionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
+    const auto http1 = flowsql::npm::NpmHttp1TransactionEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
     auto http_first =
         CreateConsumer(factory.get(), {"task-http1", "run-http1-1"}, {http1}, std::make_shared<BoundedBudget>());
     assert(http_first->Consume({"task-http1", "run-http1-1"}, http1, *MakeRows(http1, 7001, 1)) == 0);
@@ -716,13 +728,13 @@ int main(int argc, char** argv) {
     assert(http_second->Consume({"task-http1", "run-http1-2"}, http1, *MakeRows(http1, 7001, 1)) == 0);
     assert(http_second->Finish() == 0);
     for (const char* relation : {"history", "latest", "final"}) {
-        const std::string name = std::string("npm_http1_transaction_ipv4_") + relation + "_v1";
+        const std::string name = std::string("npm_http1_transaction_ipv4_") + relation;
         assert(probe.Text("SELECT type FROM sqlite_master WHERE name='" + name + "'") == "view");
         assert(probe.Int64("SELECT COUNT(*) FROM " + name + " WHERE __npm_run_id='run-http1-1'") == 1);
         assert(probe.Int64("SELECT COUNT(*) FROM " + name + " WHERE __npm_run_id='run-http1-2'") == 1);
         assert(probe.Int64("SELECT COUNT(*) FROM " + name + " WHERE __npm_run_id='run-1'") == 0);
     }
-    assert(probe.Text("SELECT entity_instance_id FROM npm_http1_transaction_ipv4_final_v1 WHERE "
+    assert(probe.Text("SELECT entity_instance_id FROM npm_http1_transaction_ipv4_final WHERE "
                       "__npm_run_id='run-http1-1'") == "7001");
     assert(probe.Int64("SELECT schema_version FROM npm_result_entities WHERE entity_id='http1_transaction_ipv4'") == 1);
 
@@ -731,15 +743,15 @@ int main(int argc, char** argv) {
     assert(second->Consume({"task-repeat", "run-2"}, basic, *MakeRows(basic, 101, 1)) == 0);
     assert(second->Finish() == 0);
     assert(probe.Int64("SELECT COUNT(*) FROM npm_result_runs WHERE task_id='task-repeat'") == 2);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_v1_data WHERE __npm_run_id IN ('run-1','run-2')") == 2);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_latest_v1 WHERE session_id='101' AND "
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_data WHERE __npm_run_id IN ('run-1','run-2')") == 2);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_latest WHERE session_id='101' AND "
                        "__npm_run_id IN ('run-relations','run-2')") == 2);
-    assert(probe.Text("SELECT revision FROM npm_basic_ipv4_latest_v1 WHERE __npm_run_id='run-2'") == "1");
+    assert(probe.Text("SELECT revision FROM npm_basic_ipv4_latest WHERE __npm_run_id='run-2'") == "1");
 
     auto failed =
         CreateConsumer(factory.get(), {"task-failed", "run-failed"}, entities, std::make_shared<BoundedBudget>());
     assert(failed->Consume({"task-failed", "run-failed"}, session, *MakeRows(session, 21, 1)) == 0);
-    flowsql::npm::NpmResultFailureV1 failure;
+    flowsql::npm::NpmResultFailure failure;
     failure.code = EIO;
     failure.stage = "runtime";
     failure.message = "injected write suffix failure";
@@ -750,17 +762,17 @@ int main(int argc, char** argv) {
     assert(probe.Text("SELECT error_stage FROM npm_result_runs WHERE run_id='run-failed'") == "runtime");
     assert(probe.Text("SELECT error_message FROM npm_result_runs WHERE run_id='run-failed'") ==
            "injected write suffix failure");
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_session_ipv4_v1_data WHERE __npm_run_id='run-failed'") == 1);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_session_ipv4_history_v1 WHERE __npm_run_id='run-failed'") == 1);
-    assert(probe.Text("SELECT __npm_run_status FROM npm_session_ipv4_history_v1 WHERE __npm_run_id='run-failed'") ==
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_session_ipv4_data WHERE __npm_run_id='run-failed'") == 1);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_session_ipv4_history WHERE __npm_run_id='run-failed'") == 1);
+    assert(probe.Text("SELECT __npm_run_status FROM npm_session_ipv4_history WHERE __npm_run_id='run-failed'") ==
            "incomplete");
 
-    const auto labeled_basic = flowsql::npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
+    const auto labeled_basic = flowsql::npm::NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
     auto labeled = CreateConsumer(factory.get(), {"task-labeled", "run-labeled"}, {labeled_basic},
                                   std::make_shared<BoundedBudget>());
     assert(labeled->Consume({"task-labeled", "run-labeled"}, labeled_basic, *MakeRows(labeled_basic, 101, 1)) == 0);
     assert(labeled->Finish() == 0);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='run-labeled'") == 1);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_history WHERE __npm_run_id='run-labeled'") == 1);
     assert(probe.Int64("SELECT COUNT(*) FROM sqlite_master WHERE name='npm_basic_ipv4_history_v2'") == 0);
 
     {
@@ -783,21 +795,21 @@ int main(int argc, char** argv) {
         assert(late->Consume({"task-late", "run-late"}, labeled_basic, *encoded) == EINVAL);
         progress.closed_before_ns *= 2;
         assert(PublishForRun(publisher, {"task-late", "run-late"}, progress) == EPIPE);
-        assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_v1_data WHERE __npm_run_id='run-late'") == 1);
-        assert(probe.Int64("SELECT COUNT(*) FROM npm_result_progress_v1 WHERE run_id='run-late'") == 1);
+        assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_data WHERE __npm_run_id='run-late'") == 1);
+        assert(probe.Int64("SELECT COUNT(*) FROM npm_result_progress WHERE run_id='run-late'") == 1);
     }
     {
         auto failing = CreateConsumer(factory.get(), {"task-publish-fail", "run-publish-fail"}, {labeled_basic},
                                       std::make_shared<BoundedBudget>());
         probe.Execute(
-            "CREATE TRIGGER fail_progress BEFORE INSERT ON npm_result_progress_v1 "
+            "CREATE TRIGGER fail_progress BEFORE INSERT ON npm_result_progress "
             "WHEN NEW.run_id='run-publish-fail' BEGIN SELECT RAISE(ABORT,'publication failed'); END");
         auto* publisher = dynamic_cast<flowsql::npm::INpmFamilyProgressConsumer*>(failing.get());
         flowsql::npm::NpmFamilyPublicationRequest progress;
         progress.period_ns = progress.closed_before_ns = 30000000000LL;
         assert(PublishForRun(publisher, {"task-publish-fail", "run-publish-fail"}, progress) == EIO);
         assert(PublishForRun(publisher, {"task-publish-fail", "run-publish-fail"}, progress) == EPIPE);
-        assert(probe.Int64("SELECT COUNT(*) FROM npm_result_progress_v1 WHERE run_id='run-publish-fail'") == 0);
+        assert(probe.Int64("SELECT COUNT(*) FROM npm_result_progress WHERE run_id='run-publish-fail'") == 0);
         probe.Execute("DROP TRIGGER fail_progress");
     }
 
@@ -810,11 +822,11 @@ int main(int argc, char** argv) {
         flowsql::npm::NpmFamilyPublicationRequest progress;
         progress.period_ns = progress.closed_before_ns = 30000000000LL;
         assert(PublishForRun(publisher, {"task-publication-unknown", "run-publication-unknown"}, progress) == EIO);
-        assert(probe.Int64("SELECT COUNT(*) FROM npm_result_progress_v1 WHERE run_id='run-publication-unknown'") == 1);
+        assert(probe.Int64("SELECT COUNT(*) FROM npm_result_progress WHERE run_id='run-publication-unknown'") == 1);
         progress.closed_before_ns *= 2;
         assert(PublishForRun(publisher, {"task-publication-unknown", "run-publication-unknown"}, progress) == EPIPE);
         assert(unknown->Finish() == EPIPE);
-        assert(probe.Int64("SELECT MAX(position) FROM npm_result_progress_v1 WHERE run_id='run-publication-unknown'") ==
+        assert(probe.Int64("SELECT MAX(position) FROM npm_result_progress WHERE run_id='run-publication-unknown'") ==
                1);
     }
 
@@ -856,26 +868,25 @@ int main(int argc, char** argv) {
         assert(PublishForRun(publisher, {"task-periodic", "wrong-run"}, progress) == EINVAL);
         progress.closed_before_ns = 90000000000LL;
         assert(PublishForRun(publisher, {"task-periodic", run}, progress) == 0);  // no data progression
-        assert(probe.Int64("SELECT COUNT(*) FROM npm_result_progress_v1 WHERE run_id='" + run + "'") == 2);
-        assert(probe.Int64("SELECT MAX(position) FROM npm_result_progress_v1 WHERE run_id='" + run + "'") == 2);
-        assert(probe.Text("SELECT epoch FROM npm_result_progress_v1 WHERE run_id='" + run + "' AND position=2") == run);
-        assert(probe.Int64("SELECT closed_before_ns FROM npm_result_progress_v1 WHERE run_id='" + run +
+        assert(probe.Int64("SELECT COUNT(*) FROM npm_result_progress WHERE run_id='" + run + "'") == 2);
+        assert(probe.Int64("SELECT MAX(position) FROM npm_result_progress WHERE run_id='" + run + "'") == 2);
+        assert(probe.Text("SELECT epoch FROM npm_result_progress WHERE run_id='" + run + "' AND position=2") == run);
+        assert(probe.Int64("SELECT closed_before_ns FROM npm_result_progress WHERE run_id='" + run +
                            "' AND position=2") == 90000000000LL);
         assert(periodic->Finish() == 0);
         const std::string where = " WHERE __npm_run_id='" + run + "'";
-        assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_history_v1" + where) == 3);
-        assert(probe.Text("SELECT interval_wire_bytes_total FROM npm_basic_ipv4_history_v1" + where +
+        assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_history" + where) == 3);
+        assert(probe.Text("SELECT interval_wire_bytes_total FROM npm_basic_ipv4_history" + where +
                           " AND revision='1'") == std::to_string(maximum - 10));
-        assert(probe.Text("SELECT interval_wire_bytes_total FROM npm_basic_ipv4_history_v1" + where +
+        assert(probe.Text("SELECT interval_wire_bytes_total FROM npm_basic_ipv4_history" + where +
                           " AND revision='2'") == "10");
-        assert(probe.Text("SELECT interval_wire_bytes_total FROM npm_basic_ipv4_final_v1" + where) == "0");
-        assert(probe.Text("SELECT wire_bytes_total FROM npm_basic_ipv4_final_v1" + where) == std::to_string(maximum));
-        assert(probe.Text("SELECT revision FROM npm_basic_ipv4_latest_v1" + where) == "3");
-        assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_history_v1" + where +
-                           " AND primary_label_id IS NULL") == (labels == 0 ? 3 : 0));
+        assert(probe.Text("SELECT interval_wire_bytes_total FROM npm_basic_ipv4_final" + where) == "0");
+        assert(probe.Text("SELECT wire_bytes_total FROM npm_basic_ipv4_final" + where) == std::to_string(maximum));
+        assert(probe.Text("SELECT revision FROM npm_basic_ipv4_latest" + where) == "3");
+        assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_history" + where + " AND primary_label_id IS NULL") ==
+               (labels == 0 ? 3 : 0));
         if (labels)
-            assert(probe.Int64("SELECT primary_label_id FROM npm_basic_ipv4_final_v1" + where) ==
-                   (labels == 2 ? 17 : 0));
+            assert(probe.Int64("SELECT primary_label_id FROM npm_basic_ipv4_final" + where) == (labels == 2 ? 17 : 0));
     }
 
     {
@@ -893,12 +904,12 @@ int main(int argc, char** argv) {
     failure.stage = "consumer";
     failure.message = "pending output budget exceeded";
     assert(constrained->FailRun(failure) == 0);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_v1_data WHERE __npm_run_id='run-budget'") == 0);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_data WHERE __npm_run_id='run-budget'") == 0);
 
     auto atomic_batch =
         CreateConsumer(factory.get(), {"task-atomic", "run-atomic"}, entities, std::make_shared<BoundedBudget>());
     assert(atomic_batch->Consume({"task-atomic", "run-atomic"}, basic, *DuplicateRows(MakeRows(basic, 41, 1))) == EIO);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_v1_data WHERE __npm_run_id='run-atomic'") == 0);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_data WHERE __npm_run_id='run-atomic'") == 0);
     failure.code = EIO;
     failure.stage = "consumer";
     failure.message = "batch transaction rolled back";
@@ -931,10 +942,10 @@ int main(int argc, char** argv) {
                                   std::make_shared<BoundedBudget>());
     assert(writing->Consume({"task-writing", "run-writing"}, basic, *MakeRows(basic, 3000, 1)) == 0);
     probe.Execute("UPDATE npm_result_runs SET expires_at_ns=1 WHERE run_id IN ('run-retained','run-writing')");
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='run-retained'") == 0);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='run-writing'") == 0);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_history WHERE __npm_run_id='run-retained'") == 0);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_history WHERE __npm_run_id='run-writing'") == 0);
     probe.Execute(
-        "CREATE TRIGGER npm_purge_fail BEFORE DELETE ON npm_basic_ipv4_v1_data BEGIN SELECT RAISE(ABORT,'injected'); "
+        "CREATE TRIGGER npm_purge_fail BEFORE DELETE ON npm_basic_ipv4_data BEGIN SELECT RAISE(ABORT,'injected'); "
         "END");
     auto advance = [&](int step) {
         auto next = CreateConsumer(factory.get(), {"task-advance", "run-advance-" + std::to_string(step)}, {basic},
@@ -943,14 +954,13 @@ int main(int argc, char** argv) {
     };
     advance(0);
     assert(probe.Text("SELECT status FROM npm_result_runs WHERE run_id='run-retained'") == "purging");
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_v1_data WHERE __npm_run_id='run-retained'") == 66);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_data WHERE __npm_run_id='run-retained'") == 66);
     probe.Execute("DROP TRIGGER npm_purge_fail");
     advance(1);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_v1_data WHERE __npm_run_id='run-retained'") == 2);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_data WHERE __npm_run_id='run-retained'") == 2);
     advance(2);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_v1_data WHERE __npm_run_id='run-retained'") == 0);
-    assert(probe.Text("SELECT purge_cursor FROM npm_result_runs WHERE run_id='run-retained'") ==
-           "npm_basic_ipv4_v1_data");
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_data WHERE __npm_run_id='run-retained'") == 0);
+    assert(probe.Text("SELECT purge_cursor FROM npm_result_runs WHERE run_id='run-retained'") == "npm_basic_ipv4_data");
     advance(3);
     advance(4);
     advance(5);
@@ -959,14 +969,14 @@ int main(int argc, char** argv) {
     advance(8);
     for (int step = 9; step < 18; ++step) advance(step);
     assert(probe.Int64("SELECT COUNT(*) FROM npm_result_runs WHERE run_id='run-retained'") == 0);
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_session_ipv4_v1_data WHERE __npm_run_id='run-retained'") == 0);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_session_ipv4_data WHERE __npm_run_id='run-retained'") == 0);
     assert(probe.Text("SELECT status FROM npm_result_runs WHERE run_id='run-writing'") == "writing");
-    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_v1_data WHERE __npm_run_id='run-writing'") == 1);
+    assert(probe.Int64("SELECT COUNT(*) FROM npm_basic_ipv4_data WHERE __npm_run_id='run-writing'") == 1);
     assert(writing->Finish() == 0);
 
     auto invalid_id = basic;
     invalid_id.entity_id = "Basic";
-    std::unique_ptr<INpmManagedResultConsumerV1> rejected;
+    std::unique_ptr<INpmManagedResultConsumer> rejected;
     assert(factory->Create({"invalid", "run-invalid-id"}, {invalid_id}, std::make_shared<BoundedBudget>(), &rejected) ==
            EINVAL);
     assert(!rejected);
@@ -1005,7 +1015,7 @@ int main(int argc, char** argv) {
     relation_conflict.entity_id = "relation_conflict";
     relation_conflict.module_id = "relation_conflict";
     relation_conflict.schema_version = 9;
-    probe.Execute("CREATE TABLE npm_relation_conflict_history_v9(value TEXT)");
+    probe.Execute("CREATE TABLE npm_relation_conflict_history(value TEXT)");
     assert(factory->Create({"invalid", "run-relation-conflict"}, {relation_conflict}, std::make_shared<BoundedBudget>(),
                            &rejected) == EINVAL);
     assert(!rejected);
@@ -1019,8 +1029,8 @@ int main(int argc, char** argv) {
     relation_run.reset();
     constrained.reset();
     atomic_batch.reset();
-    probe.Execute("DROP TABLE npm_basic_ipv4_v1_data");
-    probe.Execute("CREATE TABLE npm_basic_ipv4_v1_data(__npm_run_id TEXT NOT NULL PRIMARY KEY)");
+    probe.Execute("DROP TABLE npm_basic_ipv4_data");
+    probe.Execute("CREATE TABLE npm_basic_ipv4_data(__npm_run_id TEXT NOT NULL PRIMARY KEY)");
     assert(factory->Create({"invalid", "run-table-conflict"}, {basic}, std::make_shared<BoundedBudget>(), &rejected) ==
            EINVAL);
     assert(!rejected);

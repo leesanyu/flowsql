@@ -34,7 +34,7 @@ inline Json Build(const Value* domain, const Value& physical_fields, const std::
                   const std::string& session_target = "") {
     Json dictionary(rapidjson::kObjectType);
     auto& da = dictionary.GetAllocator();
-    Set(dictionary, "schema_id", "flowsql.data-dictionary.v1", da);
+    Set(dictionary, "schema_id", "flowsql.data-dictionary", da);
     Set(dictionary, "title", domain ? Get(*domain, "title") : "NPM 受管目录", da);
     Value entity(rapidjson::kObjectType);
     if (domain) entity.CopyFrom((*domain)["entity"], da);

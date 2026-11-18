@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #ifndef _FLOWSQL_FRAMEWORK_INTERFACES_IBUILTIN_REGISTRY_H_
 #define _FLOWSQL_FRAMEWORK_INTERFACES_IBUILTIN_REGISTRY_H_
@@ -60,7 +55,6 @@ struct StreamChannelTypeDescriptor {
 struct BuiltinOperatorDescriptor {
     std::string category;
     std::string name;
-    std::vector<std::string> aliases;  // 含 builtin.* 与 legacy 名
     OperatorFactory factory;
 };
 

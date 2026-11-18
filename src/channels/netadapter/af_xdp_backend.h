@@ -4,6 +4,6 @@
 #define FLOWSQL_CHANNELS_NETADAPTER_AF_XDP_BACKEND_H_
 #include <framework/interfaces/icapture_backend.h>
 namespace flowsql::channels::netadapter {
-int OpenAfXdpCopySkb(const CaptureBackendConfigV1&, std::shared_ptr<ICaptureBackendSessionV1>*, std::string*);
+int OpenAfXdpCopySkb(const CaptureBackendConfig&, std::shared_ptr<ICaptureBackendSession>*, std::string*);
 }
 #endif

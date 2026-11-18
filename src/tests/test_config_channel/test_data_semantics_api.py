@@ -121,6 +121,16 @@ def main():
     with tempfile.TemporaryDirectory(prefix='flowsql-semantics-http-') as temporary:
         directory = Path(temporary)
         with running_host(host, directory) as (base, process, log):
+            internal = 'http://127.0.0.1:' + process.args[2]
+            assert request(internal + '/semantics/list', {})[0] == 200
+            assert request(internal + '/api/semantics/v1/list', {})[0] == 200
+            for obsolete in (internal + '/semantics/v1/list', base + '/api/semantics/list'):
+                try:
+                    with urllib.request.urlopen(urllib.request.Request(obsolete, data=b'{}', headers={'Content-Type':'application/json'}), timeout=15):
+                        raise AssertionError('unexpected semantics route is registered: ' + obsolete)
+                except urllib.error.HTTPError as error:
+                    assert error.code == 404
+                    error.close()
             for filename in ('openapi.json', 'api.schema.json', 'documents.schema.json'):
                 status, served = request(base + '/api/semantics/v1/' + filename)
                 assert status == 200 and served == json.loads((ROOT / 'config/semantics' / filename).read_text())
@@ -195,7 +205,7 @@ def main():
             precise['fields'][0]['type']['parameters']['integer'] = 18446744073709551616
             call(base, 'import', {'kind': 'dictionary', 'name': 'precise', 'format': 'yaml', 'content': yaml.safe_dump(precise)}, 400)
             call(base, 'import', {'kind': 'dictionary', 'name': 'precise', 'format': 'json', 'content': json.dumps(precise)}, 400)
-            big = {'schema_id': 'flowsql.data-standard.v1', 'title': 'x' * (6 * 1024 * 1024 + 1024)}
+            big = {'schema_id': 'flowsql.data-standard', 'title': 'x' * (6 * 1024 * 1024 + 1024)}
             large = save(base, 'standard', 'large', big)
             assert call(base, 'export', {'exact_reference': large['exact_reference'], 'format': 'json'}, 413)['code'] == 'LIMIT_EXCEEDED'
             changed = example('dictionary'); changed['title'] = '新版定义'

@@ -184,7 +184,9 @@ SQL 任务类型由 Source 通道类型决定（以 `FROM` 解析结果为准）
 - `AddChannel / RemoveChannel / UpdateChannel` → 运行时动态管理
 - `List` → 枚举通道，密码字段脱敏
 
-通道配置持久化到 `config/flowsql.yml`，密码 AES-256-GCM 加密（`ENC:` 前缀）。Scheduler 重启后自动从 YAML 恢复通道。
+通道配置持久化到 `config/flowsql.yml`，密码 AES-256-GCM 加密（`ENC:` 前缀）。Scheduler 重启后从 YAML 恢复通道。持久通道必须包含非空 `dataset_instance_id`，重启和修改沿用该身份；管理接口新建通道时生成并保存。缺失身份的配置直接加载失败，不补写或重写原文件。
+
+Catalog/BinAddon 仅创建当前目录结构，已存在的目录必须包含当前全部字段（包括 `category` 和 `plugin_id`）。需要整理现有数据时，先备份并在产品外一次性处理；启动过程不补列。
 
 支持的数据库类型：
 
@@ -201,7 +203,7 @@ SQL 任务类型由 Source 通道类型决定（以 `FROM` 解析结果为准）
 
 | 层 | 格式 | 示例 |
 |---|---|---|
-| 前端对外（WebPlugin 8081） | `/api/{资源}[/{动作}]` | `/api/channels`, `/api/tasks/result` |
+| 前端对外（WebPlugin 8081） | `/api/{资源}[/{动作}]` | `/api/channels/list`, `/api/tasks/result` |
 | 内部服务间（RouterAgencyPlugin） | `/{资源类型}/{子类型}/{动作}` | `/channels/database/add`, `/tasks/instant/execute` |
 | Gateway 管理（内部专用） | `/gateway/{动作}` | `/gateway/register`, `/gateway/routes` |
 
@@ -397,12 +399,17 @@ Pipeline 统一面向 `IOperator` 接口，不感知算子是 C++ 还是 Python�
 
 C++ 算子以 `.so` 插件文件为管理单元。一个插件可导出多个算子，统一由 `BinAddonHostPlugin` 管理。
 
-插件必须导出 4 个符号（`extern "C"`）：
+插件使用当前 descriptor/capability ABI，必须导出 5 个符号（`extern "C"`）：
 
 1. `flowsql_abi_version`
 2. `flowsql_operator_count`
-3. `flowsql_create_operator`
-4. `flowsql_destroy_operator`
+3. `flowsql_describe_operator`
+4. `flowsql_create_operator_capability`
+5. `flowsql_destroy_operator_capability`
+
+每个逻辑算子只有一个导出索引；描述符提供身份与能力 IID。宿主仅接受当前 ABI，并用同一索引配对创建与销毁。
+可选 `flowsql_operator_data_contract` 导出当前算子数据契约。DataFrame 调用各自持有独立实例和组件身份，
+BlockTransform 通过能力租约创建独立任务；实例与任务释放后才允许卸载动态库。
 
 激活流程（简化）：
 
@@ -458,10 +465,12 @@ services:
         option: "db_path=./meta/flowsql_meta.db"
       - name: libflowsql_npi.so
         option: '{"ldfile":"./config/protocols.yml"}'
-      - libflowsql_pcapfile.so
-      - libflowsql_scheduler.so
-      - libflowsql_bridge.so
-      - libflowsql_builtin.so
+      - name: libflowsql_pcapfile.so
+      - name: libflowsql_scheduler.so
+      - name: libflowsql_bridge.so
+      - name: libflowsql_config_channel.so
+        option: "db_path=./meta/flowsql_meta.db"
+      - name: libflowsql_builtin.so
       - name: libflowsql_catalog.so
         option: "data_dir=./dataframes;operator_db_path=./meta/flowsql_meta.db"
       - name: libflowsql_binaddon.so
@@ -471,7 +480,7 @@ services:
       - name: libflowsql_stream.so
         option: "config_file=config/flowsql.yml;db_path=./meta/flowsql_meta.db"
       # 可选：需要在线基线能力时加载
-      # - libflowsql_baseline.so
+      # - name: libflowsql_baseline.so
 
   - name: pyworker
     type: python
@@ -496,10 +505,12 @@ services:
         option: "db_path=./meta/flowsql_meta.db"
       - name: libflowsql_npi.so
         option: '{"ldfile":"./config/protocols.yml"}'
-      - libflowsql_pcapfile.so
-      - libflowsql_scheduler.so
-      - libflowsql_bridge.so
-      - libflowsql_builtin.so
+      - name: libflowsql_pcapfile.so
+      - name: libflowsql_scheduler.so
+      - name: libflowsql_bridge.so
+      - name: libflowsql_config_channel.so
+        option: "db_path=./meta/flowsql_meta.db"
+      - name: libflowsql_builtin.so
       - name: libflowsql_catalog.so
         option: "data_dir=./dataframes;operator_db_path=./meta/flowsql_meta.db"
       - name: libflowsql_binaddon.so
@@ -509,7 +520,7 @@ services:
       - name: libflowsql_stream.so
         option: "config_file=config/flowsql.yml;db_path=./meta/flowsql_meta.db"
       # 可选：需要在线基线能力时加载
-      # - libflowsql_baseline.so
+      # - name: libflowsql_baseline.so
 
   - name: pyworker
     type: python
@@ -616,3 +627,29 @@ cd build/output && LD_LIBRARY_PATH=. ./flowsql --config ../../config/deploy-sing
 # 完整回归
 ctest --test-dir build --output-on-failure
 ```
+
+## SQL 解析契约
+
+SQL 的源通道统一保存在 `SqlStatement.sources`；`operators` 与 `operator_with_params` 等长，
+每项参数只属于同索引的算子。`WITH` 只能紧随 `USING category.name` 或 `THEN category.name`；
+不含算子的普通查询和 `INTO` 传输无需参数项。多源、列选择及分阶段 `WHERE` 按现有语义执行。
+
+部署 YAML 的 `plugins` 每项为对象：`name` 是库名，`option` 是可选插件配置字符串，
+`databases` 是可选数据库定义数组。列表接口为 `GET /api/channels/list` 与 `GET /api/operators/list`。
+
+流通道定义在 HTTP 增改接口和 YAML 中统一为 `type/name/role/options`。`type`、`name` 必填，
+`role` 默认为 `both`，`options` 默认为空对象；显式 options 必须为对象，role 仅放顶层。
+插件内部的 `IStreamManager` 用 JSON 字符串传输该配置对象，持久化只读取当前 JSON。
+
+```yaml
+channels:
+  stream_channels:
+    - type: ring
+      name: example
+      role: both
+      options:
+        ring_size: 64
+        finite: false
+```
+
+算子工厂只使用 `category.name` 注册和查找，例如 `builtin.passthrough`。Builtin 启动必须成功注册当前算子契约，部署须提供 Config 和 Catalog；注册失败会中止启动并报告原因。Python 源码上传和内容修改必须经 Bridge 提供的 Python publisher 完成；缺少该依赖时返回不可用，不写入源码或相关元数据。仅修改算子描述、位置仍可使用目录服务。

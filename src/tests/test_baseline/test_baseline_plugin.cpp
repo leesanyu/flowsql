@@ -404,9 +404,9 @@ void TestInvalidTaskConfigRejected() {
 void TestStateControlBindingContract() {
     auto env = LoadBaselineService();
     auto* management =
-        static_cast<IBaselineStateControlServiceV1*>(env.loader->First(IID_BASELINE_STATE_CONTROL_SERVICE_V1));
+        static_cast<IBaselineStateControlService*>(env.loader->First(IID_BASELINE_STATE_CONTROL_SERVICE));
     assert(management != nullptr);
-    const BaselineStateLimitsV1 limits{1, 2, 2};
+    const BaselineStateLimits limits{1, 2, 2};
     assert(management->Bind(nullptr, limits).first == BaselineStatus::kInvalidArgument);
     auto created = env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(created.first == BaselineStatus::kOk);
@@ -422,17 +422,17 @@ void TestStateControlBindingContract() {
     auto usage = control->QueryUsage();
     assert(usage.first == BaselineStatus::kOk && usage.second.runtime_identities == 0);
     assert(usage.second.model_identities == 0 && usage.second.routed_states == 0);
-    assert(control->ReleaseIdentity("", BaselineStateReleaseScopeV1::kRuntimeOnly) == BaselineStatus::kInvalidArgument);
-    assert(control->ReleaseIdentity("missing", static_cast<BaselineStateReleaseScopeV1>(99)) ==
+    assert(control->ReleaseIdentity("", BaselineStateReleaseScope::kRuntimeOnly) == BaselineStatus::kInvalidArgument);
+    assert(control->ReleaseIdentity("missing", static_cast<BaselineStateReleaseScope>(99)) ==
            BaselineStatus::kInvalidArgument);
-    assert(control->ReleaseIdentity("missing", BaselineStateReleaseScopeV1::kAllState) == BaselineStatus::kOk);
+    assert(control->ReleaseIdentity("missing", BaselineStateReleaseScope::kAllState) == BaselineStatus::kOk);
     auto used = env.service->CreateValueTask(OtherValueTaskConfig(), BaselineSerializationFormat::kJson);
     assert(used.first == BaselineStatus::kOk);
-    assert(used.second->SubmitObservation({"", 1, 1.0, 1}, {}).status == BaselineStatus::kInvalidArgument);
+    assert(used.second->SubmitObservation({"", 1, 1.0, 1}, {}).result.status == BaselineStatus::kInvalidArgument);
     assert(management->Bind(used.second, limits).first == BaselineStatus::kInvalidArgument);
     assert(value->Close() == BaselineStatus::kOk);
     assert(control->QueryUsage().first == BaselineStatus::kInvalidArgument);
-    assert(control->ReleaseIdentity("missing", BaselineStateReleaseScopeV1::kRuntimeOnly) ==
+    assert(control->ReleaseIdentity("missing", BaselineStateReleaseScope::kRuntimeOnly) ==
            BaselineStatus::kInvalidArgument);
     std::printf("[PASS] optional state control binding contract\n");
 }
@@ -531,11 +531,11 @@ RelationRollingObservation BuildMismatchedRelationMetricOrderObservation() {
 }
 
 template <typename Task, typename MakeHistory, typename MakeObservation>
-void CheckManagedTaskLifecycle(Task* task, IBaselineTaskStateControlV1* control, MakeHistory make_history,
+void CheckManagedTaskLifecycle(Task* task, IBaselineTaskStateControl* control, MakeHistory make_history,
                                MakeObservation make_observation, int64_t train_end) {
     const auto json = BaselineSerializationFormat::kJson;
-    const auto runtime = BaselineStateReleaseScopeV1::kRuntimeOnly;
-    const auto all = BaselineStateReleaseScopeV1::kAllState;
+    const auto runtime = BaselineStateReleaseScope::kRuntimeOnly;
+    const auto all = BaselineStateReleaseScope::kAllState;
     auto usage = [&](uint64_t online, uint64_t models) {
         auto current = control->QueryUsage();
         assert(current.first == BaselineStatus::kOk);
@@ -545,13 +545,14 @@ void CheckManagedTaskLifecycle(Task* task, IBaselineTaskStateControlV1* control,
     usage(1, 1);
     const auto artifact_a = task->ExportBootstrapArtifact(json);
     assert(artifact_a.first == BaselineStatus::kOk);
-    assert(task->SubmitObservation(make_observation("a", 250), {}).status == BaselineStatus::kOk);
+    assert(task->SubmitObservation(make_observation("a", 250), {}).result.status == BaselineStatus::kOk);
     assert(control->ReleaseIdentity("a", runtime) == BaselineStatus::kOk);
     assert(control->ReleaseIdentity("a", runtime) == BaselineStatus::kOk);
     usage(0, 1);
     assert(task->QuerySeriesSnapshot("a", json).first == BaselineStatus::kNotTrained);
     assert(task->ExportBootstrapArtifact(json) == artifact_a);
-    assert(task->SubmitObservation(make_observation("a", train_end), {}).status == BaselineStatus::kInvalidArgument);
+    assert(task->SubmitObservation(make_observation("a", train_end), {}).result.status ==
+           BaselineStatus::kInvalidArgument);
     usage(0, 1);
     auto invalid = make_observation("a", train_end + 1);
     using Observation = decltype(invalid);
@@ -562,7 +563,7 @@ void CheckManagedTaskLifecycle(Task* task, IBaselineTaskStateControlV1* control,
     } else {
         invalid.numerator = std::numeric_limits<double>::quiet_NaN();
     }
-    assert(task->SubmitObservation(invalid, {}).status == BaselineStatus::kInvalidArgument);
+    assert(task->SubmitObservation(invalid, {}).result.status == BaselineStatus::kInvalidArgument);
     usage(0, 1);
     assert(task->QuerySeriesSnapshot("a", json).first == BaselineStatus::kNotTrained);
     if constexpr (!std::is_same_v<Task, IBaselineRelationTask>) {
@@ -583,7 +584,7 @@ void CheckManagedTaskLifecycle(Task* task, IBaselineTaskStateControlV1* control,
     assert(task->Bootstrap(make_history("c")).status == BaselineStatus::kInvalidArgument);
     assert(task->LoadBootstrapArtifact(artifact_ab.second, json) == BaselineStatus::kInvalidArgument);
     assert(task->LoadBootstrapArtifact("{", json) != BaselineStatus::kOk);
-    assert(task->SubmitObservation(make_observation("c", 250), {}).status == BaselineStatus::kInvalidArgument);
+    assert(task->SubmitObservation(make_observation("c", 250), {}).result.status == BaselineStatus::kInvalidArgument);
     usage(1, 2);
     assert(task->ExportBootstrapArtifact(json) == artifact_ab && task->ExportBootstrapSeed(json) == seed_ab);
     assert(task->QueryTaskSnapshot(json) == before && task->QuerySeriesSnapshot("b", json) == b_before);
@@ -594,38 +595,38 @@ void CheckManagedTaskLifecycle(Task* task, IBaselineTaskStateControlV1* control,
     usage(0, 2);
     assert(task->ExportBootstrapArtifact(json) == artifact_ab && task->ExportBootstrapSeed(json) == seed_ab);
     // Known identities continue at capacity; releasing the other parent keeps this source unchanged.
-    assert(task->SubmitObservation(make_observation("b", 250), {}).status == BaselineStatus::kOk);
+    assert(task->SubmitObservation(make_observation("b", 250), {}).result.status == BaselineStatus::kOk);
     const auto b_after = task->QuerySeriesSnapshot("b", json);
     assert(control->ReleaseIdentity("a", runtime) == BaselineStatus::kOk);
     assert(task->QuerySeriesSnapshot("b", json) == b_after);
     assert(control->ReleaseIdentity("b", all) == BaselineStatus::kOk);
     usage(0, 1);
     // The same previously consumed online bucket starts a new lifecycle after RuntimeOnly.
-    assert(task->SubmitObservation(make_observation("a", 250), {}).status == BaselineStatus::kOk);
+    assert(task->SubmitObservation(make_observation("a", 250), {}).result.status == BaselineStatus::kOk);
     usage(1, 1);
-    assert(task->SubmitObservation(make_observation("a", 250), {}).status == BaselineStatus::kInvalidArgument);
+    assert(task->SubmitObservation(make_observation("a", 250), {}).result.status == BaselineStatus::kInvalidArgument);
     assert(control->ReleaseIdentity("a", all) == BaselineStatus::kOk);
     usage(0, 0);
     assert(task->ExportBootstrapArtifact(json).first == BaselineStatus::kNotTrained);
     if constexpr (!std::is_same_v<Task, IBaselineRelationTask>) {
         assert(task->PredictBootstrap("a", 250, {}).status == BaselineStatus::kNotTrained);
     }
-    assert(task->SubmitObservation(make_observation("a", 1), {}).status == BaselineStatus::kOk);
+    assert(task->SubmitObservation(make_observation("a", 1), {}).result.status == BaselineStatus::kOk);
     usage(1, 0);
-    assert(task->SubmitObservation(make_observation("b", 1), {}).status == BaselineStatus::kInvalidArgument);
+    assert(task->SubmitObservation(make_observation("b", 1), {}).result.status == BaselineStatus::kInvalidArgument);
     // A successful import replaces runtime and indexes rather than merging old identities.
     assert(task->LoadBootstrapArtifact(artifact_a.second, json) == BaselineStatus::kOk);
     usage(1, 1);
     assert(control->ReleaseIdentity("a", all) == BaselineStatus::kOk);
-    assert(task->SubmitObservation(make_observation("b", 1), {}).status == BaselineStatus::kOk);
+    assert(task->SubmitObservation(make_observation("b", 1), {}).result.status == BaselineStatus::kOk);
     usage(1, 0);
 }
 
 void TestManagedStateLifecycleAndCapacity() {
     auto env = LoadBaselineService();
     auto* management =
-        static_cast<IBaselineStateControlServiceV1*>(env.loader->First(IID_BASELINE_STATE_CONTROL_SERVICE_V1));
-    const BaselineStateLimitsV1 limits{1, 2, 2};
+        static_cast<IBaselineStateControlService*>(env.loader->First(IID_BASELINE_STATE_CONTROL_SERVICE));
+    const BaselineStateLimits limits{1, 2, 2};
     auto value = env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson).second;
     auto ratio = env.service->CreateRatioTask(RatioTaskConfig(), BaselineSerializationFormat::kJson).second;
     auto relation = env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson).second;
@@ -659,17 +660,19 @@ void TestManagedStateLifecycleAndCapacity() {
             return obs;
         },
         9);
-    const auto restored = relation->SubmitObservation(
-        [] {
-            auto obs = BuildRelationObservation(2, 60, 30, 10);
-            obs.series_key = "b";
-            return obs;
-        }(),
-        {});
+    const auto restored = relation
+                              ->SubmitObservation(
+                                  [] {
+                                      auto obs = BuildRelationObservation(2, 60, 30, 10);
+                                      obs.series_key = "b";
+                                      return obs;
+                                  }(),
+                                  {})
+                              .result;
     assert(restored.status == BaselineStatus::kOk && !restored.routed_results.empty());
     assert(relcontrol->ReleaseIdentity(restored.routed_results.front().routed_series_key,
-                                       BaselineStateReleaseScopeV1::kAllState) == BaselineStatus::kInvalidArgument);
-    assert(relcontrol->ReleaseIdentity("b", BaselineStateReleaseScopeV1::kAllState) == BaselineStatus::kOk);
+                                       BaselineStateReleaseScope::kAllState) == BaselineStatus::kInvalidArgument);
+    assert(relcontrol->ReleaseIdentity("b", BaselineStateReleaseScope::kAllState) == BaselineStatus::kOk);
     const auto empty = relcontrol->QueryUsage().second;
     assert(empty.runtime_identities == 0 && empty.model_identities == 0 && empty.routed_states == 0 &&
            empty.retained_basis_versions == 0);
@@ -694,13 +697,13 @@ void TestManagedRelationVersionRetirement() {
 )";
     auto env = LoadBaselineService("config_file=" + path + ";strict=false");
     auto* management =
-        static_cast<IBaselineStateControlServiceV1*>(env.loader->First(IID_BASELINE_STATE_CONTROL_SERVICE_V1));
+        static_cast<IBaselineStateControlService*>(env.loader->First(IID_BASELINE_STATE_CONTROL_SERVICE));
     auto task = env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson).second;
     auto control = management->Bind(task, {2, 2, 2}).second;
     assert(control);
     auto other = BuildRelationObservation(1, 60, 30, 10);
     other.series_key = "other::source";
-    assert(task->SubmitObservation(other, {}).status == BaselineStatus::kOk);
+    assert(task->SubmitObservation(other, {}).result.status == BaselineStatus::kOk);
     const auto other_before = task->QuerySeriesSnapshot(other.series_key, BaselineSerializationFormat::kJson);
     std::map<uint64_t, RelationRoutedSummaryQuery> versions;
     int64_t bucket = 100;
@@ -709,7 +712,7 @@ void TestManagedRelationVersionRetirement() {
             auto obs = BuildRelationObservation(bucket++, 80 * std::pow(20., phase), 20 * std::pow(20., phase), 0);
             obs.series_key = "changing::source";
             obs.group_idx = {1 + phase * 3, 2 + phase * 3, 3 + phase * 3};
-            const auto result = task->SubmitObservation(obs, {});
+            const auto result = task->SubmitObservation(obs, {}).result;
             assert(result.status == BaselineStatus::kOk);
             for (const auto& child : result.routed_results) {
                 if (child.summary == "out_of_support_share")
@@ -743,7 +746,7 @@ void TestManagedRelationVersionRetirement() {
     assert(retained > 0 && retained <= 2);
     assert(task->PredictRoutedSummary(versions.begin()->second, bucket + 1).status == BaselineStatus::kNotTrained);
     assert(task->QuerySeriesSnapshot(other.series_key, BaselineSerializationFormat::kJson) == other_before);
-    assert(control->ReleaseIdentity("changing::source", BaselineStateReleaseScopeV1::kAllState) == BaselineStatus::kOk);
+    assert(control->ReleaseIdentity("changing::source", BaselineStateReleaseScope::kAllState) == BaselineStatus::kOk);
     assert(control->QueryUsage().second.runtime_identities == 1);
     assert(task->QuerySeriesSnapshot(other.series_key, BaselineSerializationFormat::kJson) == other_before);
     assert(task->Close() == BaselineStatus::kOk);
@@ -758,7 +761,7 @@ void TestManagedRelationVersionRetirement() {
             auto obs = BuildRelationObservation(bucket++, 80 * std::pow(20., phase), 20 * std::pow(20., phase), 0);
             obs.series_key = "changing::source";
             obs.group_idx = {1 + phase * 3, 2 + phase * 3, 3 + phase * 3};
-            const auto result = task->SubmitObservation(obs, {});
+            const auto result = task->SubmitObservation(obs, {}).result;
             assert(result.status == BaselineStatus::kOk);
             for (const auto& child : result.routed_results) {
                 if (child.summary == "out_of_support_share")
@@ -779,7 +782,7 @@ void TestManagedRelationVersionRetirement() {
 void TestManagedRelationImportVersionLimit() {
     auto env = LoadBaselineService();
     auto* management =
-        static_cast<IBaselineStateControlServiceV1*>(env.loader->First(IID_BASELINE_STATE_CONTROL_SERVICE_V1));
+        static_cast<IBaselineStateControlService*>(env.loader->First(IID_BASELINE_STATE_CONTROL_SERVICE));
     auto task = env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson).second;
     auto control = management->Bind(task, {2, 1, 2}).second;
     assert(control && task->Bootstrap(BuildRelationHistory()).status == BaselineStatus::kOk);
@@ -1081,7 +1084,7 @@ void TestB4RelationSubmitObservation() {
 
     RelationRollingSubmitOptions options;
     RelationRollingResult cold_result =
-        relation_task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options);
+        relation_task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options).result;
     assert(cold_result.status == BaselineStatus::kOk);
     assert(cold_result.series_key == "svc-a");
     assert(cold_result.bucket_id == 100);
@@ -1162,7 +1165,7 @@ void TestB4RelationSubmitObservation() {
     RelationRollingSubmitOptions mismatch_options;
     mismatch_options.include_diagnostics = true;
     RelationRollingResult mismatch_result =
-        multi_task->SubmitObservation(BuildMismatchedRelationMetricOrderObservation(), mismatch_options);
+        multi_task->SubmitObservation(BuildMismatchedRelationMetricOrderObservation(), mismatch_options).result;
     assert(mismatch_result.status == BaselineStatus::kInvalidArgument);
     assert(mismatch_result.routed_results.empty());
 
@@ -1177,7 +1180,7 @@ void TestB4RelationSubmitObservation() {
     assert(seeded_task != nullptr);
     assert(seeded_task->Bootstrap(BuildRelationHistory()).status == BaselineStatus::kOk);
     RelationRollingResult seeded_result =
-        seeded_task->SubmitObservation(BuildRelationObservation(20, 50, 25, 25), options);
+        seeded_task->SubmitObservation(BuildRelationObservation(20, 50, 25, 25), options).result;
     assert(seeded_result.status == BaselineStatus::kOk);
 
     bool has_out_of_support = false;
@@ -1227,10 +1230,10 @@ baseline:
         const auto before = relation_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
         auto invalid = BuildRelationObservation(100, 60, 30, 10);
         invalid.metrics[0].values_by_group[1] = -1.0;
-        assert(relation_task->SubmitObservation(invalid, options).status == BaselineStatus::kInvalidArgument);
+        assert(relation_task->SubmitObservation(invalid, options).result.status == BaselineStatus::kInvalidArgument);
         assert(relation_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson) == before);
         RelationRollingResult result =
-            relation_task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options);
+            relation_task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options).result;
         assert(result.status == BaselineStatus::kOk);
         assert(result.routed_results.empty());
         assert(result.basis_version == 1);
@@ -1267,10 +1270,10 @@ baseline:
         const auto before = task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
         auto obs = BuildRelationObservation(100, 60, 30, 10);
         obs.metrics[0].values_by_group[1] = -1.0;
-        assert(task->SubmitObservation(obs, options).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, options).result.status == BaselineStatus::kInvalidArgument);
         assert(task->QueryTaskSnapshot(BaselineSerializationFormat::kJson) == before);
         obs.metrics[0].values_by_group[1] = 30.0;
-        assert(task->SubmitObservation(obs, options).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, options).result.status == BaselineStatus::kOk);
     }
     flowsql::baseline::ResetBaselineRuntimeConfig();
     {
@@ -1295,7 +1298,7 @@ baseline:
 
         RelationRollingSubmitOptions options;
         RelationRollingResult result =
-            relation_task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options);
+            relation_task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options).result;
         assert(result.status == BaselineStatus::kOk);
         assert(!result.routed_results.empty());
 
@@ -1335,7 +1338,7 @@ baseline:
 
         RelationRollingSubmitOptions options;
         RelationRollingResult result =
-            relation_task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options);
+            relation_task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options).result;
         assert(result.status == BaselineStatus::kOk);
         assert(result.routed_results.empty());
 
@@ -1364,7 +1367,7 @@ void TestB5RelationFusionSubmitAndSnapshot() {
         options.include_routed_results = false;
         options.include_fusion_result = true;
         RelationRollingResult result =
-            relation_task->SubmitObservation(BuildRelationObservation(20, 5, 5, 90), options);
+            relation_task->SubmitObservation(BuildRelationObservation(20, 5, 5, 90), options).result;
         assert(result.status == BaselineStatus::kOk);
         assert(result.routed_results.empty());
         assert(result.has_fusion_result);
@@ -1392,7 +1395,8 @@ void TestB5RelationFusionSubmitAndSnapshot() {
         missing_metric_obs.series_key = "svc-a";
         missing_metric_obs.bucket_id = 21;
         missing_metric_obs.group_idx = {1, 2, 3};
-        RelationRollingResult missing_metric_result = relation_task->SubmitObservation(missing_metric_obs, options);
+        RelationRollingResult missing_metric_result =
+            relation_task->SubmitObservation(missing_metric_obs, options).result;
         assert(!missing_metric_result.has_fusion_result);
         auto [missing_metric_status, missing_metric_snapshot] =
             relation_task->QuerySeriesSnapshot("svc-a", BaselineSerializationFormat::kJson);
@@ -1464,7 +1468,7 @@ baseline:
         RelationRollingSubmitOptions disabled_options;
         disabled_options.include_fusion_result = true;
         RelationRollingResult disabled_result =
-            disabled_task->SubmitObservation(BuildRelationObservation(20, 5, 5, 90), disabled_options);
+            disabled_task->SubmitObservation(BuildRelationObservation(20, 5, 5, 90), disabled_options).result;
         assert(disabled_result.status == BaselineStatus::kOk);
         assert(!disabled_result.has_fusion_result);
         auto [disabled_snapshot_status, disabled_snapshot] =
@@ -1514,12 +1518,12 @@ baseline:
 
     RelationRollingObservation old_a = BuildRelationObservation(10, 5, 5, 90);
     old_a.series_key = "svc-old-a";
-    RelationRollingResult old_a_result = relation_task->SubmitObservation(old_a, options);
+    RelationRollingResult old_a_result = relation_task->SubmitObservation(old_a, options).result;
     assert(old_a_result.status == BaselineStatus::kOk);
 
     RelationRollingObservation old_b = BuildRelationObservation(11, 5, 5, 90);
     old_b.series_key = "svc-old-b";
-    RelationRollingResult old_b_result = relation_task->SubmitObservation(old_b, options);
+    RelationRollingResult old_b_result = relation_task->SubmitObservation(old_b, options).result;
     assert(old_b_result.status == BaselineStatus::kOk);
 
     auto [before_status, before_snapshot] = relation_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
@@ -1531,7 +1535,7 @@ baseline:
 
     RelationRollingObservation current = BuildRelationObservation(100, 5, 5, 90);
     current.series_key = "svc-current";
-    RelationRollingResult current_result = relation_task->SubmitObservation(current, options);
+    RelationRollingResult current_result = relation_task->SubmitObservation(current, options).result;
     assert(current_result.status == BaselineStatus::kOk);
 
     auto [after_status, after_snapshot] = relation_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
@@ -1596,15 +1600,15 @@ baseline:
 
     RelationRollingObservation first = BuildRelationObservation(10, 5, 5, 90);
     first.series_key = "svc-capacity-a";
-    assert(relation_task->SubmitObservation(first, options).status == BaselineStatus::kOk);
+    assert(relation_task->SubmitObservation(first, options).result.status == BaselineStatus::kOk);
 
     RelationRollingObservation second = BuildRelationObservation(11, 5, 5, 90);
     second.series_key = "svc-capacity-b";
-    assert(relation_task->SubmitObservation(second, options).status == BaselineStatus::kOk);
+    assert(relation_task->SubmitObservation(second, options).result.status == BaselineStatus::kOk);
 
     RelationRollingObservation third = BuildRelationObservation(12, 5, 5, 90);
     third.series_key = "svc-capacity-c";
-    assert(relation_task->SubmitObservation(third, options).status == BaselineStatus::kOk);
+    assert(relation_task->SubmitObservation(third, options).result.status == BaselineStatus::kOk);
 
     auto [snapshot_status, snapshot_json] = relation_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
     assert(snapshot_status == BaselineStatus::kOk);
@@ -1768,13 +1772,13 @@ void TestReviewSnapshotTracksLastSubmit() {
         auto [status, task] = env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         ValueRollingObservation obs{"snapshot-value", 100, 100, 1};
-        auto result = task->SubmitObservation(obs, {});
+        auto result = task->SubmitObservation(obs, {}).result;
         assert(!result.can_score && result.can_update);
         AssertSnapshotMatchesSubmit(task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson),
                                     result);
         obs.bucket_id = 101;
         obs.value = 110;
-        result = task->SubmitObservation(obs, {});
+        result = task->SubmitObservation(obs, {}).result;
         assert(result.can_score && result.can_update && !result.can_alert);
         AssertSnapshotMatchesSubmit(task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson),
                                     result);
@@ -1784,22 +1788,22 @@ void TestReviewSnapshotTracksLastSubmit() {
             (std::log1p(predicted.baseline_upper) - std::log1p(predicted.baseline_mu)) / predicted.band_z;
         obs.bucket_id = 102;
         obs.value = std::expm1(std::log1p(predicted.baseline_mu) + 4.0 * model_std);
-        result = task->SubmitObservation(obs, {});
+        result = task->SubmitObservation(obs, {}).result;
         assert(result.can_update && result.update_weight > 0 && result.update_weight < 1);
         AssertSnapshotMatchesSubmit(task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson),
                                     result);
         obs.bucket_id = 103;
         obs.value = 1e100;
-        result = task->SubmitObservation(obs, {});
+        result = task->SubmitObservation(obs, {}).result;
         assert(result.can_score && !result.can_update);
         const auto snapshot = task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson);
         AssertSnapshotMatchesSubmit(snapshot, result);
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kInvalidArgument);
         obs.bucket_id = 102;
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kInvalidArgument);
         obs.bucket_id = 104;
         obs.value = -1;
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kInvalidArgument);
         assert(task->PredictRolling(obs.series_key, 104).status == BaselineStatus::kOk);
         assert(task->PredictRolling(obs.series_key, 104, 4).status == BaselineStatus::kOk);
         assert(task->LoadBootstrapArtifact("{}", BaselineSerializationFormat::kJson) != BaselineStatus::kOk);
@@ -1812,14 +1816,14 @@ void TestReviewSnapshotTracksLastSubmit() {
         AssertSnapshotWithoutSubmit(seeded);
         const auto artifact = task->ExportBootstrapArtifact(BaselineSerializationFormat::kJson);
         assert(artifact.first == BaselineStatus::kOk);
-        result = task->SubmitObservation({history.series_key, 200, 100, 1}, {});
+        result = task->SubmitObservation({history.series_key, 200, 100, 1}, {}).result;
         AssertSnapshotMatchesSubmit(task->QuerySeriesSnapshot(history.series_key, BaselineSerializationFormat::kJson),
                                     result);
         history.options.force_replace_existing_artifact = true;
         assert(task->Bootstrap(history).status == BaselineStatus::kOk);
         assert(task->QuerySeriesSnapshot(history.series_key, BaselineSerializationFormat::kJson) == seeded);
         assert(task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson) == snapshot);
-        result = task->SubmitObservation({history.series_key, 200, 100, 1}, {});
+        result = task->SubmitObservation({history.series_key, 200, 100, 1}, {}).result;
         const auto submitted = task->QuerySeriesSnapshot(history.series_key, BaselineSerializationFormat::kJson);
         AssertSnapshotMatchesSubmit(submitted, result);
         auto empty_history = history;
@@ -1836,11 +1840,11 @@ void TestReviewSnapshotTracksLastSubmit() {
             env.service->CreateValueTask(SampledValueTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         ValueRollingObservation obs{"snapshot-sampled", 100, 100, 20};
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kOk);
         for (uint64_t count : {2, 5, 20}) {
             ++obs.bucket_id;
             obs.sample_count = count;
-            const auto result = task->SubmitObservation(obs, {});
+            const auto result = task->SubmitObservation(obs, {}).result;
             assert(result.can_score == (count >= 3) && result.can_update == (count >= 3));
             assert(result.update_weight == (count == 2 ? 0.0 : count == 5 ? 0.5 : 1.0));
             AssertSnapshotMatchesSubmit(task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson),
@@ -1851,14 +1855,14 @@ void TestReviewSnapshotTracksLastSubmit() {
         auto [status, task] = env.service->CreateRatioTask(RatioTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         RatioRollingObservation obs{"snapshot-ratio", 100, 50, 100};
-        const auto first = task->SubmitObservation(obs, {});
+        const auto first = task->SubmitObservation(obs, {}).result;
         AssertSnapshotMatchesSubmit(task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson),
                                     first);
         for (double denominator : {5, 50, 100}) {
             ++obs.bucket_id;
             obs.denominator = denominator;
             obs.numerator = denominator / 2;
-            const auto result = task->SubmitObservation(obs, {});
+            const auto result = task->SubmitObservation(obs, {}).result;
             assert(result.can_score == (denominator >= 10) && result.can_update == (denominator >= 10));
             assert(result.update_weight == (denominator == 5 ? 0.0 : denominator == 50 ? 0.5 : 1.0));
             AssertSnapshotMatchesSubmit(task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson),
@@ -1872,7 +1876,7 @@ void TestReviewSnapshotTracksLastSubmit() {
         auto [status, task] = env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         for (int64_t bucket : {100, 101}) {
-            const auto result = task->SubmitObservation(BuildRelationObservation(bucket, 60, 30, 10), {});
+            const auto result = task->SubmitObservation(BuildRelationObservation(bucket, 60, 30, 10), {}).result;
             assert(result.status == BaselineStatus::kOk && result.routed_results.size() == 4);
             for (const auto& child : result.routed_results) {
                 RelationRoutedSummaryQuery query{child.source_series_key, child.metric, child.summary,
@@ -1905,14 +1909,14 @@ void TestReviewSnapshotUsesDetectionConfiguration() {
             assert(status == BaselineStatus::kOk);
             ValueRollingObservation obs{"snapshot-config", 100, 100, 1};
             for (; obs.bucket_id < 116; ++obs.bucket_id) {
-                const auto result = task->SubmitObservation(obs, {});
+                const auto result = task->SubmitObservation(obs, {}).result;
                 AssertSnapshotMatchesSubmit(
                     task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson), result);
                 assert(std::fabs((result.model_upper - result.model_mu) - z * result.band_std) < 1e-12);
                 if (obs.bucket_id == 101 && cap == 0.1) assert(result.band_std == cap);
             }
             obs.value = 1e100;
-            const auto result = task->SubmitObservation(obs, {});
+            const auto result = task->SubmitObservation(obs, {}).result;
             assert(result.can_score && !result.can_update && result.can_alert);
             assert(result.maturity_status == "level_ready" || result.maturity_status == "daily_warming");
             const auto snapshot = task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson);
@@ -2056,10 +2060,11 @@ void TestReviewRollingConsumesEventHint() {
                         alignment.c_str(), effect, event_submit.residual);
         };
         verify(value, false, [&](double observed) {
-            return value->SubmitObservation(ValueRollingObservation{"svc-event", 220, observed, 1}, {});
+            return value->SubmitObservation(ValueRollingObservation{"svc-event", 220, observed, 1}, {}).result;
         });
         verify(ratio, true, [&](double observed) {
-            return ratio->SubmitObservation(RatioRollingObservation{"svc-event", 220, observed * 1000.0, 1000.0}, {});
+            return ratio->SubmitObservation(RatioRollingObservation{"svc-event", 220, observed * 1000.0, 1000.0}, {})
+                .result;
         });
         auto [relation_status, relation] =
             env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
@@ -2079,7 +2084,7 @@ void TestReviewRollingConsumesEventHint() {
         const auto relation_seed = relation->ExportBootstrapSeed(BaselineSerializationFormat::kJson);
         // Relation creates routed rolling states lazily on the first online submission.
         const auto warmup = BuildRelationObservation(200, 60.6, 35.35, 5.05);
-        assert(relation->SubmitObservation(warmup, {}).status == BaselineStatus::kOk);
+        assert(relation->SubmitObservation(warmup, {}).result.status == BaselineStatus::kOk);
         rapidjson::Document relation_seed_doc;
         relation_seed_doc.Parse(relation_seed.second.c_str());
         struct RoutedCheck {
@@ -2117,7 +2122,7 @@ void TestReviewRollingConsumesEventHint() {
         plain_relation.Accept(relation_writer);
         assert(relation->LoadBootstrapArtifact(relation_buffer.GetString(), BaselineSerializationFormat::kJson) ==
                BaselineStatus::kOk);
-        assert(relation->SubmitObservation(warmup, {}).status == BaselineStatus::kOk);
+        assert(relation->SubmitObservation(warmup, {}).result.status == BaselineStatus::kOk);
         for (const auto& check : checks) {
             const auto plain = relation->PredictRoutedSummary(check.query, 220);
             const auto model = [&](double observed) {
@@ -2127,12 +2132,12 @@ void TestReviewRollingConsumesEventHint() {
             assert(std::fabs(model(check.prediction.baseline_mu) - model(plain.baseline_mu) - check.effect) < 1e-8);
         }
         const auto obs = BuildRelationObservation(220, 425.0, 50.0, 25.0);
-        const auto plain_result = relation->SubmitObservation(obs, {});
+        const auto plain_result = relation->SubmitObservation(obs, {}).result;
         assert(plain_result.status == BaselineStatus::kOk);
         assert(relation->LoadBootstrapArtifact(relation_artifact.second, BaselineSerializationFormat::kJson) ==
                BaselineStatus::kOk);
-        assert(relation->SubmitObservation(warmup, {}).status == BaselineStatus::kOk);
-        const auto event_result = relation->SubmitObservation(obs, {});
+        assert(relation->SubmitObservation(warmup, {}).result.status == BaselineStatus::kOk);
+        const auto event_result = relation->SubmitObservation(obs, {}).result;
         assert(event_result.status == BaselineStatus::kOk);
         for (const auto& check : checks) {
             const RollingBaselineResult* plain = nullptr;
@@ -2412,7 +2417,7 @@ void TestB2ValueRollingEmptyStart() {
     first.series_key = "link-a";
     first.bucket_id = 100;
     first.value = 99.0;
-    RollingBaselineResult first_result = task->SubmitObservation(first, RollingSubmitOptions{});
+    RollingBaselineResult first_result = task->SubmitObservation(first, RollingSubmitOptions{}).result;
     assert(first_result.status == BaselineStatus::kOk);
     assert(first_result.series_key == "link-a");
     assert(first_result.bucket_id == 100);
@@ -2434,7 +2439,7 @@ void TestB2ValueRollingEmptyStart() {
     ValueRollingObservation second = first;
     second.bucket_id = 101;
     second.value = 110.0;
-    RollingBaselineResult second_result = task->SubmitObservation(second, RollingSubmitOptions{});
+    RollingBaselineResult second_result = task->SubmitObservation(second, RollingSubmitOptions{}).result;
     assert(second_result.status == BaselineStatus::kOk);
     assert(second_result.can_score);
     assert(second_result.can_update);
@@ -2461,14 +2466,14 @@ void TestB2SampledValueLowSupportStart() {
     low.bucket_id = 100;
     low.value = 10.0;
     low.sample_count = 2;
-    RollingBaselineResult low_result = task->SubmitObservation(low, RollingSubmitOptions{});
+    RollingBaselineResult low_result = task->SubmitObservation(low, RollingSubmitOptions{}).result;
     assert(low_result.status == BaselineStatus::kInsufficientData);
     assert(low_result.skipped_low_sample_count);
 
     ValueRollingObservation ok = low;
     ok.bucket_id = 101;
     ok.sample_count = 20;
-    RollingBaselineResult ok_result = task->SubmitObservation(ok, RollingSubmitOptions{});
+    RollingBaselineResult ok_result = task->SubmitObservation(ok, RollingSubmitOptions{}).result;
     assert(ok_result.status == BaselineStatus::kOk);
     assert(ok_result.can_update);
     assert(ok_result.state_status == "cold_learning");
@@ -2489,7 +2494,7 @@ void TestB2RatioRollingInputAndEmptyStart() {
     invalid.bucket_id = 100;
     invalid.numerator = 11.0;
     invalid.denominator = 10.0;
-    RollingBaselineResult invalid_result = task->SubmitObservation(invalid, RollingSubmitOptions{});
+    RollingBaselineResult invalid_result = task->SubmitObservation(invalid, RollingSubmitOptions{}).result;
     assert(invalid_result.status == BaselineStatus::kInvalidArgument);
 
     RatioRollingObservation first;
@@ -2497,7 +2502,7 @@ void TestB2RatioRollingInputAndEmptyStart() {
     first.bucket_id = 101;
     first.numerator = 95.0;
     first.denominator = 100.0;
-    RollingBaselineResult first_result = task->SubmitObservation(first, RollingSubmitOptions{});
+    RollingBaselineResult first_result = task->SubmitObservation(first, RollingSubmitOptions{}).result;
     assert(first_result.status == BaselineStatus::kOk);
     assert(!first_result.can_score);
     assert(first_result.can_update);
@@ -2560,7 +2565,7 @@ void TestB2RollingSnapshotAndBootstrapWarmup() {
     stream.series_key = "svc-a";
     stream.bucket_id = 200;
     stream.value = 105.0;
-    RollingBaselineResult result = task->SubmitObservation(stream, RollingSubmitOptions{});
+    RollingBaselineResult result = task->SubmitObservation(stream, RollingSubmitOptions{}).result;
     assert(result.status == BaselineStatus::kOk);
     assert(result.can_score);
     assert(result.state_status == "warming");
@@ -2588,7 +2593,7 @@ void TestB2RollingPredict() {
     first.series_key = "link-predict";
     first.bucket_id = 100;
     first.value = 100.0;
-    assert(task->SubmitObservation(first, RollingSubmitOptions{}).status == BaselineStatus::kOk);
+    assert(task->SubmitObservation(first, RollingSubmitOptions{}).result.status == BaselineStatus::kOk);
 
     RollingPrediction past = task->PredictRolling("link-predict", 99);
     assert(past.status == BaselineStatus::kInvalidArgument);
@@ -2618,7 +2623,7 @@ void TestB2RollingPredict() {
     ValueRollingObservation second = first;
     second.bucket_id = 101;
     second.value = 102.0;
-    RollingBaselineResult update = task->SubmitObservation(second, RollingSubmitOptions{});
+    RollingBaselineResult update = task->SubmitObservation(second, RollingSubmitOptions{}).result;
     assert(update.status == BaselineStatus::kOk);
     assert(update.can_score);
 
@@ -2632,7 +2637,7 @@ void TestB2RollingPredict() {
     ratio_first.bucket_id = 100;
     ratio_first.numerator = 80.0;
     ratio_first.denominator = 100.0;
-    assert(ratio_task->SubmitObservation(ratio_first, RollingSubmitOptions{}).status == BaselineStatus::kOk);
+    assert(ratio_task->SubmitObservation(ratio_first, RollingSubmitOptions{}).result.status == BaselineStatus::kOk);
 
     RollingPrediction ratio_prediction = ratio_task->PredictRolling("ratio-predict", 101);
     assert(ratio_prediction.status == BaselineStatus::kOk);
@@ -2664,7 +2669,7 @@ void TestB2RollingFailureSemantics() {
         RollingSubmitOptions options;
         options.allow_auto_init_from_bootstrap = false;
         options.allow_auto_init_from_empty = false;
-        RollingBaselineResult result = task->SubmitObservation(obs, options);
+        RollingBaselineResult result = task->SubmitObservation(obs, options).result;
         assert(result.status == BaselineStatus::kNotTrained);
     }
 
@@ -2676,8 +2681,8 @@ void TestB2RollingFailureSemantics() {
         obs.series_key = "link-dup";
         obs.bucket_id = 10;
         obs.value = 10.0;
-        assert(task->SubmitObservation(obs, RollingSubmitOptions{}).status == BaselineStatus::kOk);
-        assert(task->SubmitObservation(obs, RollingSubmitOptions{}).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, RollingSubmitOptions{}).result.status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, RollingSubmitOptions{}).result.status == BaselineStatus::kInvalidArgument);
     }
 
     {
@@ -2690,10 +2695,10 @@ void TestB2RollingFailureSemantics() {
         obs.bucket_id = 10;
         obs.value = 10.0;
         obs.sample_count = 20;
-        assert(task->SubmitObservation(obs, RollingSubmitOptions{}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, RollingSubmitOptions{}).result.status == BaselineStatus::kOk);
         obs.bucket_id = 11;
         obs.sample_count = 2;
-        RollingBaselineResult low = task->SubmitObservation(obs, RollingSubmitOptions{});
+        RollingBaselineResult low = task->SubmitObservation(obs, RollingSubmitOptions{}).result;
         assert(low.status == BaselineStatus::kOk);
         assert(low.skipped_low_sample_count);
         assert(!low.can_update);
@@ -2708,7 +2713,7 @@ void TestB2RollingFailureSemantics() {
         obs.bucket_id = 10;
         obs.numerator = 1.0;
         obs.denominator = 5.0;
-        RollingBaselineResult result = task->SubmitObservation(obs, RollingSubmitOptions{});
+        RollingBaselineResult result = task->SubmitObservation(obs, RollingSubmitOptions{}).result;
         assert(result.status == BaselineStatus::kInsufficientData);
         assert(result.skipped_low_denominator);
     }
@@ -2722,7 +2727,8 @@ void CheckReviewBootstrapRuntimeReplacement(Task* task, MakeHistory make_history
     assert(task->Bootstrap(make_history("seeded", trained, 0)).status == BaselineStatus::kOk);
     const auto seeded_initial = task->QuerySeriesSnapshot("seeded", BaselineSerializationFormat::kJson);
     for (const std::string series : {"seeded", "online", "target"}) {
-        assert(task->SubmitObservation(make_observation(series, 500, initial), {}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(make_observation(series, 500, initial), {}).result.status ==
+               BaselineStatus::kOk);
     }
     const auto seeded = task->QuerySeriesSnapshot("seeded", BaselineSerializationFormat::kJson);
     const auto online = task->QuerySeriesSnapshot("online", BaselineSerializationFormat::kJson);
@@ -2730,7 +2736,7 @@ void CheckReviewBootstrapRuntimeReplacement(Task* task, MakeHistory make_history
         assert(task->QuerySeriesSnapshot("seeded", BaselineSerializationFormat::kJson) == seeded);
         assert(task->QuerySeriesSnapshot("online", BaselineSerializationFormat::kJson) == online);
         for (const std::string series : {"seeded", "online"}) {
-            assert(task->SubmitObservation(make_observation(series, 500, initial), {}).status ==
+            assert(task->SubmitObservation(make_observation(series, 500, initial), {}).result.status ==
                    BaselineStatus::kInvalidArgument);
         }
     };
@@ -2773,14 +2779,15 @@ void CheckReviewBootstrapRuntimeReplacement(Task* task, MakeHistory make_history
     no_replace.options.force_replace_existing_artifact = false;
     check_rejected_operation([&]() { return task->Bootstrap(no_replace).status; });
     check_rejected_operation([&]() { return task->Bootstrap(make_history("target", -1.0, 200)).status; });
-    assert(task->SubmitObservation(make_observation("target", 200, trained), {}).status == BaselineStatus::kOk);
+    assert(task->SubmitObservation(make_observation("target", 200, trained), {}).result.status == BaselineStatus::kOk);
     assert(task->Bootstrap(make_history("target", retrained, 200)).status == BaselineStatus::kOk);
     check_target(399, retrained);
     check_other_series();
-    assert(task->SubmitObservation(make_observation("target", 399, retrained), {}).status ==
+    assert(task->SubmitObservation(make_observation("target", 399, retrained), {}).result.status ==
            BaselineStatus::kInvalidArgument);
-    assert(task->SubmitObservation(make_observation("target", 400, retrained), {}).status == BaselineStatus::kOk);
-    assert(task->SubmitObservation(make_observation("target", 400, retrained), {}).status ==
+    assert(task->SubmitObservation(make_observation("target", 400, retrained), {}).result.status ==
+           BaselineStatus::kOk);
+    assert(task->SubmitObservation(make_observation("target", 400, retrained), {}).result.status ==
            BaselineStatus::kInvalidArgument);
     check_rejected_operation([&]() { return task->LoadBootstrapArtifact("{", BaselineSerializationFormat::kJson); });
     std::string incompatible = saved_artifact.second;
@@ -2804,8 +2811,8 @@ void CheckReviewBootstrapRuntimeReplacement(Task* task, MakeHistory make_history
     assert(task->QuerySeriesSnapshot("seeded", BaselineSerializationFormat::kJson) == seeded_initial);
     assert(task->QuerySeriesSnapshot("online", BaselineSerializationFormat::kJson).first ==
            BaselineStatus::kNotTrained);
-    assert(task->SubmitObservation(make_observation("target", 200, trained), {}).status == BaselineStatus::kOk);
-    assert(task->SubmitObservation(make_observation("target", 200, trained), {}).status ==
+    assert(task->SubmitObservation(make_observation("target", 200, trained), {}).result.status == BaselineStatus::kOk);
+    assert(task->SubmitObservation(make_observation("target", 200, trained), {}).result.status ==
            BaselineStatus::kInvalidArgument);
 }
 
@@ -2876,14 +2883,14 @@ void TestReviewValueIdentityTransform() {
         const auto artifact = task->ExportBootstrapArtifact(BaselineSerializationFormat::kJson);
         assert(artifact.first == BaselineStatus::kOk);
         ValueRollingObservation obs{history.series_key, 200, 100.0, 50};
-        const auto rolling = task->SubmitObservation(obs, {});
+        const auto rolling = task->SubmitObservation(obs, {}).result;
         assert(rolling.status == BaselineStatus::kOk);
         assert(std::fabs(rolling.observed_model - 100.0) < 1.0e-9);
         assert(std::fabs(rolling.baseline_mu - 100.0) < 0.01);
         assert(std::fabs(rolling.z_score) < 0.01);
         assert(std::fabs(task->PredictRolling(history.series_key, 201).baseline_mu - 100.0) < 0.01);
         obs.series_key = "identity-cold";
-        assert(std::fabs(task->SubmitObservation(obs, {}).baseline_mu - 100.0) < 0.01);
+        assert(std::fabs(task->SubmitObservation(obs, {}).result.baseline_mu - 100.0) < 0.01);
         const auto cold_sequence = task->PredictRolling(obs.series_key, 201, 3);
         assert(cold_sequence.status == BaselineStatus::kOk);
         for (const auto& point : cold_sequence.predictions) assert(std::fabs(point.baseline_mu - 100.0) < 0.01);
@@ -2900,7 +2907,7 @@ void TestReviewValueIdentityTransform() {
         assert(reload->LoadBootstrapArtifact(artifact.second, BaselineSerializationFormat::kJson) ==
                BaselineStatus::kOk);
         obs.series_key = history.series_key;
-        const auto loaded = reload->SubmitObservation(obs, {});
+        const auto loaded = reload->SubmitObservation(obs, {}).result;
         assert(loaded.status == BaselineStatus::kOk);
         assert(std::fabs(loaded.observed_model - 100.0) < 1.0e-9);
         assert(std::fabs(loaded.z_score) < 0.01);
@@ -2937,14 +2944,14 @@ void TestReviewRatioConfiguredClip() {
         for (auto& point : history.observations) point.numerator = point.denominator;
         assert(task->Bootstrap(history).status == BaselineStatus::kOk);
         RatioRollingObservation obs{history.series_key, 200, 100.0, 100.0};
-        const auto rolling = task->SubmitObservation(obs, {});
+        const auto rolling = task->SubmitObservation(obs, {}).result;
         assert(rolling.status == BaselineStatus::kOk);
         assert(std::fabs(rolling.observed_model - std::log(9.0)) < 1.0e-9);
         assert(std::fabs(rolling.z_score) < 0.01);
         assert(std::fabs(rolling.baseline_mu - 0.9) < 0.001);
         obs.series_key = "ratio-cold";
         obs.numerator = 0.0;
-        const auto cold = task->SubmitObservation(obs, {});
+        const auto cold = task->SubmitObservation(obs, {}).result;
         assert(cold.status == BaselineStatus::kOk);
         assert(std::fabs(cold.observed_model + std::log(9.0)) < 1.0e-9);
     }
@@ -3035,7 +3042,7 @@ void TestReviewObservationValidation() {
         good.series_key = source;
         good.bucket_id = 100;
         if (source == "existing") {
-            assert(multi_task->SubmitObservation(good, {}).status == BaselineStatus::kOk);
+            assert(multi_task->SubmitObservation(good, {}).result.status == BaselineStatus::kOk);
             good.bucket_id = 101;
         }
         const auto before_task = multi_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
@@ -3044,13 +3051,13 @@ void TestReviewObservationValidation() {
             if (invalid_metric.metric == "bps") invalid_metric.metric = "pps";
             auto bad = good;
             bad.metrics[1] = invalid_metric;
-            const auto rejected = multi_task->SubmitObservation(bad, {});
+            const auto rejected = multi_task->SubmitObservation(bad, {}).result;
             assert(rejected.status == BaselineStatus::kInvalidArgument);
             assert(rejected.routed_results.empty());
             assert(multi_task->QueryTaskSnapshot(BaselineSerializationFormat::kJson) == before_task);
             assert(multi_task->QuerySeriesSnapshot(source, BaselineSerializationFormat::kJson) == before_source);
         }
-        assert(multi_task->SubmitObservation(good, {}).status == BaselineStatus::kOk);
+        assert(multi_task->SubmitObservation(good, {}).result.status == BaselineStatus::kOk);
     }
     std::printf("[PASS] review observation validation\n");
 }
@@ -3062,36 +3069,36 @@ void TestReviewObservationOrder() {
         auto [status, task] = env.service->CreateValueTask(ValueTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         ValueRollingObservation obs{"ordered-value", 100, 100.0, 1};
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kOk);
         obs.bucket_id = 103;
         obs.value = 1e100;
-        const auto skipped = task->SubmitObservation(obs, {});
+        const auto skipped = task->SubmitObservation(obs, {}).result;
         assert(skipped.status == BaselineStatus::kOk && !skipped.can_update);
         const auto snapshot = task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson);
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kInvalidArgument);
         obs.bucket_id = 102;
         obs.value = 100.0;
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kInvalidArgument);
         assert(task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson) == snapshot);
         obs.bucket_id = 104;
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kOk);
     }
     {
         auto [status, task] =
             env.service->CreateValueTask(SampledValueTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         ValueRollingObservation obs{"ordered-sampled", 100, 100.0, 20};
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kOk);
         const auto prediction = task->PredictRolling(obs.series_key, 104);
         obs.bucket_id = 103;
         obs.sample_count = 2;
-        const auto skipped = task->SubmitObservation(obs, {});
+        const auto skipped = task->SubmitObservation(obs, {}).result;
         assert(skipped.status == BaselineStatus::kOk && skipped.skipped_low_sample_count && !skipped.can_update);
         const auto snapshot = task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson);
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kInvalidArgument);
         obs.bucket_id = 102;
         obs.sample_count = 20;
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kInvalidArgument);
         assert(task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson) == snapshot);
         const auto after = task->PredictRolling(obs.series_key, 104);
         assert(prediction.status == BaselineStatus::kOk && after.status == BaselineStatus::kOk);
@@ -3099,48 +3106,48 @@ void TestReviewObservationOrder() {
         assert(prediction.baseline_lower == after.baseline_lower);
         assert(prediction.baseline_upper == after.baseline_upper);
         obs.bucket_id = 104;
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kOk);
     }
     {
         auto [status, task] = env.service->CreateRatioTask(RatioTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         RatioRollingObservation obs{"ordered-ratio", 100, 50.0, 100.0};
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kOk);
         obs.bucket_id = 103;
         obs.numerator = 1.0;
         obs.denominator = 5.0;
-        const auto skipped = task->SubmitObservation(obs, {});
+        const auto skipped = task->SubmitObservation(obs, {}).result;
         assert(skipped.status == BaselineStatus::kOk && skipped.skipped_low_denominator && !skipped.can_update);
         const auto snapshot = task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson);
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kInvalidArgument);
         obs.bucket_id = 102;
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kInvalidArgument);
         assert(task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson) == snapshot);
     }
     {
         auto [status, task] = env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
         assert(status == BaselineStatus::kOk);
         auto obs = BuildRelationObservation(100, 60, 30, 10);
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kOk);
         const auto source_snapshot = task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson);
         const auto task_snapshot = task->QueryTaskSnapshot(BaselineSerializationFormat::kJson);
-        const auto duplicate = task->SubmitObservation(obs, {});
+        const auto duplicate = task->SubmitObservation(obs, {}).result;
         assert(duplicate.status == BaselineStatus::kInvalidArgument);
         assert(duplicate.routed_results.empty() && !duplicate.has_fusion_result);
         obs.bucket_id = 99;
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kInvalidArgument);
         assert(task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson) == source_snapshot);
         assert(task->QueryTaskSnapshot(BaselineSerializationFormat::kJson) == task_snapshot);
         RelationRollingObservation missing;
         missing.series_key = obs.series_key;
         missing.bucket_id = 103;
-        (void)task->SubmitObservation(missing, {});
+        (void)task->SubmitObservation(missing, {}).result;
         const auto missing_snapshot = task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson);
         obs.bucket_id = 103;
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kInvalidArgument);
         assert(task->QuerySeriesSnapshot(obs.series_key, BaselineSerializationFormat::kJson) == missing_snapshot);
         obs.bucket_id = 104;
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kOk);
         assert(task->Close() == BaselineStatus::kOk);
     }
     {
@@ -3150,8 +3157,8 @@ void TestReviewObservationOrder() {
         for (auto& block : history.blocks) block.bucket_id -= 10;
         assert(task->Bootstrap(history).status == BaselineStatus::kOk);
         auto obs = BuildRelationObservation(0, 60, 30, 10);
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kOk);
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kInvalidArgument);
     }
     std::printf("[PASS] review observation order\n");
 }
@@ -3167,7 +3174,7 @@ void TestReviewRelationBootstrapIsolation() {
     for (const std::string source : {"online", "seeded", "target::child"}) {
         auto obs = BuildRelationObservation(100, 60, 30, 10);
         obs.series_key = source;
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kOk);
     }
     std::vector<BaselineSerializationResult> snapshots;
     for (const std::string source : {"online", "seeded", "target::child"})
@@ -3177,7 +3184,7 @@ void TestReviewRelationBootstrapIsolation() {
     assert(task->Bootstrap(target).status == BaselineStatus::kOk);
     auto target_obs = BuildRelationObservation(100, 20, 30, 50);
     target_obs.series_key = target.series_key;
-    assert(task->SubmitObservation(target_obs, {}).status == BaselineStatus::kOk);
+    assert(task->SubmitObservation(target_obs, {}).result.status == BaselineStatus::kOk);
     target.options.force_replace_existing_artifact = true;
     assert(task->Bootstrap(target).status == BaselineStatus::kOk);
     std::size_t i = 0;
@@ -3185,11 +3192,11 @@ void TestReviewRelationBootstrapIsolation() {
         assert(task->QuerySeriesSnapshot(source, BaselineSerializationFormat::kJson) == snapshots[i++]);
         auto obs = BuildRelationObservation(100, 60, 30, 10);
         obs.series_key = source;
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kInvalidArgument);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kInvalidArgument);
         obs.bucket_id = 101;
-        assert(task->SubmitObservation(obs, {}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(obs, {}).result.status == BaselineStatus::kOk);
     }
-    assert(task->SubmitObservation(target_obs, {}).status == BaselineStatus::kOk);
+    assert(task->SubmitObservation(target_obs, {}).result.status == BaselineStatus::kOk);
     std::printf("[PASS] review relation bootstrap isolation\n");
 }
 
@@ -3199,7 +3206,7 @@ void TestReviewRelationArtifactCompatibility() {
     auto [status, task] = env.service->CreateRelationTask(RelationTaskConfig(), BaselineSerializationFormat::kJson);
     assert(status == BaselineStatus::kOk);
     assert(task->Bootstrap(BuildRelationHistory()).status == BaselineStatus::kOk);
-    assert(task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), {}).status == BaselineStatus::kOk);
+    assert(task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), {}).result.status == BaselineStatus::kOk);
     const auto snapshot = task->QuerySeriesSnapshot("svc-a", BaselineSerializationFormat::kJson);
     const auto artifact = task->ExportBootstrapArtifact(BaselineSerializationFormat::kJson);
     const auto config = task->ExportConfig(BaselineSerializationFormat::kJson);
@@ -3262,12 +3269,12 @@ baseline:
     obs.series_key = "pre-update-link";
     obs.bucket_id = 100;
     obs.value = 100.0;
-    assert(task->SubmitObservation(obs, RollingSubmitOptions{}).status == BaselineStatus::kOk);
+    assert(task->SubmitObservation(obs, RollingSubmitOptions{}).result.status == BaselineStatus::kOk);
     obs.bucket_id = 101;
-    assert(task->SubmitObservation(obs, RollingSubmitOptions{}).status == BaselineStatus::kOk);
+    assert(task->SubmitObservation(obs, RollingSubmitOptions{}).result.status == BaselineStatus::kOk);
 
     obs.bucket_id = 102;
-    RollingBaselineResult boundary = task->SubmitObservation(obs, RollingSubmitOptions{});
+    RollingBaselineResult boundary = task->SubmitObservation(obs, RollingSubmitOptions{}).result;
     assert(boundary.status == BaselineStatus::kOk);
     assert(boundary.maturity_status == "cold_learning");
     assert(boundary.score_trust_status == "score_untrusted");
@@ -3331,7 +3338,7 @@ void TestB6SameTaskSerializedCrossThreadHandoff() {
         obs.series_key = "svc-a";
         obs.bucket_id = 220;
         obs.value = 110.0;
-        submit_result = task->SubmitObservation(obs, RollingSubmitOptions{});
+        submit_result = task->SubmitObservation(obs, RollingSubmitOptions{}).result;
     });
     submit_thread.join();
     assert(submit_result.status == BaselineStatus::kOk);
@@ -3375,7 +3382,7 @@ void TestB6RelationSerializedLifecycleSequence() {
     RelationRollingSubmitOptions options;
     RelationRollingResult cold_submit;
     std::thread cold_submit_thread(
-        [&]() { cold_submit = task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options); });
+        [&]() { cold_submit = task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options).result; });
     cold_submit_thread.join();
     assert(cold_submit.status == BaselineStatus::kOk);
     assert(cold_submit.series_key == "svc-a");
@@ -3400,7 +3407,7 @@ void TestB6RelationSerializedLifecycleSequence() {
 
     RelationRollingResult seeded_submit;
     std::thread seeded_submit_thread(
-        [&]() { seeded_submit = task->SubmitObservation(BuildRelationObservation(20, 50, 25, 25), options); });
+        [&]() { seeded_submit = task->SubmitObservation(BuildRelationObservation(20, 50, 25, 25), options).result; });
     seeded_submit_thread.join();
     assert(seeded_submit.status == BaselineStatus::kOk);
     bool has_basis_scoped_routed = false;
@@ -3427,7 +3434,7 @@ void TestB6RelationSerializedLifecycleSequence() {
 
     RelationRollingResult after_close;
     std::thread after_close_thread(
-        [&]() { after_close = task->SubmitObservation(BuildRelationObservation(21, 50, 25, 25), options); });
+        [&]() { after_close = task->SubmitObservation(BuildRelationObservation(21, 50, 25, 25), options).result; });
     after_close_thread.join();
     assert(after_close.status == BaselineStatus::kInvalidArgument);
 
@@ -3459,13 +3466,13 @@ void TestB6DifferentTasksMayRunInParallel() {
         obs.series_key = "parallel-value";
         obs.bucket_id = 100;
         obs.value = 100.0;
-        value_result = value_task->SubmitObservation(obs, RollingSubmitOptions{});
+        value_result = value_task->SubmitObservation(obs, RollingSubmitOptions{}).result;
     });
     std::thread relation_thread([&]() {
         ready.fetch_add(1, std::memory_order_release);
         while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
         RelationRollingSubmitOptions options;
-        relation_result = relation_task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options);
+        relation_result = relation_task->SubmitObservation(BuildRelationObservation(100, 60, 30, 10), options).result;
     });
 
     while (ready.load(std::memory_order_acquire) < 2) std::this_thread::yield();

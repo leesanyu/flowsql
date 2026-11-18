@@ -19,7 +19,7 @@ class DataFrameReader {
  public:
     DataFrameReader();
     ~DataFrameReader();
-    int Open(TaskConfig config, const BlockDataFrameInputBindingV1& binding,
+    int Open(TaskConfig config, const BlockDataFrameInputBinding& binding,
              std::shared_ptr<arrow::RecordBatch> snapshot);
     int Next(SnapshotPage* output);
     void Cancel();

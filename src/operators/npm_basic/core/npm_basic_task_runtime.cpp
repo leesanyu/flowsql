@@ -93,8 +93,8 @@ class InputBatchLease final {
 NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::Create(
     const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
     std::shared_ptr<arrow::Schema>* output_schema, std::unique_ptr<NpmBasicTaskRuntime>* output,
-    std::shared_ptr<NpmTaskBudget> budget, IFlowLabelMatcherV1* matcher, const NpmModuleCatalogV1& catalog,
-    std::unique_ptr<INpmResultConsumerV1> consumer, std::string task_id, INpmResultConsumerFactoryV1* consumer_factory,
+    std::shared_ptr<NpmTaskBudget> budget, IFlowLabelMatcher* matcher, const NpmModuleCatalog& catalog,
+    std::unique_ptr<INpmResultConsumer> consumer, std::string task_id, INpmResultConsumerFactory* consumer_factory,
     uint64_t matcher_reserved_bytes) {
     return CreateWithTimeCapabilities(config, querier, input_schema, {}, output_schema, output, std::move(budget),
                                       matcher, catalog, std::move(consumer), std::move(task_id), consumer_factory,
@@ -104,11 +104,11 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::Create(
 NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
     const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
     const NpmTimeCapabilities& time_capabilities, std::shared_ptr<arrow::Schema>* output_schema,
-    std::unique_ptr<NpmBasicTaskRuntime>* output, std::shared_ptr<NpmTaskBudget> budget, IFlowLabelMatcherV1* matcher,
-    const NpmModuleCatalogV1& catalog, std::unique_ptr<INpmResultConsumerV1> consumer, std::string task_id,
-    INpmResultConsumerFactoryV1* consumer_factory, uint64_t matcher_reserved_bytes) {
+    std::unique_ptr<NpmBasicTaskRuntime>* output, std::shared_ptr<NpmTaskBudget> budget, IFlowLabelMatcher* matcher,
+    const NpmModuleCatalog& catalog, std::unique_ptr<INpmResultConsumer> consumer, std::string task_id,
+    INpmResultConsumerFactory* consumer_factory, uint64_t matcher_reserved_bytes) {
     struct ConsumerGuard {
-        std::unique_ptr<INpmResultConsumerV1>& consumer;
+        std::unique_ptr<INpmResultConsumer>& consumer;
         ~ConsumerGuard() {
             if (consumer) consumer->Cancel();
         }
@@ -149,9 +149,9 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
     }
 
     try {
-        std::vector<NpmPreparedModuleV1> prepared;
-        status.module_status = PrepareNpmModulesV1(config, catalog, &prepared);
-        if (status.module_status.error != NpmProtocolContractErrorV1::kNone) {
+        std::vector<NpmPreparedModule> prepared;
+        status.module_status = PrepareNpmModules(config, catalog, &prepared);
+        if (status.module_status.error != NpmProtocolContractError::kNone) {
             status.error = NpmBasicTaskRuntimeError::kModulePlanError;
             return status;
         }
@@ -159,19 +159,19 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
         const std::string observing = config.features.observing_entity;
         std::shared_ptr<arrow::Schema> result_schema;
         if (observing.empty() && consumer_factory) result_schema = arrow::schema({});
-        NpmModuleCapabilitiesV1 capabilities;
+        NpmModuleCapabilities capabilities;
         capabilities.labeling_enabled = config.features.labeling_enabled;
         capabilities.labeling_available = matcher != nullptr;
         capabilities.tcp_stream_available = true;
         for (const auto& entry : prepared) {
             if (matcher && entry.plan.primary_label_ids) {
                 for (uint32_t id : *entry.plan.primary_label_ids) {
-                    FlowPrimaryLabelViewV1 label;
+                    FlowPrimaryLabelView label;
                     if (matcher->FindLabel(id, &label)) capabilities.available_label_ids.push_back(id);
                 }
             }
-            status.module_status = ValidateNpmModulePlanV1(entry.plan, capabilities);
-            if (status.module_status.error != NpmProtocolContractErrorV1::kNone) {
+            status.module_status = ValidateNpmModulePlan(entry.plan, capabilities);
+            if (status.module_status.error != NpmProtocolContractError::kNone) {
                 status.module_status.field = entry.plan.module_id + "/" + status.module_status.field;
                 status.error = NpmBasicTaskRuntimeError::kModulePlanError;
                 return status;
@@ -182,7 +182,7 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
         }
         if (!result_schema) {
             status.error = NpmBasicTaskRuntimeError::kModulePlanError;
-            status.module_status = {NpmProtocolContractErrorV1::kInvalidEntity, observing};
+            status.module_status = {NpmProtocolContractError::kInvalidEntity, observing};
             return status;
         }
         if (frozen.features.observing == NpmResultEntity::kProtocol) frozen.features.protocol_schema = result_schema;
@@ -201,13 +201,13 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
             status.error = NpmBasicTaskRuntimeError::kObservationDomainError;
             return status;
         }
-        std::vector<NpmEntityDescriptorV1> entities;
+        std::vector<NpmEntityDescriptor> entities;
         for (const auto& entry : prepared)
             entities.insert(entities.end(), entry.plan.entities.begin(), entry.plan.entities.end());
-        std::vector<NpmModuleInstanceV1> instances;
+        std::vector<NpmModuleInstance> instances;
         instances.reserve(prepared.size());
         struct ProtocolInstanceGuard {
-            std::vector<NpmModuleInstanceV1>& instances;
+            std::vector<NpmModuleInstance>& instances;
             ~ProtocolInstanceGuard() {
                 for (auto& instance : instances) {
                     if (instance.protocol) instance.protocol->Abort();
@@ -217,21 +217,21 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
         for (const auto& entry : prepared) {
             auto instance = entry.create(*runtime->protocol_context_, runtime->budget_);
             if (entry.plan.module_id == "icmp" && instance.protocol) {
-                if (auto* icmp = dynamic_cast<NpmIcmpProtocolModuleV1*>(instance.protocol.get())) {
+                if (auto* icmp = dynamic_cast<NpmIcmpProtocolModule*>(instance.protocol.get())) {
                     icmp->BindSessions(runtime->sessions_.get(), runtime->config_.domains.input_namespace);
                 }
             }
-            status.module_status = ValidateNpmModuleInstanceV1(entry.plan, instance);
-            if (status.module_status.error != NpmProtocolContractErrorV1::kNone) {
+            status.module_status = ValidateNpmModuleInstance(entry.plan, instance);
+            if (status.module_status.error != NpmProtocolContractError::kNone) {
                 if (instance.protocol) instance.protocol->Abort();
                 status.error = NpmBasicTaskRuntimeError::kModuleCreateError;
                 return status;
             }
             instances.push_back(std::move(instance));
         }
-        NpmResultContextV1 context = MakeNpmResultContext(std::move(task_id));
+        NpmResultContext context = MakeNpmResultContext(std::move(task_id));
         if (consumer_factory) {
-            std::unique_ptr<INpmManagedResultConsumerV1> managed_consumer;
+            std::unique_ptr<INpmManagedResultConsumer> managed_consumer;
             const int consumer_error = consumer_factory->Create(context, entities, runtime->budget_, &managed_consumer);
             if (consumer_error != 0 || !managed_consumer) {
                 status.error = NpmBasicTaskRuntimeError::kConsumerCreateError;
@@ -282,7 +282,7 @@ NpmBasicTaskRuntimeStatus NpmBasicTaskRuntime::CreateWithTimeCapabilities(
                                                             &runtime->streams_, &runtime->cancellation_requested_);
             if (error != NpmTcpStreamError::kNone) {
                 status.error = NpmBasicTaskRuntimeError::kModuleCreateError;
-                status.module_status = {NpmProtocolContractErrorV1::kUnavailableCapability, "tcp_stream/provider"};
+                status.module_status = {NpmProtocolContractError::kUnavailableCapability, "tcp_stream/provider"};
                 return status;
             }
         }
@@ -556,7 +556,7 @@ NpmBasicRealtimeMaintenanceStatus NpmBasicTaskRuntime::DriveRealtimeMaintenance(
                     return fail(NpmBasicRealtimeMaintenanceError::kModuleError, kRealtimeModuleError);
                 }
             }
-            const NpmModuleTimeV1 time{{progress.watermark_ns}, input.observed_at_ns};
+            const NpmModuleTime time{{progress.watermark_ns}, input.observed_at_ns};
             for (auto* module : protocol_modules_) {
                 status.module_error = module->OnTime(time);
                 if (status.module_error != 0) {
@@ -689,9 +689,9 @@ void NpmBasicTaskRuntime::Cancel() noexcept {
     operation_mutex_.unlock();
 }
 
-NpmMaintenancePlanV1 NpmBasicTaskRuntime::MaintenancePlan() const {
+NpmMaintenancePlan NpmBasicTaskRuntime::MaintenancePlan() const {
     std::lock_guard<std::mutex> lock(operation_mutex_);
-    NpmMaintenancePlanV1 plan;
+    NpmMaintenancePlan plan;
     if (state_.load(std::memory_order_acquire) != NpmEofFlushState::kOpen) return plan;
     plan.event_deadline_ns = sessions_->NextEventDeadlineNs();
     if (streams_) {

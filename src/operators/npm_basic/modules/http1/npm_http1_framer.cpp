@@ -11,7 +11,7 @@
 namespace flowsql::npm {
 namespace {
 
-using Error = NpmHttp1FramerErrorV1;
+using Error = NpmHttp1FramerError;
 
 bool TokenByte(unsigned char c) {
     if (c >= '0' && c <= '9') return true;
@@ -141,13 +141,13 @@ Error ParseField(std::string_view line, std::string_view* name, std::string_view
     return Error::kNone;
 }
 
-Error ParseStartLine(std::string_view line, NpmHttp1MessageHeadV1* head) {
+Error ParseStartLine(std::string_view line, NpmHttp1MessageHead* head) {
     if (line.rfind("HTTP/", 0) == 0) {
         head->is_response = true;
         if (line.rfind("HTTP/1.0 ", 0) == 0)
-            head->version = NpmHttp1VersionV1::k10;
+            head->version = NpmHttp1Version::k10;
         else if (line.rfind("HTTP/1.1 ", 0) == 0)
-            head->version = NpmHttp1VersionV1::k11;
+            head->version = NpmHttp1Version::k11;
         else
             return Error::kUnsupported;
         if (line.size() < 12) return Error::kMalformed;
@@ -167,9 +167,9 @@ Error ParseStartLine(std::string_view line, NpmHttp1MessageHeadV1* head) {
     if (second == std::string_view::npos || second == first + 1) return Error::kMalformed;
     const std::string_view version = line.substr(second + 1);
     if (version == "HTTP/1.0")
-        head->version = NpmHttp1VersionV1::k10;
+        head->version = NpmHttp1Version::k10;
     else if (version == "HTTP/1.1")
-        head->version = NpmHttp1VersionV1::k11;
+        head->version = NpmHttp1Version::k11;
     else
         return Error::kUnsupported;
     for (unsigned char c : line.substr(0, first)) {
@@ -186,9 +186,9 @@ Error ParseStartLine(std::string_view line, NpmHttp1MessageHeadV1* head) {
 
 }  // namespace
 
-NpmHttp1FramerV1::NpmHttp1FramerV1(uint32_t max_header_bytes) : max_header_bytes_(max_header_bytes) {}
+NpmHttp1Framer::NpmHttp1Framer(uint32_t max_header_bytes) : max_header_bytes_(max_header_bytes) {}
 
-NpmHttp1FramerErrorV1 NpmHttp1FramerV1::Fail(NpmHttp1FramerErrorV1 error) noexcept {
+NpmHttp1FramerError NpmHttp1Framer::Fail(NpmHttp1FramerError error) noexcept {
     stage_ = Stage::kDisabled;
     header_.clear();
     line_.clear();
@@ -196,7 +196,7 @@ NpmHttp1FramerErrorV1 NpmHttp1FramerV1::Fail(NpmHttp1FramerErrorV1 error) noexce
     return error;
 }
 
-NpmHttp1FramerErrorV1 NpmHttp1FramerV1::AppendControlByte(char byte, std::string* target) {
+NpmHttp1FramerError NpmHttp1Framer::AppendControlByte(char byte, std::string* target) {
     if (control_bytes_seen_ >= max_header_bytes_) return Fail(Error::kHeaderLimit);
     ++control_bytes_seen_;
     target->push_back(byte);
@@ -206,9 +206,9 @@ NpmHttp1FramerErrorV1 NpmHttp1FramerV1::AppendControlByte(char byte, std::string
     return Error::kNone;
 }
 
-NpmHttp1FramerErrorV1 NpmHttp1FramerV1::ParseHeaders(const std::function<NpmHttp1ResponseContextV1()>& response_context,
-                                                     std::vector<NpmHttp1FramedMessageV1>* messages) {
-    NpmHttp1MessageHeadV1 head;
+NpmHttp1FramerError NpmHttp1Framer::ParseHeaders(const std::function<NpmHttp1ResponseContext()>& response_context,
+                                                 std::vector<NpmHttp1FramedMessage>* messages) {
+    NpmHttp1MessageHead head;
     size_t begin = 0;
     size_t end = header_.find("\r\n");
     if (end == std::string::npos || end == 0) return Fail(Error::kMalformed);
@@ -244,36 +244,36 @@ NpmHttp1FramerErrorV1 NpmHttp1FramerV1::ParseHeaders(const std::function<NpmHttp
     if (content_length_seen && transfer_encoding_seen) return Fail(Error::kMalformed);
     if (transfer_encoding_seen && !transfer_encoding_supported) return Fail(Error::kUnsupported);
     head.complete_at_ns = header_times_known_ ? max_header_time_ns_ : std::nullopt;
-    const NpmHttp1ResponseContextV1 request =
-        head.is_response && response_context ? response_context() : NpmHttp1ResponseContextV1{};
+    const NpmHttp1ResponseContext request =
+        head.is_response && response_context ? response_context() : NpmHttp1ResponseContext{};
     const uint16_t status = head.status_code.value_or(0);
     const bool connect_tunnel = request.request_is_connect && status >= 200 && status < 300;
     stop_after_current_ = head.is_response && (status == 101 || connect_tunnel);
     const bool no_body_response = head.is_response && (request.request_is_head || connect_tunnel || status < 200 ||
                                                        status == 204 || status == 205 || status == 304);
     if (no_body_response)
-        head.framing = NpmHttp1FramingV1::kNoBody;
+        head.framing = NpmHttp1Framing::kNoBody;
     else if (transfer_encoding_seen)
-        head.framing = NpmHttp1FramingV1::kChunked;
+        head.framing = NpmHttp1Framing::kChunked;
     else if (content_length_seen)
-        head.framing = NpmHttp1FramingV1::kContentLength;
+        head.framing = NpmHttp1Framing::kContentLength;
     else if (head.is_response)
-        head.framing = NpmHttp1FramingV1::kCloseDelimited;
+        head.framing = NpmHttp1Framing::kCloseDelimited;
     else
-        head.framing = NpmHttp1FramingV1::kNoBody;
+        head.framing = NpmHttp1Framing::kNoBody;
     current_ = std::move(head);
     header_.clear();
     if (next_message_id_ == 0) return Fail(Error::kUnsupported);
     current_message_id_ = next_message_id_++;
     messages->push_back({current_message_id_, current_, true, false});
-    if (current_.framing == NpmHttp1FramingV1::kNoBody ||
-        (current_.framing == NpmHttp1FramingV1::kContentLength && content_length == 0)) {
+    if (current_.framing == NpmHttp1Framing::kNoBody ||
+        (current_.framing == NpmHttp1Framing::kContentLength && content_length == 0)) {
         return FinishMessage(messages);
     }
-    if (current_.framing == NpmHttp1FramingV1::kContentLength) {
+    if (current_.framing == NpmHttp1Framing::kContentLength) {
         remaining_ = content_length;
         stage_ = Stage::kFixedBody;
-    } else if (current_.framing == NpmHttp1FramingV1::kChunked) {
+    } else if (current_.framing == NpmHttp1Framing::kChunked) {
         stage_ = Stage::kChunkLine;
     } else {
         stage_ = Stage::kCloseBody;
@@ -281,7 +281,7 @@ NpmHttp1FramerErrorV1 NpmHttp1FramerV1::ParseHeaders(const std::function<NpmHttp
     return Error::kNone;
 }
 
-NpmHttp1FramerErrorV1 NpmHttp1FramerV1::FinishMessage(std::vector<NpmHttp1FramedMessageV1>* messages) {
+NpmHttp1FramerError NpmHttp1Framer::FinishMessage(std::vector<NpmHttp1FramedMessage>* messages) {
     messages->push_back({current_message_id_, {}, false, true});
     current_ = {};
     current_message_id_ = 0;
@@ -293,14 +293,14 @@ NpmHttp1FramerErrorV1 NpmHttp1FramerV1::FinishMessage(std::vector<NpmHttp1Framed
     return Error::kNone;
 }
 
-NpmHttp1FramerErrorV1 NpmHttp1FramerV1::Consume(NpmTcpStreamOriginV1 origin, std::string_view bytes,
-                                                std::optional<int64_t> captured_at_ns,
-                                                std::vector<NpmHttp1FramedMessageV1>* messages,
-                                                const std::function<NpmHttp1ResponseContextV1()>& response_context) {
+NpmHttp1FramerError NpmHttp1Framer::Consume(NpmTcpStreamOrigin origin, std::string_view bytes,
+                                            std::optional<int64_t> captured_at_ns,
+                                            std::vector<NpmHttp1FramedMessage>* messages,
+                                            const std::function<NpmHttp1ResponseContext()>& response_context) {
     if (!messages) return Error::kInvalidOutput;
     if (stage_ == Stage::kDisabled) return Error::kIncomplete;
     if (!started_) {
-        if (origin != NpmTcpStreamOriginV1::kSyn) return Fail(Error::kMidstream);
+        if (origin != NpmTcpStreamOrigin::kSyn) return Fail(Error::kMidstream);
         started_ = true;
     }
     try {
@@ -368,21 +368,21 @@ NpmHttp1FramerErrorV1 NpmHttp1FramerV1::Consume(NpmTcpStreamOriginV1 origin, std
     }
 }
 
-NpmHttp1FramerErrorV1 NpmHttp1FramerV1::Consume(const NpmTcpStreamEventV1& event, NpmTcpStreamOriginV1 origin,
-                                                std::vector<NpmHttp1FramedMessageV1>* messages,
-                                                const std::function<NpmHttp1ResponseContextV1()>& response_context) {
-    if (event.kind == NpmTcpStreamEventKindV1::kGap) return OnGap();
-    if (event.kind == NpmTcpStreamEventKindV1::kEnd) return OnEnd(messages);
-    if (event.kind != NpmTcpStreamEventKindV1::kData || !event.bytes.data || event.bytes.size == 0) {
+NpmHttp1FramerError NpmHttp1Framer::Consume(const NpmTcpStreamEvent& event, NpmTcpStreamOrigin origin,
+                                            std::vector<NpmHttp1FramedMessage>* messages,
+                                            const std::function<NpmHttp1ResponseContext()>& response_context) {
+    if (event.kind == NpmTcpStreamEventKind::kGap) return OnGap();
+    if (event.kind == NpmTcpStreamEventKind::kEnd) return OnEnd(messages);
+    if (event.kind != NpmTcpStreamEventKind::kData || !event.bytes.data || event.bytes.size == 0) {
         return Fail(Error::kMalformed);
     }
     return Consume(origin, {reinterpret_cast<const char*>(event.bytes.data), event.bytes.size}, event.captured_at_ns,
                    messages, response_context);
 }
 
-NpmHttp1FramerErrorV1 NpmHttp1FramerV1::OnGap() noexcept { return Fail(Error::kGap); }
+NpmHttp1FramerError NpmHttp1Framer::OnGap() noexcept { return Fail(Error::kGap); }
 
-NpmHttp1FramerErrorV1 NpmHttp1FramerV1::OnEnd(std::vector<NpmHttp1FramedMessageV1>* messages) noexcept {
+NpmHttp1FramerError NpmHttp1Framer::OnEnd(std::vector<NpmHttp1FramedMessage>* messages) noexcept {
     if (stage_ == Stage::kDisabled) return Error::kNone;
     if (!messages) return Error::kInvalidOutput;
     if (stage_ == Stage::kCloseBody) {

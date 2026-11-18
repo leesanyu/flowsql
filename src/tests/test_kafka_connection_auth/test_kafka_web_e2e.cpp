@@ -58,19 +58,21 @@ class Runtime {
         std::string web_options = "host=127.0.0.1;port=" + std::to_string(web_) +
                                   ";gateway=127.0.0.1:" + std::to_string(gateway) +
                                   ";db_path=:memory:;upload_dir=" + (root / "uploads").string();
-        const char* libraries[] = {"libflowsql_gateway.so", "libflowsql_router.so",    "libflowsql_kafka.so",
-                                   "libflowsql_web.so",     "libflowsql_scheduler.so", "libflowsql_builtin.so",
-                                   "libflowsql_catalog.so"};
+        const char* libraries[] = {"libflowsql_config_channel.so", "libflowsql_gateway.so", "libflowsql_router.so",
+                                   "libflowsql_kafka.so",          "libflowsql_web.so",     "libflowsql_scheduler.so",
+                                   "libflowsql_builtin.so",        "libflowsql_catalog.so"};
         const auto catalog_options =
             "data_dir=" + (root / "frames").string() + ";operator_db_path=" + (root / "operators.db").string();
-        const char* config[] = {gateway_options.c_str(),
+        const std::string semantics_option = "db_path=" + (root / "semantics.db").string();
+        const char* config[] = {semantics_option.c_str(),
+                                gateway_options.c_str(),
                                 router_options.c_str(),
                                 provider.c_str(),
                                 web_options.c_str(),
                                 "stream_workers=1;batch_workers=1",
                                 nullptr,
                                 catalog_options.c_str()};
-        assert(loader_->Load(get_absolute_process_path(), libraries, config, 7) == 0);
+        assert(loader_->Load(get_absolute_process_path(), libraries, config, 8) == 0);
         assert(loader_->StartAll() == 0);
         bool ready = false;
         for (int i = 0; i < 300 && !ready; ++i) {
@@ -107,8 +109,8 @@ class Runtime {
         assert(false);
         return Parse("{}");
     }
-    IKafkaConnectionServiceV1* Service() {
-        return static_cast<IKafkaConnectionServiceV1*>(loader_->First(IID_KAFKA_CONNECTION_SERVICE_V1));
+    IKafkaConnectionService* Service() {
+        return static_cast<IKafkaConnectionService*>(loader_->First(IID_KAFKA_CONNECTION_SERVICE));
     }
 
  private:
@@ -133,7 +135,7 @@ int main() {
         assert(Text(description["items"][0]["adapter_status"], "source") == "configuration_required");
         auto service = runtime.Service();
         assert(service);
-        IKafkaClientSessionV1* session = nullptr;
+        IKafkaClientSession* session = nullptr;
         std::string error;
         assert(service->OpenSession("events", "sink", &session, &error) != 0 && !session);
         assert(service->OpenSession("events", "source", &session, &error) == 0 && session);

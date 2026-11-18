@@ -57,11 +57,13 @@ std::string Parameters() {
 struct Environment {
     PluginLoader* loader = PluginLoader::Single();
     explicit Environment(const std::string& library, const std::string& root) {
-        const char* libs[] = {"libflowsql_builtin.so", "libflowsql_catalog.so", "libflowsql_scheduler.so",
-                              "libflowsql_baseline.so", library.c_str()};
+        const char* libs[] = {"libflowsql_builtin.so",  "libflowsql_catalog.so", "libflowsql_scheduler.so",
+                              "libflowsql_baseline.so", library.c_str(),         "libflowsql_config_channel.so"};
         const auto catalog = "data_dir=" + root + ";operator_db_path=" + root + "/operators.db";
-        const char* options[] = {nullptr, catalog.c_str(), "batch_workers=1;stream_workers=1", nullptr, nullptr};
-        Check(loader->Load(get_absolute_process_path(), libs, options, 5) == 0, "load isolated Scheduler plugins");
+        const auto config = "db_path=" + root + "/config.db";
+        const char* options[] = {nullptr, catalog.c_str(), "batch_workers=1;stream_workers=1",
+                                 nullptr, nullptr,         config.c_str()};
+        Check(loader->Load(get_absolute_process_path(), libs, options, 6) == 0, "load isolated Scheduler plugins");
         Check(loader->StartAll() == 0, "start isolated Scheduler plugins");
     }
     ~Environment() {
@@ -151,7 +153,7 @@ void Sql(size_t rows, const std::string& library, const std::string& output, boo
 // Production reader and aggregation feed the real operator; only segment clocks are added here.
 void Production(size_t rows, const char* library, const std::string& reference) {
     auto owner = std::make_shared<Library>(library);
-    auto* normalizer = dynamic_cast<IBlockTransformSourceConfigProviderV1*>(owner->provider);
+    auto* normalizer = dynamic_cast<IBlockTransformSourceConfigProvider*>(owner->provider);
     Check(normalizer != nullptr, "source normalizer");
     std::string normalized, error;
     const auto with = With(Parameters(), false);
@@ -162,23 +164,23 @@ void Production(size_t rows, const char* library, const std::string& reference) 
     Check(normalizer->NormalizeSourceConfig(raw.c_str(), "dataframe.link_data_2_month_baseliner", &normalized,
                                             &error) == 0,
           error);
-    BlockTransformTaskConfigV2 task_config{kBlockTransformTaskConfigV2Size, kBlockTransformContractVersionV2,
-                                           "production-cost", normalized.c_str(), ""};
-    IBlockTransformTaskV2* task_pointer = nullptr;
+    BlockTransformTaskConfig task_config{kBlockTransformTaskConfigSize, kBlockTransformContractVersion,
+                                         "production-cost", normalized.c_str(), ""};
+    IBlockTransformTask* task_pointer = nullptr;
     Check(owner->provider->CreateTask(task_config, &task_pointer) == 0 && task_pointer, "production task");
     TaskOwner task(task_pointer, [owner](auto* value) { owner->provider->ReleaseTask(value); });
-    auto* input_task = dynamic_cast<IBlockTransformDataFrameInputTaskV1*>(task.get());
-    auto* model_task = dynamic_cast<IBlockTransformModelOutputTaskV1*>(task.get());
-    auto* result_task = dynamic_cast<IBlockTransformResultOutputTaskV1*>(task.get());
-    auto* source_task = dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get());
+    auto* input_task = dynamic_cast<IBlockTransformDataFrameInputTask*>(task.get());
+    auto* model_task = dynamic_cast<IBlockTransformModelOutputTask*>(task.get());
+    auto* result_task = dynamic_cast<IBlockTransformResultOutputTask*>(task.get());
+    auto* source_task = dynamic_cast<IBlockTransformInputSourceTask*>(task.get());
     Check(input_task && model_task && result_task && source_task, "production capabilities");
     Check(source_task->BindInputSource("dataframe.link_data_2_month_baseliner") == 0, task->LastError());
-    BlockResultOutputBindingV1 result_binding;
+    BlockResultOutputBinding result_binding;
     result_binding.target = "dataframe.link_mbps_baseline";
     Check(result_task->BindResultOutput(result_binding) == 0, task->LastError());
     auto models = std::make_shared<DataFrameChannel>("dataframe", "link_mbps_final_models");
     Check(models->Open() == 0, "model channel");
-    BlockModelOutputBindingV1 model_binding;
+    BlockModelOutputBinding model_binding;
     model_binding.primary_target = "dataframe.link_mbps_baseline";
     model_binding.dataframe = models;
     Check(model_task->BindModelOutput(model_binding) == 0, task->LastError());
@@ -188,10 +190,10 @@ void Production(size_t rows, const char* library, const std::string& reference) 
     Check(source->Open() == 0 && source->Write(&data) == 0, "source channel");
     DataFrameChannel sink("dataframe", "link_mbps_baseline");
     Check(sink.Open() == 0, "result channel");
-    BlockDataFrameInputBindingV1 input_binding;
+    BlockDataFrameInputBinding input_binding;
     input_binding.source = source;
     input_binding.exact_source = "dataframe.link_data_2_month_baseliner";
-    BlockDataFrameInputV1 input;
+    BlockDataFrameInput input;
     rusage before{}, measured{}, compared{};
     getrusage(RUSAGE_SELF, &before);
     const auto begin = Clock::now();
@@ -200,7 +202,7 @@ void Production(size_t rows, const char* library, const std::string& reference) 
     Check(task->Open(input.schema, &output_schema) == 0, task->LastError());
     uint64_t batches = 0, result_rows = 0, bytes = 0, max_rows = 0;
     double append_seconds = 0;
-    auto drain = [&](const std::vector<BlockTransformOutputV1>& outputs) {
+    auto drain = [&](const std::vector<BlockTransformOutput>& outputs) {
         for (const auto& out : outputs) {
             if (!out.batch->num_rows()) continue;
             Check(out.batch->GetColumnByName("result_kind") != nullptr, "primary result Schema");
@@ -219,12 +221,12 @@ void Production(size_t rows, const char* library, const std::string& reference) 
         auto event = input.input->PollBlock();
         if (event.kind == BlockPollEvent::kEof) break;
         Check(event.kind == BlockPollEvent::kData, "production input event");
-        std::vector<BlockTransformOutputV1> outputs;
+        std::vector<BlockTransformOutput> outputs;
         Check(task->ProcessBlock(event.batch, 0, &outputs) == 0, task->LastError());
         drain(outputs);
         Check(input.input->ReleaseBlock(event.batch) == 0, "release production input");
     }
-    std::vector<BlockTransformOutputV1> tail;
+    std::vector<BlockTransformOutput> tail;
     Check(task->Flush(&tail) == 0, task->LastError());
     drain(tail);
     const double total_seconds = Seconds(begin);
@@ -277,12 +279,11 @@ void Representative(const std::string& workload, const char* path, const std::st
     auto task = Task(owner, config);
     auto model_sink = std::make_shared<DataFrameChannel>("dataframe", "models");
     Check(model_sink->Open() == 0, "model sink");
-    BlockModelOutputBindingV1 binding;
+    BlockModelOutputBinding binding;
     binding.primary_target = "dataframe.representative_results";
     binding.dataframe = model_sink;
-    Check(dynamic_cast<IBlockTransformModelOutputTaskV1*>(task.get())->BindModelOutput(binding) == 0,
-          task->LastError());
-    Check(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("dataframe.samples") == 0,
+    Check(dynamic_cast<IBlockTransformModelOutputTask*>(task.get())->BindModelOutput(binding) == 0, task->LastError());
+    Check(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("dataframe.samples") == 0,
           task->LastError());
     std::shared_ptr<arrow::Schema> schema;
     Check(task->Open(MakeSchema(SchemaKind::kObservation), &schema) == 0, task->LastError());
@@ -309,7 +310,7 @@ void Representative(const std::string& workload, const char* path, const std::st
     Check(results.Open() == 0 && fusion.Open() == 0, "private sinks");
     size_t count = 0;
     double append_seconds = 0;
-    auto drain = [&](const std::vector<BlockTransformOutputV1>& outputs) {
+    auto drain = [&](const std::vector<BlockTransformOutput>& outputs) {
         for (const auto& out : outputs) {
             if (!out.batch->num_rows()) continue;
             DataFrame frame;
@@ -325,11 +326,11 @@ void Representative(const std::string& workload, const char* path, const std::st
     getrusage(RUSAGE_SELF, &before);
     const auto begin = Clock::now();
     for (const auto& wire : wires) {
-        std::vector<BlockTransformOutputV1> outputs;
+        std::vector<BlockTransformOutput> outputs;
         Check(task->ProcessBlock(wire, 0, &outputs) == 0, task->LastError());
         drain(outputs);
     }
-    std::vector<BlockTransformOutputV1> tail;
+    std::vector<BlockTransformOutput> tail;
     Check(task->Flush(&tail) == 0, task->LastError());
     drain(tail);
     const double total_seconds = Seconds(begin);

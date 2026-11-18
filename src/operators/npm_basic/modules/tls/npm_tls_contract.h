@@ -17,23 +17,23 @@
 
 namespace flowsql::npm {
 
-constexpr int64_t kNpmTlsDefaultHandshakeTimeoutNsV1 = 5'000'000'000;
-constexpr int64_t kNpmTlsMinHandshakeTimeoutNsV1 = 1'000'000;
-constexpr int64_t kNpmTlsMaxHandshakeTimeoutNsV1 = 300'000'000'000;
-constexpr uint32_t kNpmTlsDefaultMaxHelloBytesV1 = 65'536;
-constexpr uint32_t kNpmTlsMinHelloBytesV1 = 4'096;
-constexpr uint32_t kNpmTlsMaxHelloBytesV1 = 1'048'576;
-constexpr std::size_t kNpmTlsMaxPrimaryLabelsV1 = 256;
+constexpr int64_t kNpmTlsDefaultHandshakeTimeoutNs = 5'000'000'000;
+constexpr int64_t kNpmTlsMinHandshakeTimeoutNs = 1'000'000;
+constexpr int64_t kNpmTlsMaxHandshakeTimeoutNs = 300'000'000'000;
+constexpr uint32_t kNpmTlsDefaultMaxHelloBytes = 65'536;
+constexpr uint32_t kNpmTlsMinHelloBytes = 4'096;
+constexpr uint32_t kNpmTlsMaxHelloBytes = 1'048'576;
+constexpr std::size_t kNpmTlsMaxPrimaryLabels = 256;
 
 /** Task-owned configuration; no JSON or provider view survives preparation. */
-struct NpmTlsConfigV1 {
+struct NpmTlsConfig {
     std::vector<uint32_t> primary_label_ids;
-    int64_t handshake_timeout_ns = kNpmTlsDefaultHandshakeTimeoutNsV1;
-    uint32_t max_hello_bytes = kNpmTlsDefaultMaxHelloBytesV1;
+    int64_t handshake_timeout_ns = kNpmTlsDefaultHandshakeTimeoutNs;
+    uint32_t max_hello_bytes = kNpmTlsDefaultMaxHelloBytes;
 };
 
 /** Complete, owned initial Hello facts; opaque ALPN IDs remain byte strings until output encoding. */
-struct NpmTlsHelloFactsV1 {
+struct NpmTlsHelloFacts {
     uint16_t legacy_version = 0;
     std::vector<uint16_t> offered_versions;
     std::optional<uint16_t> selected_version;
@@ -46,8 +46,8 @@ struct NpmTlsHelloFactsV1 {
 };
 
 /** Per-direction scalar framing state and one bounded, owned Hello copy. */
-struct NpmTlsDirectionStateV1 {
-    NpmTcpStreamOriginV1 origin = NpmTcpStreamOriginV1::kUnknown;
+struct NpmTlsDirectionState {
+    NpmTcpStreamOrigin origin = NpmTcpStreamOrigin::kUnknown;
     std::array<uint8_t, 5> record_header{};
     uint8_t record_header_bytes = 0;
     uint32_t record_remaining = 0;
@@ -61,7 +61,7 @@ struct NpmTlsDirectionStateV1 {
     bool encrypted_boundary = false;
 };
 
-enum class NpmTlsHandshakePhaseV1 : uint8_t {
+enum class NpmTlsHandshakePhase : uint8_t {
     kCandidate,
     kAwaitingServerHello,
     kAwaitingRetryClientHello,
@@ -71,20 +71,20 @@ enum class NpmTlsHandshakePhaseV1 : uint8_t {
 };
 
 /** One candidate per base session; first ClientHello remains the output/time reference after a retry. */
-struct NpmTlsHandshakeV1 {
+struct NpmTlsHandshake {
     uint64_t entity_instance_id = 0;
     uint64_t session_id = 0;
     NpmPacketDirection client_direction = NpmPacketDirection::kAToB;
-    NpmTlsHandshakePhaseV1 phase = NpmTlsHandshakePhaseV1::kCandidate;
-    std::optional<NpmTlsHelloFactsV1> first_client_hello;
-    std::optional<NpmTlsHelloFactsV1> retry_client_hello;
-    std::optional<NpmTlsHelloFactsV1> final_server_hello;
+    NpmTlsHandshakePhase phase = NpmTlsHandshakePhase::kCandidate;
+    std::optional<NpmTlsHelloFacts> first_client_hello;
+    std::optional<NpmTlsHelloFacts> retry_client_hello;
+    std::optional<NpmTlsHelloFacts> final_server_hello;
     uint8_t hello_retry_count = 0;
     std::optional<int64_t> first_client_byte_at_ns;
     std::optional<int64_t> deadline_ns;
 };
 
-enum class NpmTlsConfigErrorV1 : uint8_t {
+enum class NpmTlsConfigError : uint8_t {
     kNone = 0,
     kMissing,
     kInvalidType,
@@ -94,15 +94,15 @@ enum class NpmTlsConfigErrorV1 : uint8_t {
     kAllocationFailed,
 };
 
-struct NpmTlsConfigStatusV1 {
-    NpmTlsConfigErrorV1 error = NpmTlsConfigErrorV1::kNone;
+struct NpmTlsConfigStatus {
+    NpmTlsConfigError error = NpmTlsConfigError::kNone;
     std::string path;
 };
 
 /** Parses one borrowed parameters.tls object and replaces output only on success. */
-NpmTlsConfigStatusV1 ParseNpmTlsConfigV1(std::string_view json, NpmTlsConfigV1* output);
-NpmEntityDescriptorV1 NpmTlsHandshakeEntityDescriptorV1(packet::AddressFamily family);
-NpmModulePlanV1 NpmTlsModulePlanV1(const NpmTlsConfigV1& config);
+NpmTlsConfigStatus ParseNpmTlsConfig(std::string_view json, NpmTlsConfig* output);
+NpmEntityDescriptor NpmTlsHandshakeEntityDescriptor(packet::AddressFamily family);
+NpmModulePlan NpmTlsModulePlan(const NpmTlsConfig& config);
 
 }  // namespace flowsql::npm
 

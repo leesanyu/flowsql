@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "scheduler_plugin.h"
 
@@ -118,9 +113,6 @@ int32_t SchedulerPlugin::BuildStreamGroupPlan(const StreamGroupExecuteRequest& r
                 ErrorStageId::kDagValidate,
                 i);
             return error::BAD_REQUEST;
-        }
-        if (parsed.sources.empty() && !parsed.source.empty()) {
-            parsed.sources.push_back(parsed.source);
         }
         if (parsed.sources.empty()) {
             *err_rsp = BuildExecutionErrorWithSqlIndexJson(

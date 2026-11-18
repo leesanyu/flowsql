@@ -133,7 +133,7 @@ int DataFrameChannel::Append(IDataFrame* df) {
     return 0;
 }
 
-DataFrameMetadataV1 DataFrameChannel::DescribeMetadata() {
+DataFrameMetadata DataFrameChannel::DescribeMetadata() {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto batch = data_.ToArrow();
     return {batch ? batch->schema() : nullptr, replacement_generation_, false,
@@ -154,7 +154,7 @@ int DataFrameChannel::Read(IDataFrame* df) {
     return 0;
 }
 
-int DataFrameChannel::CaptureSnapshot(const DataFrameSnapshotRequestV1& request,
+int DataFrameChannel::CaptureSnapshot(const DataFrameSnapshotRequest& request,
                                       std::shared_ptr<arrow::RecordBatch>* output, uint64_t* retained_bytes,
                                       std::string* error) {
     if (!output || !retained_bytes || !error) return -1;

@@ -357,7 +357,7 @@ void test_sql_parser_where() {
     {
         auto stmt = parser.Parse("SELECT * FROM mysql.mydb.users WHERE age>18");
         assert(stmt.error.empty());
-        assert(stmt.source == "mysql.mydb.users");
+        assert(stmt.sources.front() == "mysql.mydb.users");
         assert(stmt.where_clause == "age>18");
         assert(!stmt.HasOperator());
     }
@@ -373,7 +373,7 @@ void test_sql_parser_where() {
         assert(stmt.where_clause == "age>18");
         assert(stmt.columns.size() == 2);
         assert(stmt.HasOperator());
-        assert(stmt.op_name == "chisquare");
+        assert(stmt.operators.front().name == "chisquare");
     }
     {
         auto stmt = parser.Parse("SELECT * FROM mysql.db1.orders WHERE status='pending' AND amount>1000 INTO result");

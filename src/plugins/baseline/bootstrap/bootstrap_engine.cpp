@@ -1551,16 +1551,14 @@ std::vector<RelationFusionPatternMetadata> MakeRelationFusionPatternMetadata(
 }
 
 RelationFusionBootstrapMetadata MakeRelationFusionMetadata(
-    const std::string& fallback_feature_base,
-    const std::vector<RelationServiceBasis>& bases,
+    const std::string& feature_base, const std::vector<RelationServiceBasis>& bases,
     const std::vector<RelationRoutedBootstrapArtifact>& routed_artifacts) {
     RelationFusionBootstrapMetadata metadata;
     metadata.metadata_version = 1;
-    metadata.feature_base = fallback_feature_base;
+    metadata.feature_base = feature_base;
     std::vector<std::string> metrics;
     metrics.reserve(bases.size() + routed_artifacts.size());
     for (const auto& basis : bases) {
-        if (metadata.feature_base.empty()) metadata.feature_base = basis.feature_base;
         if (!basis.metric_name.empty()) metrics.push_back(basis.metric_name);
     }
     for (const auto& routed : routed_artifacts) {
@@ -1575,13 +1573,6 @@ RelationFusionBootstrapMetadata MakeRelationFusionMetadata(
     }
     metadata.pattern_metadata = MakeRelationFusionPatternMetadata(UniqueSortedMetrics(metrics));
     return metadata;
-}
-
-RelationFusionBootstrapMetadata MakeRelationFusionMetadata(
-    const BootstrapArtifact& artifact) {
-    return MakeRelationFusionMetadata(artifact.task_identity.feature_id,
-                                      artifact.relation_basis_by_metric,
-                                      artifact.relation_routed_summary_artifacts);
 }
 
 template <typename BasisT>
@@ -2351,7 +2342,9 @@ BootstrapTrainResult BootstrapEngine::TrainRelation(
         out_artifact->seeded_components = result.enabled_components;
         out_artifact->relation_basis_by_metric = std::move(bases);
         out_artifact->relation_routed_summary_artifacts = std::move(routed_artifacts);
-        out_artifact->relation_fusion_metadata = MakeRelationFusionMetadata(*out_artifact);
+        out_artifact->relation_fusion_metadata = MakeRelationFusionMetadata(
+            spec.task_spec.feature_base.empty() ? spec.task_spec.feature_id : spec.task_spec.feature_base,
+            out_artifact->relation_basis_by_metric, out_artifact->relation_routed_summary_artifacts);
     }
     ApplyDiagnosticsOption(input.options, &result, out_artifact);
     return result;
@@ -2682,6 +2675,9 @@ BootstrapPredictionSequence BootstrapEngine::PredictRatioSequence(
 BaselineStatus BootstrapEngine::ExportSeed(const BootstrapArtifact& artifact,
                                            BootstrapSeed* out_seed) const {
     if (!out_seed) return BaselineStatus::kInvalidArgument;
+    if (artifact.artifact_kind == BootstrapArtifactKind::kRelation &&
+        !HasRelationFusionMetadata(artifact.relation_fusion_metadata))
+        return BaselineStatus::kIncompatibleArtifact;
     *out_seed = BootstrapSeed{};
     out_seed->seed_status = BootstrapSeedStatus::kNone;
     out_seed->artifact_kind = artifact.artifact_kind;
@@ -2765,9 +2761,6 @@ BaselineStatus BootstrapEngine::ExportSeed(const BootstrapArtifact& artifact,
     }
     if (artifact.artifact_kind == BootstrapArtifactKind::kRelation) {
         out_seed->relation_fusion_metadata = artifact.relation_fusion_metadata;
-        if (!HasRelationFusionMetadata(out_seed->relation_fusion_metadata)) {
-            out_seed->relation_fusion_metadata = MakeRelationFusionMetadata(artifact);
-        }
     }
     out_seed->diagnostics = artifact.diagnostics;
     out_seed->relation_routed_summary_seeds.reserve(
@@ -2860,6 +2853,10 @@ BaselineSerializationResult BootstrapEngine::ExportArtifact(
         return {BaselineStatus::kNotTrained, ""};
     }
 
+    if (artifact.artifact_kind == BootstrapArtifactKind::kRelation &&
+        !HasRelationFusionMetadata(artifact.relation_fusion_metadata))
+        return {BaselineStatus::kIncompatibleArtifact, ""};
+
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buf);
     writer.StartObject();
@@ -2898,11 +2895,7 @@ BaselineSerializationResult BootstrapEngine::ExportArtifact(
             WriteRoutedSummaryArtifact(&writer, routed_artifact);
         }
         writer.EndArray();
-        const RelationFusionBootstrapMetadata metadata =
-            HasRelationFusionMetadata(artifact.relation_fusion_metadata)
-                ? artifact.relation_fusion_metadata
-                : MakeRelationFusionMetadata(artifact);
-        WriteRelationFusionMetadata(&writer, metadata);
+        WriteRelationFusionMetadata(&writer, artifact.relation_fusion_metadata);
     }
     WriteStringField(&writer, "diagnostics", artifact.diagnostics);
     writer.EndObject();
@@ -2984,15 +2977,10 @@ BaselineStatus BootstrapEngine::LoadArtifact(std::string_view content,
         for (auto& routed : artifact.relation_routed_summary_artifacts) {
             NormalizeRoutedSummaryScope(artifact.relation_basis_by_metric, &routed);
         }
-        if (doc.HasMember("relation_fusion_metadata")) {
-            if (!ReadRelationFusionMetadata(doc["relation_fusion_metadata"],
-                                            &artifact.relation_fusion_metadata)) {
-                return BaselineStatus::kParseFailed;
-            }
-        } else {
-            artifact.relation_fusion_metadata = MakeRelationFusionMetadata(artifact);
-            AppendDiagnostic(&artifact.diagnostics, "relation_fusion_metadata_defaulted");
-        }
+        if (!doc.HasMember("relation_fusion_metadata") ||
+            !ReadRelationFusionMetadata(doc["relation_fusion_metadata"], &artifact.relation_fusion_metadata) ||
+            !HasRelationFusionMetadata(artifact.relation_fusion_metadata))
+            return BaselineStatus::kParseFailed;
     } else {
         return BaselineStatus::kIncompatibleArtifact;
     }
@@ -3060,8 +3048,7 @@ BaselineStatus BootstrapEngine::ValidateArtifactCompatibility(
         return std::find(task.metrics.begin(), task.metrics.end(), metric) != task.metrics.end();
     };
     const auto& fusion = artifact.relation_fusion_metadata;
-    // Older artifacts used the task feature id as the fusion metadata fallback.
-    if (fusion.feature_base != feature_base && fusion.feature_base != task.feature_id) {
+    if (fusion.feature_base != feature_base) {
         return BaselineStatus::kIncompatibleArtifact;
     }
     for (const auto& summary : fusion.summary_metadata) {

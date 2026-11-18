@@ -35,7 +35,7 @@
 namespace flowsql {
 namespace {
 
-constexpr const char* kSchemaId = "flowsql.io/flow-labeling/v1alpha1";
+constexpr const char* kSchemaId = "flowsql.io/flow-labeling";
 constexpr const char* kKind = "FlowLabelingSet";
 constexpr uint32_t kClassificationBatch = 256;
 constexpr uint64_t kMaxSnapshotBytes = 8ULL * 1024ULL * 1024ULL;
@@ -44,8 +44,7 @@ std::atomic<uint64_t> g_context_sequence{0};
 thread_local std::string g_diagnostic_path;
 thread_local std::string g_diagnostic_detail;
 
-void SetDiagnostic(FlowLabelingDiagnosticV1* diagnostic, FlowLabelingErrorV1 error, std::string path,
-                   std::string detail) {
+void SetDiagnostic(FlowLabelingDiagnostic* diagnostic, FlowLabelingError error, std::string path, std::string detail) {
     if (diagnostic == nullptr) return;
     g_diagnostic_path = std::move(path);
     g_diagnostic_detail = std::move(detail);
@@ -470,25 +469,25 @@ struct CompileResult {
 
 class ConfigCompiler {
  public:
-    ConfigCompiler(const FlowLabelingCompileRequestV1& request, FlowLabelingDiagnosticV1* diagnostic)
+    ConfigCompiler(const FlowLabelingCompileRequest& request, FlowLabelingDiagnostic* diagnostic)
         : request_(request), diagnostic_(diagnostic) {}
 
-    FlowLabelingErrorV1 Compile(CompileResult* output) {
+    FlowLabelingError Compile(CompileResult* output) {
         const ConfigChannelSnapshot& snapshot = *request_.snapshot;
         YAML::Node root;
         try {
             root = YAML::Load(*snapshot.content);
         } catch (const YAML::Exception&) {
-            return Fail(FlowLabelingErrorV1::kInvalidConfig, "/", "snapshot content is not valid YAML");
+            return Fail(FlowLabelingError::kInvalidConfig, "/", "snapshot content is not valid YAML");
         }
         if (!CheckMap(root, {"api_version", "kind", "metadata", "spec"}, {"api_version", "kind", "spec"}, "/")) {
             return error_;
         }
         if (!ExactScalar(root["api_version"], kSchemaId)) {
-            return Fail(FlowLabelingErrorV1::kInvalidConfig, "/api_version", "unsupported api_version");
+            return Fail(FlowLabelingError::kInvalidConfig, "/api_version", "unsupported api_version");
         }
         if (!ExactScalar(root["kind"], kKind)) {
-            return Fail(FlowLabelingErrorV1::kInvalidConfig, "/kind", "kind must be FlowLabelingSet");
+            return Fail(FlowLabelingError::kInvalidConfig, "/kind", "kind must be FlowLabelingSet");
         }
         if (root["metadata"].IsDefined() && !ParseMetadata(root["metadata"])) return error_;
 
@@ -507,15 +506,15 @@ class ConfigCompiler {
         }
         if (output->max_runtime_bytes > request_.reserved_module_state_bytes ||
             matcher_state_bytes > request_.reserved_module_state_bytes - output->max_runtime_bytes) {
-            return Fail(FlowLabelingErrorV1::kBudgetExceeded, "/spec/engine/max_runtime_bytes",
+            return Fail(FlowLabelingError::kBudgetExceeded, "/spec/engine/max_runtime_bytes",
                         "ACL runtime, retained rules, and matcher-owned state exceed the reserved task budget");
         }
-        SetDiagnostic(diagnostic_, FlowLabelingErrorV1::kNone, "", "");
-        return FlowLabelingErrorV1::kNone;
+        SetDiagnostic(diagnostic_, FlowLabelingError::kNone, "", "");
+        return FlowLabelingError::kNone;
     }
 
  private:
-    FlowLabelingErrorV1 Fail(FlowLabelingErrorV1 error, std::string path, std::string detail) {
+    FlowLabelingError Fail(FlowLabelingError error, std::string path, std::string detail) {
         error_ = error;
         SetDiagnostic(diagnostic_, error, std::move(path), std::move(detail));
         return error;
@@ -528,7 +527,7 @@ class ConfigCompiler {
     bool CheckMap(const YAML::Node& node, std::initializer_list<const char*> allowed,
                   std::initializer_list<const char*> required, const std::string& path) {
         if (!node.IsMap()) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, path, "value must be a mapping");
+            Fail(FlowLabelingError::kInvalidConfig, path, "value must be a mapping");
             return false;
         }
         std::unordered_set<std::string> allowed_fields;
@@ -536,22 +535,22 @@ class ConfigCompiler {
         std::unordered_set<std::string> seen;
         for (const auto& item : node) {
             if (!item.first.IsScalar()) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, path, "mapping keys must be strings");
+                Fail(FlowLabelingError::kInvalidConfig, path, "mapping keys must be strings");
                 return false;
             }
             const std::string field = item.first.Scalar();
             if (!seen.insert(field).second) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, ChildPath(path, field), "duplicate field");
+                Fail(FlowLabelingError::kInvalidConfig, ChildPath(path, field), "duplicate field");
                 return false;
             }
             if (allowed_fields.find(field) == allowed_fields.end()) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, ChildPath(path, field), "unknown field");
+                Fail(FlowLabelingError::kInvalidConfig, ChildPath(path, field), "unknown field");
                 return false;
             }
         }
         for (const char* field : required) {
             if (seen.find(field) == seen.end()) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, ChildPath(path, field), "required field is missing");
+                Fail(FlowLabelingError::kInvalidConfig, ChildPath(path, field), "required field is missing");
                 return false;
             }
         }
@@ -569,11 +568,11 @@ class ConfigCompiler {
                 output->clear();
                 return true;
             }
-            Fail(FlowLabelingErrorV1::kInvalidConfig, path, "required string is missing");
+            Fail(FlowLabelingError::kInvalidConfig, path, "required string is missing");
             return false;
         }
         if (!node.IsScalar() || node.Scalar().empty() || node.Scalar().size() > max_bytes) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, path, "string is empty, not scalar, or exceeds its limit");
+            Fail(FlowLabelingError::kInvalidConfig, path, "string is empty, not scalar, or exceeds its limit");
             return false;
         }
         *output = node.Scalar();
@@ -585,8 +584,8 @@ class ConfigCompiler {
         std::string name;
         std::string ignored;
         if (!Scalar(metadata["name"], "/metadata/name", 64, &name) || !ValidIdentifier(name)) {
-            if (error_ == FlowLabelingErrorV1::kNone) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, "/metadata/name", "invalid metadata name");
+            if (error_ == FlowLabelingError::kNone) {
+                Fail(FlowLabelingError::kInvalidConfig, "/metadata/name", "invalid metadata name");
             }
             return false;
         }
@@ -601,27 +600,27 @@ class ConfigCompiler {
             return false;
         }
         if (!ExactScalar(engine["type"], "dpdk-acl")) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, "/spec/engine/type", "engine type must be dpdk-acl");
+            Fail(FlowLabelingError::kInvalidConfig, "/spec/engine/type", "engine type must be dpdk-acl");
             return false;
         }
         uint32_t categories = 0;
         if (!ParseUnsigned(engine["categories"], &categories) || categories != 1) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, "/spec/engine/categories", "exactly one category is required");
+            Fail(FlowLabelingError::kInvalidConfig, "/spec/engine/categories", "exactly one category is required");
             return false;
         }
         if (!ExactScalar(engine["numa_socket_id"], "any")) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, "/spec/engine/numa_socket_id", "numa_socket_id must be any");
+            Fail(FlowLabelingError::kInvalidConfig, "/spec/engine/numa_socket_id", "numa_socket_id must be any");
             return false;
         }
         if (!engine["algorithm"].IsScalar() || !ParseAlgorithm(engine["algorithm"].Scalar(), &output->algorithm)) {
-            Fail(FlowLabelingErrorV1::kUnsupportedAlgorithm, "/spec/engine/algorithm",
+            Fail(FlowLabelingError::kUnsupportedAlgorithm, "/spec/engine/algorithm",
                  "requested DPDK ACL algorithm is unsupported");
             return false;
         }
         uint64_t max_runtime = 0;
         if (!ParseUnsigned(engine["max_runtime_bytes"], &max_runtime) || max_runtime == 0 ||
             max_runtime > std::numeric_limits<size_t>::max()) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, "/spec/engine/max_runtime_bytes",
+            Fail(FlowLabelingError::kInvalidConfig, "/spec/engine/max_runtime_bytes",
                  "max_runtime_bytes must be a positive platform-sized integer");
             return false;
         }
@@ -665,12 +664,12 @@ class ConfigCompiler {
         uint32_t fields = 0;
         if (!ParseUnsigned(limits["max_expanded_fields"], &fields) || fields < kAclFieldCount ||
             fields > RTE_ACL_MAX_FIELDS) {
-            Fail(FlowLabelingErrorV1::kLimitExceeded, "/spec/engine/limits/max_expanded_fields",
+            Fail(FlowLabelingError::kLimitExceeded, "/spec/engine/limits/max_expanded_fields",
                  "max_expanded_fields cannot represent the frozen tuple");
             return false;
         }
         if (!ExactScalar(limits["reject_duplicate_label_priorities"], "true")) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, "/spec/engine/limits/reject_duplicate_label_priorities",
+            Fail(FlowLabelingError::kInvalidConfig, "/spec/engine/limits/reject_duplicate_label_priorities",
                  "duplicate label priorities must be rejected");
             return false;
         }
@@ -679,7 +678,7 @@ class ConfigCompiler {
 
     bool ReadLimit(const YAML::Node& node, uint32_t request_limit, const std::string& path, uint32_t* output) {
         if (request_limit == 0 || !ParseUnsigned(node, output) || *output == 0 || *output > request_limit) {
-            Fail(FlowLabelingErrorV1::kLimitExceeded, path,
+            Fail(FlowLabelingError::kLimitExceeded, path,
                  "configured limit is zero or exceeds the compile request limit");
             return false;
         }
@@ -688,11 +687,11 @@ class ConfigCompiler {
 
     bool ParseLabels(const YAML::Node& labels, std::vector<LabelRecord>* output) {
         if (!labels.IsSequence()) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, "/spec/labels", "labels must be a sequence");
+            Fail(FlowLabelingError::kInvalidConfig, "/spec/labels", "labels must be a sequence");
             return false;
         }
         if (labels.size() > max_labels_) {
-            Fail(FlowLabelingErrorV1::kLimitExceeded, "/spec/labels", "label count exceeds max_labels");
+            Fail(FlowLabelingError::kLimitExceeded, "/spec/labels", "label count exceeds max_labels");
             return false;
         }
         std::unordered_set<uint32_t> ids;
@@ -708,18 +707,18 @@ class ConfigCompiler {
             }
             LabelRecord label;
             if (!ParseUnsigned(node["id"], &label.id) || label.id == 0) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, path + "/id", "label id must be a nonzero uint32");
+                Fail(FlowLabelingError::kInvalidConfig, path + "/id", "label id must be a nonzero uint32");
                 return false;
             }
             if (!ParseSigned(node["priority"], &label.priority) || label.priority < RTE_ACL_MIN_PRIORITY ||
                 label.priority > RTE_ACL_MAX_PRIORITY) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, path + "/priority",
+                Fail(FlowLabelingError::kInvalidConfig, path + "/priority",
                      "label priority is outside the DPDK ACL range");
                 return false;
             }
             if (!Scalar(node["name"], path + "/name", 64, &label.name) || !ValidIdentifier(label.name)) {
-                if (error_ == FlowLabelingErrorV1::kNone) {
-                    Fail(FlowLabelingErrorV1::kInvalidConfig, path + "/name", "invalid label name");
+                if (error_ == FlowLabelingError::kNone) {
+                    Fail(FlowLabelingError::kInvalidConfig, path + "/name", "invalid label name");
                 }
                 return false;
             }
@@ -729,7 +728,7 @@ class ConfigCompiler {
             }
             if (!ids.insert(label.id).second || !priorities.insert(label.priority).second ||
                 !names.insert(label.name).second) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, path, "label id, name, and priority must each be unique");
+                Fail(FlowLabelingError::kInvalidConfig, path, "label id, name, and priority must each be unique");
                 return false;
             }
             output->push_back(std::move(label));
@@ -741,11 +740,11 @@ class ConfigCompiler {
 
     bool ParseRules(const YAML::Node& rules, const std::vector<LabelRecord>& labels, std::vector<FlowAclRule>* output) {
         if (!rules.IsSequence()) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, "/spec/rules", "rules must be a sequence");
+            Fail(FlowLabelingError::kInvalidConfig, "/spec/rules", "rules must be a sequence");
             return false;
         }
         if (rules.size() > max_logical_rules_) {
-            Fail(FlowLabelingErrorV1::kLimitExceeded, "/spec/rules", "logical rule count exceeds max_logical_rules");
+            Fail(FlowLabelingError::kLimitExceeded, "/spec/rules", "logical rule count exceeds max_logical_rules");
             return false;
         }
         std::unordered_map<uint32_t, int32_t> priorities;
@@ -762,25 +761,25 @@ class ConfigCompiler {
             }
             std::string id;
             if (!Scalar(node["id"], path + "/id", 64, &id) || !ValidIdentifier(id) || !rule_ids.insert(id).second) {
-                if (error_ == FlowLabelingErrorV1::kNone) {
-                    Fail(FlowLabelingErrorV1::kInvalidConfig, path + "/id", "rule id is invalid or duplicated");
+                if (error_ == FlowLabelingError::kNone) {
+                    Fail(FlowLabelingError::kInvalidConfig, path + "/id", "rule id is invalid or duplicated");
                 }
                 return false;
             }
             uint32_t label_id = 0;
             if (!ParseUnsigned(node["label_id"], &label_id) || priorities.find(label_id) == priorities.end()) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, path + "/label_id", "rule references an unknown label");
+                Fail(FlowLabelingError::kInvalidConfig, path + "/label_id", "rule references an unknown label");
                 return false;
             }
             if (!ExactScalar(node["direction"], "bidirectional")) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, path + "/direction", "direction must be bidirectional");
+                Fail(FlowLabelingError::kInvalidConfig, path + "/direction", "direction must be bidirectional");
                 return false;
             }
             const bool have_match_all = node["match_all"].IsDefined();
             const bool have_matches = node["matches"].IsDefined();
             if (have_match_all == have_matches || (have_match_all && !ExactScalar(node["match_all"], "true")) ||
                 (have_matches && (!node["matches"].IsSequence() || node["matches"].size() == 0))) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, path,
+                Fail(FlowLabelingError::kInvalidConfig, path,
                      "rule requires exactly one of match_all: true or nonempty matches");
                 return false;
             }
@@ -796,7 +795,7 @@ class ConfigCompiler {
         std::sort(output->begin(), output->end(), FlowAclRuleLess);
         output->erase(std::unique(output->begin(), output->end(), FlowAclRuleEqual), output->end());
         if (output->size() > max_compiled_rules_) {
-            Fail(FlowLabelingErrorV1::kLimitExceeded, "/spec/rules",
+            Fail(FlowLabelingError::kLimitExceeded, "/spec/rules",
                  "bidirectional expansion exceeds max_compiled_rules");
             return false;
         }
@@ -810,18 +809,17 @@ class ConfigCompiler {
             const std::string match_path = path + "/" + std::to_string(index);
             const YAML::Node match = matches[index];
             if (!match.IsMap() || !match["field"].IsScalar()) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, match_path, "match must be a mapping with field");
+                Fail(FlowLabelingError::kInvalidConfig, match_path, "match must be a mapping with field");
                 return false;
             }
             const std::string name = match["field"].Scalar();
             if (!logical_fields.insert(name).second) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, match_path + "/field",
-                     "a logical rule cannot repeat a field");
+                Fail(FlowLabelingError::kInvalidConfig, match_path + "/field", "a logical rule cannot repeat a field");
                 return false;
             }
             LogicalField field;
             if (!ParseLogicalField(name, &field)) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, match_path + "/field", "unknown match field");
+                Fail(FlowLabelingError::kInvalidConfig, match_path + "/field", "unknown match field");
                 return false;
             }
             if (reverse) field = SwapEndpoints(field);
@@ -848,13 +846,13 @@ class ConfigCompiler {
 
     bool Family(int family, const std::string& path, int* required_family, FlowAclRule* rule) {
         if (*required_family != 0 && *required_family != family) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, path, "rule mixes incompatible IP families");
+            Fail(FlowLabelingError::kInvalidConfig, path, "rule mixes incompatible IP families");
             return false;
         }
         const uint8_t explicit_mask = rule->field[kIpFamily].mask_range.u8;
         const uint8_t explicit_value = rule->field[kIpFamily].value.u8;
         if (explicit_mask != 0 && (static_cast<uint8_t>(family) & explicit_mask) != (explicit_value & explicit_mask)) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, path, "ip_family contradicts the address field");
+            Fail(FlowLabelingError::kInvalidConfig, path, "ip_family contradicts the address field");
             return false;
         }
         *required_family = family;
@@ -870,8 +868,8 @@ class ConfigCompiler {
             if (!ParseAddress(match["min"], AF_INET, minimum.data()) ||
                 !ParseAddress(match["max"], AF_INET, maximum.data()) ||
                 Host32(minimum.data()) > Host32(maximum.data()) || !Family(4, path, required_family, rule)) {
-                if (error_ == FlowLabelingErrorV1::kNone) {
-                    Fail(FlowLabelingErrorV1::kInvalidConfig, path, "invalid IPv4 range");
+                if (error_ == FlowLabelingError::kNone) {
+                    Fail(FlowLabelingError::kInvalidConfig, path, "invalid IPv4 range");
                 }
                 return false;
             }
@@ -884,7 +882,7 @@ class ConfigCompiler {
         uint64_t minimum = 0;
         uint64_t maximum = 0;
         if (!ParseUnsigned(match["min"], &minimum) || !ParseUnsigned(match["max"], &maximum) || minimum > maximum) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, path, "invalid numeric range");
+            Fail(FlowLabelingError::kInvalidConfig, path, "invalid numeric range");
             return false;
         }
         size_t physical = kObservationDomainRange;
@@ -922,7 +920,7 @@ class ConfigCompiler {
                 return false;
         }
         if (maximum > limit) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, path, "range exceeds field width");
+            Fail(FlowLabelingError::kInvalidConfig, path, "range exceeds field width");
             return false;
         }
         SetRange(rule, physical, minimum, maximum);
@@ -934,13 +932,13 @@ class ConfigCompiler {
                      FlowAclRule* rule) {
         uint32_t prefix = 0;
         if (!ParseUnsigned(match["prefix_bits"], &prefix)) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, path + "/prefix_bits", "invalid prefix length");
+            Fail(FlowLabelingError::kInvalidConfig, path + "/prefix_bits", "invalid prefix length");
             return false;
         }
         if (field == LogicalField::kSourceMacPrefix || field == LogicalField::kDestinationMacPrefix) {
             std::array<uint8_t, 6> address{};
             if (prefix > 48 || !ParseMac(match["value"], &address)) {
-                Fail(FlowLabelingErrorV1::kInvalidConfig, path, "invalid MAC prefix");
+                Fail(FlowLabelingError::kInvalidConfig, path, "invalid MAC prefix");
                 return false;
             }
             const bool source = field == LogicalField::kSourceMacPrefix;
@@ -954,8 +952,8 @@ class ConfigCompiler {
             std::array<uint8_t, 4> address{};
             if (prefix > 32 || !ParseAddress(match["value"], AF_INET, address.data()) ||
                 !Family(4, path, required_family, rule)) {
-                if (error_ == FlowLabelingErrorV1::kNone) {
-                    Fail(FlowLabelingErrorV1::kInvalidConfig, path, "invalid IPv4 prefix");
+                if (error_ == FlowLabelingError::kNone) {
+                    Fail(FlowLabelingError::kInvalidConfig, path, "invalid IPv4 prefix");
                 }
                 return false;
             }
@@ -968,8 +966,8 @@ class ConfigCompiler {
             std::array<uint8_t, 16> address{};
             if (prefix > 128 || !ParseAddress(match["value"], AF_INET6, address.data()) ||
                 !Family(6, path, required_family, rule)) {
-                if (error_ == FlowLabelingErrorV1::kNone) {
-                    Fail(FlowLabelingErrorV1::kInvalidConfig, path, "invalid IPv6 prefix");
+                if (error_ == FlowLabelingError::kNone) {
+                    Fail(FlowLabelingError::kInvalidConfig, path, "invalid IPv6 prefix");
                 }
                 return false;
             }
@@ -985,7 +983,7 @@ class ConfigCompiler {
         }
         uint64_t value = 0;
         if (!ParseUnsigned(match["value"], &value)) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, path + "/value", "invalid prefix value");
+            Fail(FlowLabelingError::kInvalidConfig, path + "/value", "invalid prefix value");
             return false;
         }
         size_t physical = kObservationDomainBitmask;
@@ -1001,7 +999,7 @@ class ConfigCompiler {
             presence = kTransportPresent;
         }
         if (prefix > width || value > MaxForSize(kFieldDefinitions[physical].size)) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, path, "prefix exceeds field width");
+            Fail(FlowLabelingError::kInvalidConfig, path, "prefix exceeds field width");
             return false;
         }
         if (field == LogicalField::kObservationDomainPrefix) {
@@ -1020,8 +1018,8 @@ class ConfigCompiler {
             std::array<uint8_t, 4> mask{};
             if (!ParseAddress(match["value"], AF_INET, value.data()) ||
                 !ParseAddress(match["mask"], AF_INET, mask.data()) || !Family(4, path, required_family, rule)) {
-                if (error_ == FlowLabelingErrorV1::kNone) {
-                    Fail(FlowLabelingErrorV1::kInvalidConfig, path, "invalid IPv4 bitmask");
+                if (error_ == FlowLabelingError::kNone) {
+                    Fail(FlowLabelingError::kInvalidConfig, path, "invalid IPv4 bitmask");
                 }
                 return false;
             }
@@ -1034,7 +1032,7 @@ class ConfigCompiler {
         uint64_t value = 0;
         uint64_t mask = 0;
         if (!ParseUnsigned(match["value"], &value) || !ParseUnsigned(match["mask"], &mask)) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, path, "invalid numeric bitmask");
+            Fail(FlowLabelingError::kInvalidConfig, path, "invalid numeric bitmask");
             return false;
         }
         size_t physical = kObservationDomainBitmask;
@@ -1047,7 +1045,7 @@ class ConfigCompiler {
                 physical = kIpFamily;
                 limit = 255;
                 if (*required_family != 0 && (static_cast<uint64_t>(*required_family) & mask) != (value & mask)) {
-                    Fail(FlowLabelingErrorV1::kInvalidConfig, path, "ip_family contradicts the address field");
+                    Fail(FlowLabelingError::kInvalidConfig, path, "ip_family contradicts the address field");
                     return false;
                 }
                 break;
@@ -1070,7 +1068,7 @@ class ConfigCompiler {
                 return false;
         }
         if (value > limit || mask > limit) {
-            Fail(FlowLabelingErrorV1::kInvalidConfig, path, "bitmask exceeds field width");
+            Fail(FlowLabelingError::kInvalidConfig, path, "bitmask exceeds field width");
             return false;
         }
         if (field == LogicalField::kObservationDomainBitmask) {
@@ -1082,15 +1080,15 @@ class ConfigCompiler {
         return true;
     }
 
-    const FlowLabelingCompileRequestV1& request_;
-    FlowLabelingDiagnosticV1* diagnostic_;
-    FlowLabelingErrorV1 error_ = FlowLabelingErrorV1::kNone;
+    const FlowLabelingCompileRequest& request_;
+    FlowLabelingDiagnostic* diagnostic_;
+    FlowLabelingError error_ = FlowLabelingError::kNone;
     uint32_t max_labels_ = 0;
     uint32_t max_logical_rules_ = 0;
     uint32_t max_compiled_rules_ = 0;
 };
 
-void CopyEndpoint(const FlowLabelEndpointFactsV1& source, bool source_side, uint8_t family, AclTuple* tuple) {
+void CopyEndpoint(const FlowLabelEndpointFacts& source, bool source_side, uint8_t family, AclTuple* tuple) {
     const uint32_t mac_present = source_side ? kSourceMacPresent : kDestinationMacPresent;
     const uint32_t ip_present = source_side ? kSourceIpPresent : kDestinationIpPresent;
     const uint32_t port_present = source_side ? kSourcePortPresent : kDestinationPortPresent;
@@ -1121,7 +1119,7 @@ void CopyEndpoint(const FlowLabelEndpointFactsV1& source, bool source_side, uint
     }
 }
 
-AclTuple EncodeTuple(const FlowLabelFactsV1& facts) {
+AclTuple EncodeTuple(const FlowLabelFacts& facts) {
     AclTuple tuple{};
     tuple.ip_family = facts.ip_family;
     tuple.observation_domain_range = rte_cpu_to_be_64(facts.observation_domain_id);
@@ -1133,7 +1131,7 @@ AclTuple EncodeTuple(const FlowLabelFactsV1& facts) {
         tuple.protocol_range = facts.transport_protocol;
     }
     for (size_t index = 0; index < 2; ++index) {
-        const FlowLabelVlanFactsV1& vlan = facts.vlan[index];
+        const FlowLabelVlanFacts& vlan = facts.vlan[index];
         const uint32_t present = index == 0 ? kOuterVlanPresent : kInnerVlanPresent;
         uint16_t* tpid_bitmask = index == 0 ? &tuple.outer_vlan_tpid_bitmask : &tuple.inner_vlan_tpid_bitmask;
         uint16_t* tpid_mask = index == 0 ? &tuple.outer_vlan_tpid_mask : &tuple.inner_vlan_tpid_mask;
@@ -1165,7 +1163,7 @@ int InitializeEal(const FlowLabelingStartupOptions& options) {
 
 }  // namespace
 
-class FlowLabelingPlugin::Matcher final : public IFlowLabelMatcherV1 {
+class FlowLabelingPlugin::Matcher final : public IFlowLabelMatcher {
  public:
     Matcher(FlowLabelingPlugin* owner, rte_acl_ctx* context, enum rte_acl_classify_alg algorithm, bool have_rules,
             std::vector<LabelRecord> labels)
@@ -1175,10 +1173,10 @@ class FlowLabelingPlugin::Matcher final : public IFlowLabelMatcherV1 {
           have_rules_(have_rules),
           labels_(std::move(labels)) {}
 
-    int ClassifyBatch(const FlowLabelFactsV1* facts, uint32_t count, uint32_t* primary_label_ids) const override {
+    int ClassifyBatch(const FlowLabelFacts* facts, uint32_t count, uint32_t* primary_label_ids) const override {
         if (facts == nullptr || count == 0 || primary_label_ids == nullptr) return -1;
         for (uint32_t index = 0; index < count; ++index) {
-            if (facts[index].struct_size != kFlowLabelFactsV1Size) return -1;
+            if (facts[index].struct_size != kFlowLabelFactsSize) return -1;
         }
         if (!have_rules_) {
             std::fill(primary_label_ids, primary_label_ids + count, 0);
@@ -1199,12 +1197,12 @@ class FlowLabelingPlugin::Matcher final : public IFlowLabelMatcherV1 {
         return 0;
     }
 
-    bool FindLabel(uint32_t label_id, FlowPrimaryLabelViewV1* output) const override {
+    bool FindLabel(uint32_t label_id, FlowPrimaryLabelView* output) const override {
         if (label_id == 0 || output == nullptr) return false;
         const auto found = std::lower_bound(labels_.begin(), labels_.end(), label_id,
                                             [](const LabelRecord& label, uint32_t id) { return label.id < id; });
         if (found == labels_.end() || found->id != label_id) return false;
-        FlowPrimaryLabelViewV1 view;
+        FlowPrimaryLabelView view;
         view.label_id = found->id;
         view.priority = found->priority;
         view.name = found->name.c_str();
@@ -1276,57 +1274,56 @@ int FlowLabelingPlugin::Stop() {
     return 0;
 }
 
-FlowLabelingErrorV1 FlowLabelingPlugin::RuntimeStatus(FlowLabelingDiagnosticV1* diagnostic) const {
+FlowLabelingError FlowLabelingPlugin::RuntimeStatus(FlowLabelingDiagnostic* diagnostic) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!ready_) {
-        SetDiagnostic(diagnostic, FlowLabelingErrorV1::kUnavailable, "/runtime",
+        SetDiagnostic(diagnostic, FlowLabelingError::kUnavailable, "/runtime",
                       "flow-labeling DPDK runtime is not started");
-        return FlowLabelingErrorV1::kUnavailable;
+        return FlowLabelingError::kUnavailable;
     }
-    SetDiagnostic(diagnostic, FlowLabelingErrorV1::kNone, "", "");
-    return FlowLabelingErrorV1::kNone;
+    SetDiagnostic(diagnostic, FlowLabelingError::kNone, "", "");
+    return FlowLabelingError::kNone;
 }
 
-FlowLabelingErrorV1 FlowLabelingPlugin::CreateMatcher(const FlowLabelingCompileRequestV1& request,
-                                                      IFlowLabelMatcherV1** output,
-                                                      FlowLabelingDiagnosticV1* diagnostic) {
+FlowLabelingError FlowLabelingPlugin::CreateMatcher(const FlowLabelingCompileRequest& request,
+                                                    IFlowLabelMatcher** output, FlowLabelingDiagnostic* diagnostic) {
     if (output == nullptr) {
-        SetDiagnostic(diagnostic, FlowLabelingErrorV1::kInvalidSnapshot, "/output", "matcher output is null");
-        return FlowLabelingErrorV1::kInvalidSnapshot;
+        SetDiagnostic(diagnostic, FlowLabelingError::kInvalidSnapshot, "/output", "matcher output is null");
+        return FlowLabelingError::kInvalidSnapshot;
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
     if (!ready_) {
-        SetDiagnostic(diagnostic, FlowLabelingErrorV1::kUnavailable, "/runtime",
+        SetDiagnostic(diagnostic, FlowLabelingError::kUnavailable, "/runtime",
                       "flow-labeling DPDK runtime is not started");
-        return FlowLabelingErrorV1::kUnavailable;
+        return FlowLabelingError::kUnavailable;
     }
-    if (request.struct_size != kFlowLabelingCompileRequestV1Size || request.snapshot == nullptr ||
+    if (request.struct_size != kFlowLabelingCompileRequestSize || request.snapshot == nullptr ||
         request.max_labels == 0 || request.max_logical_rules == 0 || request.max_compiled_rules == 0 ||
         request.reserved_module_state_bytes == 0) {
-        SetDiagnostic(diagnostic, FlowLabelingErrorV1::kInvalidSnapshot, "/snapshot",
+        SetDiagnostic(diagnostic, FlowLabelingError::kInvalidSnapshot, "/snapshot",
                       "compile request or snapshot is invalid");
-        return FlowLabelingErrorV1::kInvalidSnapshot;
+        return FlowLabelingError::kInvalidSnapshot;
     }
 
     const ConfigChannelSnapshot& snapshot = *request.snapshot;
     if (snapshot.schema_id != kSchemaId || snapshot.format != "yaml" || snapshot.content == nullptr ||
         snapshot.content_bytes == 0 || snapshot.content_bytes > kMaxSnapshotBytes ||
         snapshot.content_bytes != snapshot.content->size()) {
-        SetDiagnostic(diagnostic, FlowLabelingErrorV1::kInvalidSnapshot, "/snapshot",
+        SetDiagnostic(diagnostic, FlowLabelingError::kInvalidSnapshot, "/snapshot",
                       "snapshot metadata does not identify an owned flow-labeling YAML document");
-        return FlowLabelingErrorV1::kInvalidSnapshot;
+        return FlowLabelingError::kInvalidSnapshot;
     }
 
     CompileResult compiled;
     try {
         ConfigCompiler compiler(request, diagnostic);
-        const FlowLabelingErrorV1 status = compiler.Compile(&compiled);
-        if (status != FlowLabelingErrorV1::kNone) return status;
+        const FlowLabelingError status = compiler.Compile(&compiled);
+        if (status != FlowLabelingError::kNone) return status;
     } catch (const std::bad_alloc&) {
-        SetDiagnostic(diagnostic, FlowLabelingErrorV1::kAllocationFailed, "/compile",
+        SetDiagnostic(diagnostic, FlowLabelingError::kAllocationFailed, "/compile",
                       "configuration compilation allocation failed");
-        return FlowLabelingErrorV1::kAllocationFailed;
+        return FlowLabelingError::kAllocationFailed;
     }
 
     char context_name[RTE_ACL_NAMESIZE]{};
@@ -1340,9 +1337,9 @@ FlowLabelingErrorV1 FlowLabelingPlugin::CreateMatcher(const FlowLabelingCompileR
     };
     rte_acl_ctx* context = rte_acl_create(&parameters);
     if (context == nullptr) {
-        SetDiagnostic(diagnostic, FlowLabelingErrorV1::kDpdkFailure, "/runtime/acl",
+        SetDiagnostic(diagnostic, FlowLabelingError::kDpdkFailure, "/runtime/acl",
                       "DPDK failed to create the task-private ACL context");
-        return FlowLabelingErrorV1::kDpdkFailure;
+        return FlowLabelingError::kDpdkFailure;
     }
 
     if (!compiled.rules.empty()) {
@@ -1350,9 +1347,9 @@ FlowLabelingErrorV1 FlowLabelingPlugin::CreateMatcher(const FlowLabelingCompileR
                                                  compiled.rules.size());
         if (add_status != 0) {
             rte_acl_free(context);
-            SetDiagnostic(diagnostic, FlowLabelingErrorV1::kDpdkFailure, "/spec/rules",
+            SetDiagnostic(diagnostic, FlowLabelingError::kDpdkFailure, "/spec/rules",
                           "DPDK rejected compiled ACL rules");
-            return FlowLabelingErrorV1::kDpdkFailure;
+            return FlowLabelingError::kDpdkFailure;
         }
         rte_acl_config configuration{};
         configuration.num_categories = 1;
@@ -1362,8 +1359,8 @@ FlowLabelingErrorV1 FlowLabelingPlugin::CreateMatcher(const FlowLabelingCompileR
         const int build_status = rte_acl_build(context, &configuration);
         if (build_status != 0) {
             rte_acl_free(context);
-            const FlowLabelingErrorV1 error =
-                build_status == -ENOMEM ? FlowLabelingErrorV1::kBudgetExceeded : FlowLabelingErrorV1::kDpdkFailure;
+            const FlowLabelingError error =
+                build_status == -ENOMEM ? FlowLabelingError::kBudgetExceeded : FlowLabelingError::kDpdkFailure;
             SetDiagnostic(diagnostic, error, "/spec/engine/max_runtime_bytes", "DPDK failed to build the ACL runtime");
             return error;
         }
@@ -1372,9 +1369,9 @@ FlowLabelingErrorV1 FlowLabelingPlugin::CreateMatcher(const FlowLabelingCompileR
         const int algorithm_status = rte_acl_set_ctx_classify(context, compiled.algorithm);
         if (algorithm_status != 0) {
             rte_acl_free(context);
-            SetDiagnostic(diagnostic, FlowLabelingErrorV1::kUnsupportedAlgorithm, "/spec/engine/algorithm",
+            SetDiagnostic(diagnostic, FlowLabelingError::kUnsupportedAlgorithm, "/spec/engine/algorithm",
                           "requested DPDK ACL algorithm is unavailable on this platform");
-            return FlowLabelingErrorV1::kUnsupportedAlgorithm;
+            return FlowLabelingError::kUnsupportedAlgorithm;
         }
     }
 
@@ -1382,15 +1379,15 @@ FlowLabelingErrorV1 FlowLabelingPlugin::CreateMatcher(const FlowLabelingCompileR
         Matcher(this, context, compiled.algorithm, !compiled.rules.empty(), std::move(compiled.labels));
     if (matcher == nullptr) {
         rte_acl_free(context);
-        SetDiagnostic(diagnostic, FlowLabelingErrorV1::kAllocationFailed, "/runtime/matcher",
+        SetDiagnostic(diagnostic, FlowLabelingError::kAllocationFailed, "/runtime/matcher",
                       "matcher allocation failed");
-        return FlowLabelingErrorV1::kAllocationFailed;
+        return FlowLabelingError::kAllocationFailed;
     }
 
     ++active_matchers_;
     *output = matcher;
-    SetDiagnostic(diagnostic, FlowLabelingErrorV1::kNone, "", "");
-    return FlowLabelingErrorV1::kNone;
+    SetDiagnostic(diagnostic, FlowLabelingError::kNone, "", "");
+    return FlowLabelingError::kNone;
 }
 
 void FlowLabelingPlugin::ReleaseMatcher() noexcept {

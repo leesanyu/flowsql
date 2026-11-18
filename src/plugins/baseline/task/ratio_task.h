@@ -22,7 +22,7 @@ namespace baseline {
 
 class TaskRegistry;
 
-class BaselineRatioTask final : public IBaselineRatioTask, public IBaselineRatioEvaluationV1, public BaselineTaskBase {
+class BaselineRatioTask final : public IBaselineRatioTask, public BaselineTaskBase {
     friend class CheckpointAccess;
 
  public:
@@ -39,10 +39,8 @@ class BaselineRatioTask final : public IBaselineRatioTask, public IBaselineRatio
                                                     BaselineSerializationFormat format) const override;
     BaselineStatus Close() override;
 
-    RollingBaselineResult SubmitObservation(const RatioRollingObservation& obs,
-                                            const RollingSubmitOptions& options) override;
-    BaselineEvaluationResultV1 SubmitObservationWithReadiness(const RatioRollingObservation& obs,
-                                                              const RollingSubmitOptions& options) override;
+    BaselineEvaluationResult SubmitObservation(const RatioRollingObservation& obs,
+                                               const RollingSubmitOptions& options) override;
     RollingPrediction PredictRolling(std::string_view series_key, int64_t bucket_id) const override;
     RollingPredictionSequence PredictRolling(std::string_view series_key, int64_t start_bucket_id,
                                              uint32_t point_count) const override;
@@ -59,8 +57,8 @@ class BaselineRatioTask final : public IBaselineRatioTask, public IBaselineRatio
 
  private:
     void OnClosing() override;
-    BaselineStatus DoReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope) override;
-    BaselineStateUsageV1 DoQueryStateUsage() const override;
+    BaselineStatus DoReleaseIdentity(std::string_view key, BaselineStateReleaseScope scope) override;
+    BaselineStateUsage DoQueryStateUsage() const override;
     bool HasIdentityCapacity(const std::string& key, bool include_model) const;
 
     BaselineTaskSpec spec_;

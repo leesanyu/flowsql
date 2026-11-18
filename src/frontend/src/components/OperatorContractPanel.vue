@@ -141,7 +141,7 @@ const unlinkedRoles = input => input.roles.filter(role => !usage.value.parameter
 const detailsFor = section => {
   if (!historical.value) return observed.value?.details.filter(d => d.section === section) || []
   const doc = historical.value.document
-  if (doc.schema_id !== 'flowsql.operator-data-contract.v1') return []
+  if (doc.schema_id !== 'flowsql.operator-data-contract') return []
   const paths = section === 'parameters' ? ['/configuration'] : section === 'inputs' ? doc.inputs.map((_, i) => '/inputs/' + i) : doc.outputs.flatMap((output,i) => ['/outputs/' + i, ...(output.structure_ref?.startsWith('#/') ? [output.structure_ref.slice(1)] : [])])
   return paths.map(resource_pointer => ({ section, resource_pointer, exact_reference: historical.value.exact_reference, reason: '历史完整规则' }))
 }

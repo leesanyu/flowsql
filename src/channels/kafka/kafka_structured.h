@@ -20,5 +20,5 @@ struct StructuredConfig {
 StructuredConfig ParseStructuredConfig(const rapidjson::Value& value);
 std::shared_ptr<arrow::Schema> StructuredSchema(const StructuredConfig& config);
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> DecodeStructured(const StructuredConfig& config,
-                                                                    const std::vector<KafkaMessageV1>& messages);
+                                                                    const std::vector<KafkaMessage>& messages);
 }  // namespace flowsql::channels::kafka

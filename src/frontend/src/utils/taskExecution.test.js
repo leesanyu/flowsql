@@ -13,18 +13,22 @@ test('continuous capture forces async and explains the mode change', () => {
   assert.equal(policy.notice, '当前 SQL 使用连续采集源，已切换为异步执行。')
 })
 
-test('finite sources and legacy analysis preserve the selected mode', () => {
-  for (const requires_async of [false, undefined]) {
-    const analysis = { task_kind: 'batch', statement_count: 1, requires_async }
-    assert.equal(taskExecutionPolicy(analysis, 'sync').mode, 'sync')
-    assert.equal(taskExecutionPolicy(analysis, 'async').mode, 'async')
-    assert.equal(taskExecutionPolicy(analysis, 'sync').allowSync, true)
-    assert.equal(taskExecutionPolicy(analysis, 'sync').notice, '')
-  }
+test('finite sources preserve the selected mode', () => {
+  const analysis = { task_kind: 'batch', statement_count: 1, requires_async: false }
+  assert.equal(taskExecutionPolicy(analysis, 'sync').mode, 'sync')
+  assert.equal(taskExecutionPolicy(analysis, 'async').mode, 'async')
+  assert.equal(taskExecutionPolicy(analysis, 'sync').allowSync, true)
+  assert.equal(taskExecutionPolicy(analysis, 'sync').notice, '')
+})
+
+test('initial loading preserves the selected mode until analysis exists', () => {
+  assert.equal(taskExecutionPolicy(null, 'sync').mode, 'sync')
+  assert.equal(taskExecutionPolicy(null, 'async').mode, 'async')
+  assert.equal(taskExecutionPolicy(null).notice, '')
 })
 
 test('existing stream and multi-statement execution still require async', () => {
-  for (const analysis of [{ task_kind: 'stream', statement_count: 1 }, { task_kind: 'batch', statement_count: 2 }]) {
+  for (const analysis of [{ task_kind: 'stream', statement_count: 1, requires_async: true }, { task_kind: 'batch', statement_count: 2, requires_async: false }]) {
     const policy = taskExecutionPolicy(analysis, 'sync')
     assert.equal(policy.mode, 'async')
     assert.equal(policy.allowSync, false)

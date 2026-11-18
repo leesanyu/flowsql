@@ -34,14 +34,14 @@ class Budget final : public npm::INpmTaskBudget {
     uint64_t limit = 2 * 1024 * 1024;
 };
 
-class Emitter final : public npm::INpmResultEmitterV1 {
+class Emitter final : public npm::INpmResultEmitter {
  public:
     int Emit(std::string_view entity, const arrow::RecordBatch& rows) override {
         assert(entity == (family == flowsql::packet::AddressFamily::kIPv4 ? "http1_transaction_ipv4"
                                                                           : "http1_transaction_ipv6") &&
                rows.num_rows() == 1);
-        assert(npm::ValidateNpmEntityRowsV1("http1", npm::NpmHttp1TransactionEntityDescriptorV1(family), rows).error ==
-               npm::NpmProtocolContractErrorV1::kNone);
+        assert(npm::ValidateNpmEntityRows("http1", npm::NpmHttp1TransactionEntityDescriptor(family), rows).error ==
+               npm::NpmProtocolContractError::kNone);
         ++calls;
         domains.push_back(
             std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("observation_domain_id"))->Value(0));
@@ -63,12 +63,12 @@ class Emitter final : public npm::INpmResultEmitterV1 {
     std::vector<std::string> outcomes;
 };
 
-class Cursor final : public npm::INpmTcpStreamCursorV1 {
+class Cursor final : public npm::INpmTcpStreamCursor {
  public:
     explicit Cursor(std::string bytes, int64_t capture_time) : bytes_(std::move(bytes)), capture_time_(capture_time) {}
-    bool Peek(npm::NpmTcpStreamEventV1* event) const override {
+    bool Peek(npm::NpmTcpStreamEvent* event) const override {
         if (consumed_) return false;
-        event->kind = npm::NpmTcpStreamEventKindV1::kData;
+        event->kind = npm::NpmTcpStreamEventKind::kData;
         event->bytes = {reinterpret_cast<const uint8_t*>(bytes_.data()), bytes_.size()};
         event->captured_at_ns = capture_time_;
         return true;
@@ -86,8 +86,8 @@ class Cursor final : public npm::INpmTcpStreamCursorV1 {
     bool consumed_ = false;
 };
 
-npm::NpmHttp1ConfigV1 Config() {
-    npm::NpmHttp1ConfigV1 config;
+npm::NpmHttp1Config Config() {
+    npm::NpmHttp1Config config;
     config.primary_label_ids = {1001};
     config.max_header_bytes = 1024;
     return config;
@@ -119,12 +119,12 @@ KeyType Key(uint64_t domain) {
     return key;
 }
 
-int Send(npm::NpmHttp1ProtocolModuleV1* module, const npm::NpmSessionView& session, npm::NpmPacketDirection direction,
+int Send(npm::NpmHttp1ProtocolModule* module, const npm::NpmSessionView& session, npm::NpmPacketDirection direction,
          std::string bytes, int64_t time, Emitter* emitter) {
-    npm::NpmTcpStreamContextV1 context;
+    npm::NpmTcpStreamContext context;
     context.session = &session;
     context.direction = direction;
-    context.origin = npm::NpmTcpStreamOriginV1::kSyn;
+    context.origin = npm::NpmTcpStreamOrigin::kSyn;
     context.observed_at_ns = time;
     Cursor cursor(std::move(bytes), time);
     const int error = module->OnTcpStreamReadable(context, cursor, *emitter);
@@ -135,7 +135,7 @@ int Send(npm::NpmHttp1ProtocolModuleV1* module, const npm::NpmSessionView& sessi
 template <typename KeyType>
 void TestStreamLifecycleAndFailure() {
     auto budget = std::make_shared<Budget>();
-    npm::NpmHttp1ProtocolModuleV1 module(Config(), budget);
+    npm::NpmHttp1ProtocolModule module(Config(), budget);
     auto key = Key<KeyType>(44);
     npm::NpmSessionView session;
     session.session_id = 7;
@@ -144,8 +144,8 @@ void TestStreamLifecycleAndFailure() {
     emitter.family =
         sizeof(key.a_ip) == 4 ? flowsql::packet::AddressFamily::kIPv4 : flowsql::packet::AddressFamily::kIPv6;
     npm::NpmPacketView packet;
-    npm::NpmInputEventV1 input;
-    input.kind = npm::NpmInputKindV1::kTcpPacket;
+    npm::NpmInputEvent input;
+    input.kind = npm::NpmInputKind::kTcpPacket;
     input.session = &session;
     input.transport = &packet;
     const std::string ignored_payload = "GET /not-from-packet HTTP/1.1\r\n\r\n";
@@ -160,7 +160,7 @@ void TestStreamLifecycleAndFailure() {
     assert(module.OnSessionEnd(session, npm::NpmSessionEndReason::kEof, 300, emitter) == 0);
     assert(module.Finish(300, emitter) == 0 && budget->used == 0);
 
-    npm::NpmHttp1ProtocolModuleV1 failing(Config(), budget);
+    npm::NpmHttp1ProtocolModule failing(Config(), budget);
     emitter.error = EIO;
     assert(Send(&failing, session, npm::NpmPacketDirection::kAToB, "GET / HTTP/1.1\r\n\r\n", 400, &emitter) == 0);
     assert(Send(&failing, session, npm::NpmPacketDirection::kBToA, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", 500,
@@ -168,13 +168,13 @@ void TestStreamLifecycleAndFailure() {
     failing.Abort();
     assert(budget->used == 0);
     budget->limit = 1;
-    npm::NpmHttp1ProtocolModuleV1 rejected(Config(), budget);
+    npm::NpmHttp1ProtocolModule rejected(Config(), budget);
     assert(rejected.OnInput(input, emitter) == ENOSPC);
     rejected.Abort();
     assert(budget->used == 0);
 
     budget->limit = 2 * 1024 * 1024;
-    npm::NpmHttp1ProtocolModuleV1 cancelled(Config(), budget);
+    npm::NpmHttp1ProtocolModule cancelled(Config(), budget);
     emitter.error = 0;
     assert(Send(&cancelled, session, npm::NpmPacketDirection::kAToB, "GET / HTTP/1.1\r\n\r\n", 600, &emitter) == 0);
     const int prior_calls = emitter.calls;

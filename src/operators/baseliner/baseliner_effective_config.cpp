@@ -168,7 +168,7 @@ std::string EffectiveConfigJson(const TaskConfig& c) {
     Number(w, "max_basis_versions", c.state.limits.max_basis_versions_per_metric);
     Text(w, "capacity", c.state.evict_idle ? "evict_idle" : "reject");
     Text(w, "release_scope",
-         c.state.release_scope == BaselineStateReleaseScopeV1::kRuntimeOnly ? "RuntimeOnly" : "AllState");
+         c.state.release_scope == BaselineStateReleaseScope::kRuntimeOnly ? "RuntimeOnly" : "AllState");
     Number(w, "idle_timeout_ms", c.state.idle_timeout_ms);
     Number(w, "maintenance_max_releases", c.state.maintenance_max_releases);
     Number(w, "maintenance_max_bytes", c.state.maintenance_max_bytes);

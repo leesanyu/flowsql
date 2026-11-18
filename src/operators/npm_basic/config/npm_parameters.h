@@ -14,41 +14,35 @@
 
 namespace flowsql::npm {
 
-constexpr std::size_t kNpmParametersMaxJsonBytesV1 = 64 * 1024;
-constexpr std::size_t kNpmParametersMaxDepthV1 = 64;
+constexpr std::size_t kNpmParametersMaxJsonBytes = 64 * 1024;
+constexpr std::size_t kNpmParametersMaxDepth = 64;
 constexpr uint32_t kNpmMinLabelingMemoryMiB = 8;
 constexpr uint32_t kNpmDefaultLabelingMemoryMiB = 64;
 constexpr uint32_t kNpmMaxLabelingMemoryMiB = 256;
 
-enum class NpmParameterSourceV1 : uint8_t {
-    kLegacyWith = 0,
-    kParametersV1 = 1,
-};
-
-struct NpmCoreParametersV1 {
+struct NpmCoreParameters {
     NpmAnalysisConfig analysis;
     bool run_mode_explicit = false;
     std::optional<std::string> labeling_reference;
     std::optional<uint32_t> labeling_memory_mib;
     std::optional<uint32_t> result_retention_days;
-    NpmTcpStreamConfigV1 tcp_stream;
+    NpmTcpStreamConfig tcp_stream;
 };
 
-struct NpmBasicModuleParametersV1 {};
+struct NpmBasicModuleParameters {};
 
-struct NpmSessionModuleParametersV1 {
+struct NpmSessionModuleParameters {
     uint32_t max_tcp_ranges_per_direction = 1024;
 };
 
-struct NpmTaskParametersV1 {
+struct NpmTaskParameters {
     uint32_t schema_version = 1;
-    NpmParameterSourceV1 source = NpmParameterSourceV1::kLegacyWith;
-    NpmCoreParametersV1 core;
-    std::optional<NpmBasicModuleParametersV1> basic;
-    std::optional<NpmSessionModuleParametersV1> session;
+    NpmCoreParameters core;
+    std::optional<NpmBasicModuleParameters> basic;
+    std::optional<NpmSessionModuleParameters> session;
 };
 
-struct NpmParameterConsumersV1 {
+struct NpmParameterConsumers {
     bool basic_enabled = true;
     bool basic_available = true;
     bool session_enabled = false;
@@ -57,7 +51,7 @@ struct NpmParameterConsumersV1 {
     bool labeling_available = false;
 };
 
-enum class NpmParameterErrorV1 : uint8_t {
+enum class NpmParameterError : uint8_t {
     kNone = 0,
     kNullInput,
     kEmptyInput,
@@ -74,19 +68,18 @@ enum class NpmParameterErrorV1 : uint8_t {
     kInvalidValue,
     kInvalidRange,
     kUnavailableFeature,
-    kLegacyConflict,
     kInvalidExactReference,
     kAllocationFailed,
 };
 
-struct NpmParameterStatusV1 {
-    NpmParameterErrorV1 error = NpmParameterErrorV1::kNone;
+struct NpmParameterStatus {
+    NpmParameterError error = NpmParameterError::kNone;
     std::string path;
 };
 
-/** Parses an owned V1 parameters envelope. Output is replaced only after complete validation. */
-NpmParameterStatusV1 ParseNpmParametersV1(const char* parameters_json, const NpmParameterConsumersV1& consumers,
-                                          NpmTaskParametersV1* output);
+/** Parses an owned parameters envelope. Output is replaced only after complete validation. */
+NpmParameterStatus ParseNpmParameters(const char* parameters_json, const NpmParameterConsumers& consumers,
+                                      NpmTaskParameters* output);
 
 }  // namespace flowsql::npm
 

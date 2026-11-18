@@ -13,30 +13,30 @@
 #include <iostream>
 #include <set>
 
-extern "C" const char* flowsql_operator_data_contract_v1(int index);
+extern "C" const char* flowsql_operator_data_contract(int index);
 using namespace flowsql;
 using namespace flowsql::dataset;
 using namespace flowsql::channels::config;
 
 namespace {
-struct ConfigurationServices : IQuerier, IFlowLabelingProviderV1, IConfigChannelRegistryV1 {
+struct ConfigurationServices : IQuerier, IFlowLabelingProvider, IConfigChannelRegistry {
     bool available = true;
     int resolves = 0;
     int Traverse(const Guid&, fntraverse) override { return 0; }
     void* First(const Guid& id) override {
-        if (memcmp(&id, &IID_FLOW_LABELING_PROVIDER_V1, sizeof(Guid)) == 0)
-            return static_cast<IFlowLabelingProviderV1*>(this);
-        if (memcmp(&id, &IID_CONFIG_CHANNEL_REGISTRY_V1, sizeof(Guid)) == 0)
-            return static_cast<IConfigChannelRegistryV1*>(this);
+        if (memcmp(&id, &IID_FLOW_LABELING_PROVIDER, sizeof(Guid)) == 0)
+            return static_cast<IFlowLabelingProvider*>(this);
+        if (memcmp(&id, &IID_CONFIG_CHANNEL_REGISTRY, sizeof(Guid)) == 0)
+            return static_cast<IConfigChannelRegistry*>(this);
         return nullptr;
     }
-    FlowLabelingErrorV1 RuntimeStatus(FlowLabelingDiagnosticV1*) const override {
-        return available ? FlowLabelingErrorV1::kNone : FlowLabelingErrorV1::kUnavailable;
+    FlowLabelingError RuntimeStatus(FlowLabelingDiagnostic*) const override {
+        return available ? FlowLabelingError::kNone : FlowLabelingError::kUnavailable;
     }
-    FlowLabelingErrorV1 CreateMatcher(const FlowLabelingCompileRequestV1&, IFlowLabelMatcherV1**,
-                                      FlowLabelingDiagnosticV1*) override {
+    FlowLabelingError CreateMatcher(const FlowLabelingCompileRequest&, IFlowLabelMatcher**,
+                                    FlowLabelingDiagnostic*) override {
         assert(false && "metadata resolution must not compile a matcher");
-        return FlowLabelingErrorV1::kUnavailable;
+        return FlowLabelingError::kUnavailable;
     }
     int Resolve(const char* ref, ConfigChannelSnapshot* out, std::string*) override {
         assert(std::string(ref) == "config.labels@7");
@@ -50,13 +50,13 @@ struct ConfigurationServices : IQuerier, IFlowLabelingProviderV1, IConfigChannel
 void CheckConfigAdapter() {
     npm::NpmBasicOperator provider(nullptr);
     IPlugin* plugin = &provider;
-    auto* adapter = dynamic_cast<IOperatorConfigAdapterV1*>(plugin);
+    auto* adapter = dynamic_cast<IOperatorConfigAdapter*>(plugin);
     assert(adapter && "NPM must expose production configuration resolution");
     Json request;
     request.Parse(
         R"({"operator":{"category":"npm","name":"basic"},"parameters":{"observing":"basic_ipv6"},"inputs":[],"execution_context":{"source":"pcapfile.sample","managed_output":false,"finite_source":true}})");
     std::string response;
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     assert(adapter->ResolveInvocation(Encode(request).c_str(), &response, &error) == 0);
     Json resolved;
     resolved.Parse(response.c_str());
@@ -67,8 +67,8 @@ void CheckConfigAdapter() {
     assert(normalized["core"]["max_active_sessions"].GetUint64() == npm::kNpmDefaultActiveSessions);
     assert(normalized["input_namespace"] == "pcapfile.sample");
     assert(resolved["inputs"] == request["inputs"] && resolved["config_refs"].Empty());
-    assert(ValidateOperatorParameters(Json().Parse(flowsql_operator_data_contract_v1(0)),
-                                      resolved["effective_parameters"], &error) == 0);
+    assert(ValidateOperatorParameters(Json().Parse(flowsql_operator_data_contract(0)), resolved["effective_parameters"],
+                                      &error) == 0);
     // No guessed source mode in a metadata-only request without capability facts.
     request["execution_context"].RemoveMember("finite_source");
     assert(adapter->ResolveInvocation(Encode(request).c_str(), &response, &error) == 0);
@@ -112,17 +112,19 @@ void CheckConfigAdapter() {
     assert(configured.ResolveInvocation(Encode(request).c_str(), &response, &error) != 0 && response.empty());
     assert(error.code == "UNAVAILABLE");
     request.Parse(
-        R"({"parameters":{"observing":"basic_ipv4","output_interval_ns":"12000000","max_active_sessions":"42","run_mode":"offline"},"inputs":[],"execution_context":{"finite_source":true,"managed_output":false}})");
+        R"JSON({"parameters":{"observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"output_interval_ns\":12000000,\"max_active_sessions\":42,\"run_mode\":\"offline\"}}"},"inputs":[],"execution_context":{"finite_source":true,"managed_output":false}})JSON");
     assert(adapter->ResolveInvocation(Encode(request).c_str(), &response, &error) == 0);
     resolved.Parse(response.c_str());
     assert(resolved["normalized_config"]["core"]["output_interval_ns"].GetInt64() == 12000000);
     assert(resolved["normalized_config"]["core"]["max_active_sessions"].GetUint64() == 42);
     request["execution_context"]["finite_source"].SetBool(false);
     assert(adapter->ResolveInvocation(Encode(request).c_str(), &response, &error) != 0);
-    assert(error.field_path == "/parameters/run_mode");
-    for (const char* params :
-         {R"({"observing":"basic_ipv4","max_active_sessions":"0"})", R"({"observing":"basic_ipv4","result_mode":1})",
-          R"({"observing":"session_ipv4"})", R"({"observing":"basic_ipv4","features":"basic,basic"})"}) {
+    assert(error.field_path == "/parameters/core/run_mode");
+    for (
+        const char* params :
+        {R"JSON({"observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"max_active_sessions\":0}}"})JSON",
+         R"JSON({"observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"result_mode\":1}}"})JSON",
+         R"({"observing":"session_ipv4"})", R"({"observing":"basic_ipv4","features":"basic,basic"})"}) {
         Json supplied;
         supplied.Parse(params);
         npm::NpmBasicTaskConfig production;
@@ -146,10 +148,10 @@ std::set<std::string> Codes(const Value& field) {
     return codes;
 }
 
-void CheckDnsDictionary(const Value& dictionary, const npm::NpmEntityDescriptorV1& entity) {
+void CheckDnsDictionary(const Value& dictionary, const npm::NpmEntityDescriptor& entity) {
     Json normalized;
     std::vector<SemanticsReference> references;
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     const auto rc = NormalizeSemantics("dictionary", Encode(dictionary), &normalized, &references, &error);
     if (rc) std::cerr << error.field_path << " " << error.message << '\n';
     assert(rc == 0 && references.empty());
@@ -203,10 +205,10 @@ void CheckDnsDictionary(const Value& dictionary, const npm::NpmEntityDescriptorV
             field["validity"]["value"]["field_ids"][0].SetString("absent", invalid.GetAllocator());
     assert(NormalizeSemantics("dictionary", Encode(invalid), &normalized, &references, &error) != 0);
 }
-void CheckSessionDictionary(const Value& dictionary, const npm::NpmEntityDescriptorV1& entity) {
+void CheckSessionDictionary(const Value& dictionary, const npm::NpmEntityDescriptor& entity) {
     Json normalized;
     std::vector<SemanticsReference> references;
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     const int rc = NormalizeSemantics("dictionary", Encode(dictionary), &normalized, &references, &error);
     if (rc) std::cerr << error.field_path << " " << error.message << '\n';
     assert(rc == 0 && references.empty());
@@ -231,10 +233,10 @@ void CheckSessionDictionary(const Value& dictionary, const npm::NpmEntityDescrip
         assert(Get(Field(dictionary, "measurement_flags")["definition"], "value").find("16") != std::string::npos);
     }
 }
-void CheckProtocolDictionary(const Value& dictionary, const npm::NpmEntityDescriptorV1& entity) {
+void CheckProtocolDictionary(const Value& dictionary, const npm::NpmEntityDescriptor& entity) {
     Json normalized;
     std::vector<SemanticsReference> references;
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     const int rc = NormalizeSemantics("dictionary", Encode(dictionary), &normalized, &references, &error);
     if (rc) std::cerr << error.field_path << " " << error.message << '\n';
     assert(rc == 0 && references.empty());
@@ -267,17 +269,18 @@ void CheckProtocolDictionary(const Value& dictionary, const npm::NpmEntityDescri
 
 int main() {
     CheckConfigAdapter();
-    const char* text = flowsql_operator_data_contract_v1(0);
-    assert(text && std::string(text) == flowsql_operator_data_contract_v1(1));
-    assert(!flowsql_operator_data_contract_v1(-1) && !flowsql_operator_data_contract_v1(2));
+    const char* text = flowsql_operator_data_contract(0);
+    assert(text && *text);
+    assert(!flowsql_operator_data_contract(-1) && !flowsql_operator_data_contract(1) &&
+           !flowsql_operator_data_contract(2));
     Json doc;
     std::vector<SemanticsReference> references;
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     const int rc = NormalizeSemantics("operator_contract", text, &doc, &references, &error);
     if (rc) std::cerr << error.field_path << " " << error.message << '\n';
     assert(rc == 0);
     assert(Get(doc["operator"], "category") == "npm" && Get(doc["operator"], "name") == "basic");
-    assert(doc["configuration"]["invocation_schema"]["properties"].MemberCount() == 17);
+    assert(doc["configuration"]["invocation_schema"]["properties"].MemberCount() == 5);
     assert(doc["outputs"].Size() == 2 && doc["outputs"][0]["variants"].Size() == 13);
     assert(doc["resources"]["managed_results"]["entities"].Size() == 12);
     // Static definitions are present at component load, before any task or database exists.
@@ -364,7 +367,8 @@ int main() {
     check(R"({"observing":"basic_ipv4","parameters":"{\"schema_version\":2}"})", false);
     check(R"({"observing":"basic_ipv4","parameters":"\"{}\""})", false);
     check(R"({"observing":"basic_ipv4","unknown":"1"})", false);
-    check(R"({"observing":"basic_ipv4","result_mode":null})", false);
+    check(R"JSON({"observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"result_mode\":null}}"})JSON",
+          false);
     check(R"({"observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"max_active_sessions\":0}}"})",
           false);
     // Unconsumed module objects are allowed by production; do not invent a stricter global schema.

@@ -23,13 +23,9 @@ struct OperatorRef {
 
 // SQL 解析结果
 struct SqlStatement {
-    std::string source;       // FROM 后的源通道名
-    std::vector<std::string> sources;  // FROM 后的全部源通道名（source=sources[0]）
-    std::string op_category;   // USING 后的算子 category（可选，空表示无算子）
-    std::string op_name;      // USING 后的算子 name（可选）
+    std::vector<std::string> sources;    // FROM 后的全部源通道名
     std::vector<OperatorRef> operators;  // USING/THEN 算子链
-    std::vector<std::unordered_map<std::string, std::string>> operator_with_params;  // 与 operators 对齐
-    std::unordered_map<std::string, std::string> with_params;  // WITH key=val,...
+    std::vector<std::unordered_map<std::string, std::string>> operator_with_params;  // 与 operators 等长并按索引对应
     std::string dest;         // INTO 后的目标通道名（可选，空表示直接返回结果）
     std::vector<std::string> columns;  // SELECT 后的列名（空表示 *）
     std::string where_clause; // WHERE 后的过滤条件（可选，空表示无过滤）
@@ -38,10 +34,7 @@ struct SqlStatement {
     std::string error;        // 解析错误信息（空表示成功）
 
     // 是否有算子
-    bool HasOperator() const {
-        if (!operators.empty()) return true;
-        return !op_category.empty() && !op_name.empty();
-    }
+    bool HasOperator() const { return !operators.empty(); }
 };
 
 // 递归下降 SQL 解析器

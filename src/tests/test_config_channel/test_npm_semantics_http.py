@@ -77,7 +77,8 @@ def http_client(base, process):
             assert detail['result_row_count'] == result['rows_affected']
             assert len(detail['contract_checks']) == 1 and detail['contract_checks'][0]['use_ref']
             return detail
-        status, value = request(base + '/api' + path, payload)
+        endpoint = '/api/semantics/v1/' + path[len('/semantics/'):] if path.startswith('/semantics/') else '/api' + path
+        status, value = request(base + endpoint, payload)
         assert status == {0: 200, -1: 400, -3: 409, -9: 422}[expected], (path, status, value)
         return value
     return call
@@ -160,8 +161,8 @@ def static_existing_case(executable, source_root, backend, evidence, node=None):
             for module in ['basic', 'session', 'dns_transaction', 'http1_transaction', 'tls_handshake', 'icmp_event']:
                 for family in [4, 6]:
                     entity = f'{module}_ipv{family}'
-                    objects.extend([f'npm_{entity}_{view}_v1' for view in ['history', 'latest', 'final']])
-                    objects.append(f'npm_{entity}_v1_data')
+                    objects.extend([f'npm_{entity}_{view}' for view in ['history', 'latest', 'final']])
+                    objects.append(f'npm_{entity}_data')
             objects.extend(['npm_result_runs', 'npm_result_entities'])
             for table in objects:
                 value = describe(call, dict(kind='database_table', type=backend, name='example', table=table))
@@ -200,7 +201,7 @@ def main():
             print('PASS: HTTP structure and exact references for 37 objects', flush=True)
             original_use = resolve(call, first['contract_checks'][0]['use_ref'])
             original_contract = resolve(call, used['contract_ref'])
-            relation = published['npm_dns_transaction_ipv4_final_v1']
+            relation = published['npm_dns_transaction_ipv4_final']
             original_dictionary = resolve(call, relation['dictionary_ref'])
             node = subprocess.run([sys.argv[2], str(Path(__file__).with_name('npm_semantics_browser.mjs')), base, str(evidence)],
                                   capture_output=True, text=True, timeout=100)
@@ -218,9 +219,9 @@ def main():
             assert second_use['execution_context']['npm']['run_id'] != used['execution_context']['npm']['run_id']
             assert resolve(call, first['contract_checks'][0]['use_ref']) == original_use
             assert definition(describe(call, relation['locator'])['description']['document']) == definition(manual['description']['document'])
-            assert second_published['npm_dns_transaction_ipv4_final_v1']['dictionary_ref'] != relation['dictionary_ref']
+            assert second_published['npm_dns_transaction_ipv4_final']['dictionary_ref'] != relation['dictionary_ref']
             # Object-local edits keep the two other views and the other family unchanged.
-            for table in ['npm_dns_transaction_ipv4_history_v1', 'npm_dns_transaction_ipv6_final_v1']:
+            for table in ['npm_dns_transaction_ipv4_history', 'npm_dns_transaction_ipv6_final']:
                 assert resolve(call, published[table]['dictionary_ref']) == describe(call, published[table]['locator'])['description']['document']
             (evidence / 'http-runs.json').write_text(json.dumps([first, second], ensure_ascii=False, indent=2))
         (evidence / 'http.log').write_text((root / 'host.log').read_text())

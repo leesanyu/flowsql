@@ -37,7 +37,7 @@ bool ValidText(const std::optional<std::string>* value, size_t max_bytes) {
     return !value || !*value || (value->value().size() <= max_bytes && arrow::util::ValidateUTF8(value->value()));
 }
 
-bool ValidRow(const NpmHttp1TransactionResultV1& row) {
+bool ValidRow(const NpmHttp1TransactionResult& row) {
     if (row.entity_instance_id == 0 || row.session_id == 0 || !ValidDirection(row.request_direction) ||
         !ValidDirection(row.response_direction) || !ValidText(row.request ? &row.request->method : nullptr, 1024) ||
         !ValidText(row.request ? &row.request->target : nullptr, 4 * 1048576) ||
@@ -50,17 +50,17 @@ bool ValidRow(const NpmHttp1TransactionResultV1& row) {
                          *row.response->status_code > 599))
         return false;
     switch (row.outcome) {
-        case NpmHttp1OutcomeV1::kMatched:
+        case NpmHttp1Outcome::kMatched:
             return row.request && row.response && row.request_direction && row.response_direction &&
                    *row.request_direction != *row.response_direction &&
-                   row.incomplete_reason == NpmHttp1IncompleteReasonV1::kNone;
-        case NpmHttp1OutcomeV1::kRequestOnly:
+                   row.incomplete_reason == NpmHttp1IncompleteReason::kNone;
+        case NpmHttp1Outcome::kRequestOnly:
             return row.request && !row.response && row.request_direction && !row.response_direction &&
-                   row.incomplete_reason != NpmHttp1IncompleteReasonV1::kNone &&
-                   row.incomplete_reason != NpmHttp1IncompleteReasonV1::kNoPendingRequest && !row.latency_ns;
-        case NpmHttp1OutcomeV1::kResponseOnly:
+                   row.incomplete_reason != NpmHttp1IncompleteReason::kNone &&
+                   row.incomplete_reason != NpmHttp1IncompleteReason::kNoPendingRequest && !row.latency_ns;
+        case NpmHttp1Outcome::kResponseOnly:
             return !row.request && row.response && !row.request_direction && row.response_direction &&
-                   row.incomplete_reason == NpmHttp1IncompleteReasonV1::kNoPendingRequest && !row.latency_ns;
+                   row.incomplete_reason == NpmHttp1IncompleteReason::kNoPendingRequest && !row.latency_ns;
     }
     return false;
 }
@@ -85,9 +85,9 @@ class BuildCharge final {
 }  // namespace
 
 template <typename Address>
-int EmitNpmHttp1TransactionV1(const NpmHttp1FamilyResult<Address>& family_result,
-                              const std::shared_ptr<INpmTaskBudget>& budget, INpmResultEmitterV1& emitter,
-                              arrow::MemoryPool* pool) {
+int EmitNpmHttp1Transaction(const NpmHttp1FamilyResult<Address>& family_result,
+                            const std::shared_ptr<INpmTaskBudget>& budget, INpmResultEmitter& emitter,
+                            arrow::MemoryPool* pool) {
     const auto& result = family_result.transaction;
     const auto& session = family_result;
     if (!budget || !ValidRow(result)) return EINVAL;
@@ -112,9 +112,9 @@ int EmitNpmHttp1TransactionV1(const NpmHttp1FamilyResult<Address>& family_result
         const std::optional<uint16_t> status_value = result.response ? result.response->status_code : std::nullopt;
         const std::optional<int64_t> request_time = result.request ? result.request->complete_at_ns : std::nullopt;
         const std::optional<int64_t> response_time = result.response ? result.response->complete_at_ns : std::nullopt;
-        const char* outcome_name = NpmHttp1OutcomeNameV1(result.outcome);
-        const char* reason_name = NpmHttp1IncompleteReasonNameV1(result.incomplete_reason);
-        if (!outcome_name || (result.incomplete_reason != NpmHttp1IncompleteReasonV1::kNone && !reason_name))
+        const char* outcome_name = NpmHttp1OutcomeName(result.outcome);
+        const char* reason_name = NpmHttp1IncompleteReasonName(result.incomplete_reason);
+        if (!outcome_name || (result.incomplete_reason != NpmHttp1IncompleteReason::kNone && !reason_name))
             return EINVAL;
         const std::optional<std::string_view> reason_value =
             reason_name ? std::optional<std::string_view>(reason_name) : std::nullopt;
@@ -161,18 +161,17 @@ int EmitNpmHttp1TransactionV1(const NpmHttp1FamilyResult<Address>& family_result
             columns.push_back(std::move(column));
         }
         auto batch = arrow::RecordBatch::Make(
-            NpmHttp1TransactionEntityDescriptorV1(NpmAddressArrowBuilder<Address>::family).schema, 1,
-            std::move(columns));
-        return emitter.Emit(NpmHttp1TransactionEntityDescriptorV1(NpmAddressArrowBuilder<Address>::family).entity_id,
+            NpmHttp1TransactionEntityDescriptor(NpmAddressArrowBuilder<Address>::family).schema, 1, std::move(columns));
+        return emitter.Emit(NpmHttp1TransactionEntityDescriptor(NpmAddressArrowBuilder<Address>::family).entity_id,
                             *batch);
     } catch (const std::bad_alloc&) {
         return ENOMEM;
     }
 }
 
-template int EmitNpmHttp1TransactionV1(const NpmHttp1Result4&, const std::shared_ptr<INpmTaskBudget>&,
-                                       INpmResultEmitterV1&, arrow::MemoryPool*);
-template int EmitNpmHttp1TransactionV1(const NpmHttp1Result6&, const std::shared_ptr<INpmTaskBudget>&,
-                                       INpmResultEmitterV1&, arrow::MemoryPool*);
+template int EmitNpmHttp1Transaction(const NpmHttp1Result4&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitter&,
+                                     arrow::MemoryPool*);
+template int EmitNpmHttp1Transaction(const NpmHttp1Result6&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitter&,
+                                     arrow::MemoryPool*);
 
 }  // namespace flowsql::npm

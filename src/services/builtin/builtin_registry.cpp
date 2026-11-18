@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "builtin_registry.h"
 
@@ -476,21 +471,13 @@ void RegisterDefaultStreamTypes() {
 void RegisterDefaultBuiltinOperators() {
     auto& registry = BuiltinRegistry::Instance();
     const std::vector<BuiltinOperatorDescriptor> defaults = {
-        {"builtin", "passthrough", {"passthrough", "builtin.passthrough"},
-         []() -> IOperator* { return new PassthroughOperator(); }},
-        {"builtin", "dataframe_dispatch_stream",
-         {"dataframe_dispatch_stream", "builtin.dataframe_dispatch_stream"},
-         []() -> IOperator* { return new DataframeDispatchStreamOperator(); }},
-        {"builtin", "concat", {"concat", "builtin.concat"},
-         []() -> IOperator* { return new ConcatOperator(); }},
-        {"builtin", "hstack", {"hstack", "builtin.hstack"},
-         []() -> IOperator* { return new HstackOperator(); }},
-        {"builtin", "passthrough_stream", {"passthrough_stream", "builtin.passthrough_stream"},
-         []() -> IOperator* { return new PassthroughStreamOperator(); }},
-        {"builtin", "count_window_stream", {"count_window_stream", "builtin.count_window_stream"},
-         []() -> IOperator* { return new CountWindowStreamOperator(); }},
-        {"builtin", "tcp_service_merge_stream", {"tcp_service_merge_stream", "builtin.tcp_service_merge_stream"},
-         []() -> IOperator* { return new TcpServiceMergeStreamOperator(); }},
+        {"builtin", "passthrough", []() -> IOperator* { return new PassthroughOperator(); }},
+        {"builtin", "dataframe_dispatch_stream", []() -> IOperator* { return new DataframeDispatchStreamOperator(); }},
+        {"builtin", "concat", []() -> IOperator* { return new ConcatOperator(); }},
+        {"builtin", "hstack", []() -> IOperator* { return new HstackOperator(); }},
+        {"builtin", "passthrough_stream", []() -> IOperator* { return new PassthroughStreamOperator(); }},
+        {"builtin", "count_window_stream", []() -> IOperator* { return new CountWindowStreamOperator(); }},
+        {"builtin", "tcp_service_merge_stream", []() -> IOperator* { return new TcpServiceMergeStreamOperator(); }},
     };
 
     for (const auto& desc : defaults) {

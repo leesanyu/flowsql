@@ -51,17 +51,17 @@ BaselineSerializationResult BaselineValueTask::QuerySeriesSnapshot(
 
 BaselineStatus BaselineValueTask::Close() { return BaselineTaskBase::Close(); }
 
-BaselineStatus BaselineValueTask::DoReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope) {
+BaselineStatus BaselineValueTask::DoReleaseIdentity(std::string_view key, BaselineStateReleaseScope scope) {
     const std::string identity(key);
     rolling_states_.erase(identity);
-    if (scope == BaselineStateReleaseScopeV1::kAllState) {
+    if (scope == BaselineStateReleaseScope::kAllState) {
         seeds_by_series_.erase(identity);
         artifacts_by_series_.erase(identity);
     }
     return BaselineStatus::kOk;
 }
 
-BaselineStateUsageV1 BaselineValueTask::DoQueryStateUsage() const {
+BaselineStateUsage BaselineValueTask::DoQueryStateUsage() const {
     return {static_cast<uint64_t>(rolling_states_.size()), static_cast<uint64_t>(artifacts_by_series_.size()), 0, 0};
 }
 
@@ -81,15 +81,9 @@ void BaselineValueTask::OnClosing() {
     compiled_event_calendar_.reset();
 }
 
-RollingBaselineResult BaselineValueTask::SubmitObservation(
-    const ValueRollingObservation& obs,
-    const RollingSubmitOptions& options) {
-    return SubmitObservationWithReadiness(obs, options).result;
-}
-
-BaselineEvaluationResultV1 BaselineValueTask::SubmitObservationWithReadiness(const ValueRollingObservation& obs,
-                                                                             const RollingSubmitOptions& options) {
-    BaselineEvaluationResultV1 evaluation;
+BaselineEvaluationResult BaselineValueTask::SubmitObservation(const ValueRollingObservation& obs,
+                                                              const RollingSubmitOptions& options) {
+    BaselineEvaluationResult evaluation;
     auto& result = evaluation.result;
     result.series_key = obs.series_key;
     result.bucket_id = obs.bucket_id;

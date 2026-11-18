@@ -9,7 +9,7 @@ from flowsql.operator_base import OperatorBase, register_operator
 
 @register_operator(
     data_contract={
-        "schema_id": "flowsql.operator-data-contract.v1",
+        "schema_id": "flowsql.operator-data-contract",
         "title": "卡方独立性检验",
         "operator": {
             "category": "explore",

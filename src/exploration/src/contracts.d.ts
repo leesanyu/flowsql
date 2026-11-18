@@ -1,5 +1,5 @@
 import type { IChart } from '@kanaries/graphic-walker'
-export interface TableWorkspaceV1 {
+export interface TableWorkspace {
   source_id: string
   schema_revision: string
   chart: IChart
@@ -8,21 +8,21 @@ export interface TableWorkspaceV1 {
   temporal_field?: string
   request_generation: number
 }
-export interface NumericDisplayV1 {
+export interface NumericDisplay {
   field_id: string
   mode: 'exact' | 'approximate'
   origin: 'decimal' | 'native_decimal_mean'
   exact_values?: Array<string | null>
 }
-export interface ChartKindV1 {
+export interface ChartKind {
   id: string
   label: string
   roles: Array<{ key: string; label: string; kind: 'dimension' | 'measure' | 'any'; optional?: boolean }>
 }
-export interface HistogramConfigV1 { field: string; bins: number }
-export interface TimeBucketConfigV1 { field: string; unit: 'day' | 'month' }
-export interface TimeBucketGroupV1 extends TimeBucketConfigV1 { asFieldKey: string }
-// aggregate.groupBy: Array<string | TimeBucketGroupV1>; measure.agg also accepts distinctCount.
+export interface HistogramConfig { field: string; bins: number }
+export interface TimeBucketConfig { field: string; unit: 'day' | 'month' }
+export interface TimeBucketGroup extends TimeBucketConfig { asFieldKey: string }
+// aggregate.groupBy: Array<string | TimeBucketGroup>; measure.agg also accepts distinctCount.
 // Source schema: time_bucket_fields: string[]; semantics.timezone = source_calendar.
-// IChart.config.flowsqlTimeBucket?: TimeBucketConfigV1; retains the source field ID as output alias.
-// IChart.config.flowsqlHistogram?: HistogramConfigV1; view op: histogram -> ordered native bin edges/counts.
+// IChart.config.flowsqlTimeBucket?: TimeBucketConfig; retains the source field ID as output alias.
+// IChart.config.flowsqlHistogram?: HistogramConfig; view op: histogram -> ordered native bin edges/counts.

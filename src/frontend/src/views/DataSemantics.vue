@@ -63,6 +63,7 @@
           <label>字典精确版本 <select v-model="document.dictionary_ref" aria-label="字典精确版本" :disabled="!editing"><option value="">请选择</option><option v-for="ref in dictionaryChoices" :key="ref">{{ ref }}</option></select></label>
           <label>字段映射（field_id → 来源字段名）<textarea v-model="mappingText" aria-label="字段映射" :disabled="!editing" rows="4" /></label>
           <label>声明结构（null 或 name/type/nullable 列表）<textarea v-model="schemaText" aria-label="声明结构" :disabled="!editing" rows="4" /></label>
+          <label>来源快照（完整结构与身份）<textarea v-model="sourceText" aria-label="来源快照" :disabled="!editing" rows="6" /></label>
           <p v-if="snapshot">声明结构检查：{{ snapshot.structure_check }}；实际数据验证：未执行</p>
         </template>
         <template v-if="editing">
@@ -109,11 +110,11 @@ const datasetLocator = computed(() => { try { return route.query.dataset ? parse
 const kinds = { standard: '标准', dictionary: '字典', binding: '绑定' }
 const filterKind = ref(''), query = ref(''), items = ref([]), nextCursor = ref(''), busy = ref(false), error = ref(''), notice = ref('')
 const kind = ref('standard'), name = ref(''), document = ref(null), original = ref(null), revision = ref(0), exact = ref(''), editing = ref(false), structureEditing = ref(false)
-const changeNote = ref(''), baseRevision = ref(0), snapshot = ref(null), mappingText = ref('{}'), schemaText = ref('null'), baseline = ref('')
+const changeNote = ref(''), baseRevision = ref(0), snapshot = ref(null), mappingText = ref('{}'), schemaText = ref('null'), sourceText = ref('null'), baseline = ref('')
 const standards = ref([]), dictionaries = ref([]), bindings = ref([]), applyReference = ref(''), refs = ref([]), refsCursor = ref(''), referenceScope = ref('current'), history = ref([]), historyCursor = ref('')
 const format = ref('json'), exchangeText = ref(''), importPreview = ref(null), exportedContent = ref(''), invalid = reactive(new Set())
 const dictionaryChoices = computed(() => [...new Set([...dictionaries.value, document.value?.dictionary_ref].filter(Boolean))])
-const state = () => json({ name: name.value, document: document.value, mapping: mappingText.value, schema: schemaText.value, note: changeNote.value })
+const state = () => json({ name: name.value, document: document.value, mapping: mappingText.value, schema: schemaText.value, source: sourceText.value, note: changeNote.value })
 const dirty = computed(() => editing.value && (state() !== baseline.value || invalid.size > 0))
 const diff = computed(() => kind.value === 'dictionary' && original.value ? structuralDiff(original.value, document.value) : '')
 const valid = (key, ok) => ok ? invalid.delete(key) : invalid.add(key)
@@ -138,7 +139,7 @@ async function list(more = false) {
   items.value = more ? [...items.value, ...result.items] : result.items; nextCursor.value = result.next_cursor
 }
 function identity(ref) { const dot = ref.indexOf('.'), at = ref.lastIndexOf('@'); return { kind: ref.slice(0, dot), name: ref.slice(dot + 1, at), revision: Number(ref.slice(at + 1)) } }
-function resetForm(d) { document.value = clone(d); original.value = clone(d); mappingText.value = json(d.field_map || {}); schemaText.value = json(d.declared_schema ?? null); changeNote.value = ''; invalid.clear(); importPreview.value = null; exchangeText.value = ''; exportedContent.value = ''; baseline.value = state() }
+function resetForm(d) { document.value = clone(d); original.value = clone(d); mappingText.value = json(d.field_map || {}); schemaText.value = json(d.declared_schema ?? null); sourceText.value = json(d.source_snapshot ?? null); changeNote.value = ''; invalid.clear(); importPreview.value = null; exchangeText.value = ''; exportedContent.value = ''; baseline.value = state() }
 async function load(ref) {
   const result = await call('resolve', { exact_reference: ref }), id = identity(ref)
   kind.value = id.kind; name.value = id.name; revision.value = id.revision; exact.value = ref; snapshot.value = result; editing.value = false; structureEditing.value = false; baseRevision.value = 0; applyReference.value = ''
@@ -156,7 +157,7 @@ function copyNew() { name.value = ''; revision.value = 0; baseRevision.value = 0
 function parameters(i, raw) { try { document.value.fields[i].type.parameters = parseJson(raw); invalid.delete('parameters' + i) } catch { invalid.add('parameters' + i); error.value = '类型参数 JSON 无效，输入尚未保存' } }
 async function selectedBinding() { const r = await call('resolve', { exact_reference: applyReference.value }); return { ...identity(applyReference.value), document: r.document } }
 async function save(apply) {
-  if (kind.value === 'binding') { document.value.field_map = parseJson(mappingText.value); document.value.declared_schema = parseJson(schemaText.value) }
+  if (kind.value === 'binding') { document.value.field_map = parseJson(mappingText.value); document.value.declared_schema = parseJson(schemaText.value); document.value.source_snapshot = parseJson(sourceText.value); document.value.confirmation = { source_revision: document.value.source_snapshot.source_revision, items: document.value.confirmation?.items || [] } }
   if (diff.value && !structureEditing.value) throw Error('结构已变化，请显式启用结构编辑并核对差异')
   const binding = apply ? await selectedBinding() : null
   const result = await saveAndApply(call, { kind: kind.value, name: name.value, expected_current_revision: revision.value, ...(baseRevision.value ? { base_revision: baseRevision.value } : {}), change_note: changeNote.value, document: document.value }, binding)
@@ -174,7 +175,7 @@ async function applyOnly() {
 async function histories(more = false) { const r = await call('history', { kind: kind.value, name: name.value, cursor: more ? historyCursor.value : '', limit: 20 }); history.value = more ? [...history.value, ...r.items] : r.items; historyCursor.value = r.next_cursor }
 async function references(more = false) { const r = await call('references', { exact_reference: exact.value, scope: referenceScope.value, cursor: more ? refsCursor.value : '', limit: 20 }); refs.value = more ? [...refs.value, ...r.items] : r.items; refsCursor.value = r.next_cursor }
 async function previewImport() { importPreview.value = await call('import', { kind: kind.value, name: name.value, format: format.value, content: exchangeText.value }) }
-function adoptImport() { if (kind.value === 'dictionary' && structuralDiff(document.value, importPreview.value.document) && !structureEditing.value) { error.value = '导入改变结构，请先启用结构编辑并核对差异'; return } document.value = clone(importPreview.value.document); mappingText.value = json(document.value.field_map || {}); schemaText.value = json(document.value.declared_schema ?? null); snapshot.value = { ...importPreview.value, reference_context: [] }; importPreview.value = null }
+function adoptImport() { if (kind.value === 'dictionary' && structuralDiff(document.value, importPreview.value.document) && !structureEditing.value) { error.value = '导入改变结构，请先启用结构编辑并核对差异'; return } document.value = clone(importPreview.value.document); mappingText.value = json(document.value.field_map || {}); schemaText.value = json(document.value.declared_schema ?? null); sourceText.value = json(document.value.source_snapshot ?? null); snapshot.value = { ...importPreview.value, reference_context: [] }; importPreview.value = null }
 async function readFile(e) { const f = e.target.files[0]; if (f) { if (f.size > 8 * 1024 * 1024) { error.value = '文件超过 8 MiB'; return } exchangeText.value = await f.text(); format.value = /\.ya?ml$/i.test(f.name) ? 'yaml' : 'json' } }
 async function exportDocument() { const r = await call('export', { exact_reference: exact.value, format: format.value }); exchangeText.value = r.content; exportedContent.value = r.content }
 function download() { const url = URL.createObjectURL(new Blob([exportedContent.value], { type: 'text/plain;charset=utf-8' })); const link = window.document.createElement('a'); link.href = url; link.download = `${kind.value}.${name.value}.${format.value}`; link.click(); URL.revokeObjectURL(url) }

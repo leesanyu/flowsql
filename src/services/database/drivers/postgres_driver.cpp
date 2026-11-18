@@ -293,7 +293,7 @@ std::string PostgresParameterSql(std::string_view sql, size_t expected_parameter
     return converted;
 }
 
-int ExecutePostgresParameters(PGconn* connection, const char* sql, const DatabaseParameterV1* parameters,
+int ExecutePostgresParameters(PGconn* connection, const char* sql, const DatabaseParameter* parameters,
                               size_t parameter_count, std::string* error) {
     if (parameter_count > static_cast<size_t>(std::numeric_limits<int>::max())) {
         *error = "prepared command parameter count exceeds PostgreSQL limit";
@@ -313,24 +313,24 @@ int ExecutePostgresParameters(PGconn* connection, const char* sql, const Databas
     for (size_t index = 0; index < parameter_count; ++index) {
         const auto& parameter = parameters[index];
         switch (parameter.kind) {
-            case DatabaseParameterKindV1::kNull:
+            case DatabaseParameterKind::kNull:
                 pointers[index] = nullptr;
                 break;
-            case DatabaseParameterKindV1::kInt64:
+            case DatabaseParameterKind::kInt64:
                 values[index] = std::to_string(parameter.int64_value);
                 break;
-            case DatabaseParameterKindV1::kUInt64:
+            case DatabaseParameterKind::kUInt64:
                 types[index] = kPostgresOidNumeric;
                 values[index] = std::to_string(parameter.uint64_value);
                 break;
-            case DatabaseParameterKindV1::kDouble: {
+            case DatabaseParameterKind::kDouble: {
                 types[index] = kPostgresOidFloat8;
                 std::ostringstream text;
                 text << std::setprecision(std::numeric_limits<double>::max_digits10) << parameter.double_value;
                 values[index] = text.str();
                 break;
             }
-            case DatabaseParameterKindV1::kString:
+            case DatabaseParameterKind::kString:
                 types[index] = 25;
                 if (!parameter.data && parameter.size != 0) {
                     *error = "invalid PostgreSQL string parameter";
@@ -342,7 +342,7 @@ int ExecutePostgresParameters(PGconn* connection, const char* sql, const Databas
                     return -1;
                 }
                 break;
-            case DatabaseParameterKindV1::kBlob:
+            case DatabaseParameterKind::kBlob:
                 types[index] = kPostgresOidBytea;
                 if ((!parameter.data && parameter.size != 0) ||
                     parameter.size > static_cast<size_t>(std::numeric_limits<int>::max())) {
@@ -354,7 +354,7 @@ int ExecutePostgresParameters(PGconn* connection, const char* sql, const Databas
                 formats[index] = 1;
                 continue;
         }
-        if (parameter.kind != DatabaseParameterKindV1::kNull) pointers[index] = values[index].c_str();
+        if (parameter.kind != DatabaseParameterKind::kNull) pointers[index] = values[index].c_str();
     }
     PGresult* result = PQexecParams(connection, converted.c_str(), static_cast<int>(parameter_count), types.data(),
                                     pointers.data(), lengths.data(), formats.data(), 0);
@@ -372,7 +372,7 @@ int ExecutePostgresParameters(PGconn* connection, const char* sql, const Databas
 
 }  // namespace
 
-int PostgresSession::ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) {
+int PostgresSession::ExecutePrepared(const char* sql, const DatabaseParameter* parameters, size_t parameter_count) {
     last_error_.clear();
     if (!sql || (parameter_count != 0 && !parameters)) {
         last_error_ = "invalid prepared command";
@@ -381,7 +381,7 @@ int PostgresSession::ExecutePrepared(const char* sql, const DatabaseParameterV1*
     return ExecutePostgresParameters(conn_, sql, parameters, parameter_count, &last_error_);
 }
 
-int PostgresSession::ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters,
+int PostgresSession::ExecutePreparedBatch(const char* sql, const DatabaseParameter* parameters,
                                           size_t parameters_per_execution, size_t execution_count) {
     last_error_.clear();
     if (!sql || (execution_count != 0 && (!parameters || parameters_per_execution == 0)) ||
@@ -786,7 +786,7 @@ void PostgresDriver::ReturnToPool(PGconn* conn) {
 void PostgresDriver::DiscardSnapshot(PGconn* conn) {
     if (pool_) pool_->Discard(conn);
 }
-int PostgresSession::BeginSnapshot(const DatabaseSnapshotOptionsV1& options) {
+int PostgresSession::BeginSnapshot(const DatabaseSnapshotOptions& options) {
     snapshot_timeout_ms_ = options.operation_timeout_ms;
     if (ExecuteSql("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY") < 0) return -1;
     snapshot_transaction_ = true;
@@ -799,7 +799,7 @@ void PostgresSession::CancelSnapshot() {
     char error[256];
     if (snapshot_cancel_) PQcancel(snapshot_cancel_.get(), error, sizeof(error));
 }
-int PostgresSession::SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+int PostgresSession::SnapshotPage(const char* sql, const DatabaseParameter* parameters, size_t count,
                                   std::shared_ptr<arrow::Schema> expected, uint32_t max_rows, uint64_t max_bytes,
                                   std::shared_ptr<arrow::RecordBatch>* output) {
     output->reset();
@@ -820,22 +820,22 @@ int PostgresSession::SnapshotPage(const char* sql, const DatabaseParameterV1* pa
     for (size_t i = 0; i < count; ++i) {
         const auto& p = parameters[i];
         switch (p.kind) {
-            case DatabaseParameterKindV1::kNull:
+            case DatabaseParameterKind::kNull:
                 continue;
-            case DatabaseParameterKindV1::kInt64:
+            case DatabaseParameterKind::kInt64:
                 values[i] = std::to_string(p.int64_value);
                 break;
-            case DatabaseParameterKindV1::kUInt64:
+            case DatabaseParameterKind::kUInt64:
                 types[i] = 1700;
                 values[i] = std::to_string(p.uint64_value);
                 break;
-            case DatabaseParameterKindV1::kDouble: {
+            case DatabaseParameterKind::kDouble: {
                 std::ostringstream s;
                 s << std::setprecision(17) << p.double_value;
                 values[i] = s.str();
                 break;
             }
-            case DatabaseParameterKindV1::kString:
+            case DatabaseParameterKind::kString:
                 if (!p.data && p.size) {
                     last_error_ = "invalid text parameter";
                     return -1;
@@ -912,8 +912,8 @@ int PostgresSession::SnapshotPage(const char* sql, const DatabaseParameterV1* pa
     return MakeSnapshotBatch(expected, rows, max_bytes, output, &last_error_);
 }
 
-int PostgresSession::Query(const char* sql, const DatabaseParameterV1* parameters, size_t count, uint32_t max_rows,
-                           uint64_t max_bytes, ExplorationResultV1* output) {
+int PostgresSession::Query(const char* sql, const DatabaseParameter* parameters, size_t count, uint32_t max_rows,
+                           uint64_t max_bytes, ExplorationResult* output) {
     *output = {};
     last_error_.clear();
     if (snapshot_cancelled_) {
@@ -935,17 +935,17 @@ int PostgresSession::Query(const char* sql, const DatabaseParameterV1* parameter
     std::vector<Oid> types(count);
     for (size_t i = 0; i < count; ++i) {
         const auto& p = parameters[i];
-        if (p.kind == DatabaseParameterKindV1::kNull) continue;
-        if (p.kind == DatabaseParameterKindV1::kInt64)
+        if (p.kind == DatabaseParameterKind::kNull) continue;
+        if (p.kind == DatabaseParameterKind::kInt64)
             values[i] = std::to_string(p.int64_value);
-        else if (p.kind == DatabaseParameterKindV1::kUInt64) {
+        else if (p.kind == DatabaseParameterKind::kUInt64) {
             values[i] = std::to_string(p.uint64_value);
             types[i] = 1700;
-        } else if (p.kind == DatabaseParameterKindV1::kDouble) {
+        } else if (p.kind == DatabaseParameterKind::kDouble) {
             std::ostringstream stream;
             stream << std::setprecision(17) << p.double_value;
             values[i] = stream.str();
-        } else if (p.kind == DatabaseParameterKindV1::kString && (p.data || !p.size)) {
+        } else if (p.kind == DatabaseParameterKind::kString && (p.data || !p.size)) {
             values[i].assign(p.data ? static_cast<const char*>(p.data) : "", p.size);
             if (values[i].find('\0') != std::string::npos) {
                 last_error_ = "INVALID_PARAMETERS";
@@ -962,7 +962,7 @@ int PostgresSession::Query(const char* sql, const DatabaseParameterV1* parameter
         last_error_ = snapshot_cancelled_ ? "CANCELLED" : "DATABASE_ERROR";
         return -1;
     }
-    ExplorationResultV1 result;
+    ExplorationResult result;
     uint64_t bytes = 0;
     bool failed = false, complete = false;
     PGresult* raw;
@@ -991,7 +991,7 @@ int PostgresSession::Query(const char* sql, const DatabaseParameterV1* parameter
             failed = true;
             continue;
         }
-        std::vector<ExplorationValueV1> row;
+        std::vector<ExplorationValue> row;
         for (int c = 0; c < PQnfields(raw); ++c) {
             bytes += 16 + PQgetlength(raw, 0, c);
             if (bytes > max_bytes) {

@@ -13,7 +13,7 @@
 namespace flowsql::visualization {
 
 // Independent entry; no dependency on Web, Scheduler or Worker. Options are JSON.
-struct EntryOptionsV1 {
+struct EntryOptions {
     std::string host = "127.0.0.1";
     int port = 18910;
     std::string static_dir = "exploration";
@@ -31,12 +31,12 @@ class VisualizationPlugin : public IPlugin {
     int Unload() override;
 
  private:
-    EntryOptionsV1 options_;
+    EntryOptions options_;
     httplib::Server server_;
     std::thread thread_;
     IQuerier* querier_ = nullptr;
     ExplorationService service_;
-    QueryLimitsV1 limits_;
+    QueryLimits limits_;
 };
 
 }  // namespace flowsql::visualization

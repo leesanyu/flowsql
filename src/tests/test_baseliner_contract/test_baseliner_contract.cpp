@@ -18,7 +18,7 @@ using namespace flowsql::baseliner;
 namespace {
 const char* kConfig = R"({
   "schema_version":1,"task_key":"link-byte-baseline","source":"mysql.npm","mode":"snapshot",
-  "datasets":[{"id":"link","table":"npm_basic_history_v1",
+  "datasets":[{"id":"link","table":"npm_basic_history",
     "fields":{"__npm_run_id":"utf8","session_id":"uint64","revision":"uint64",
       "observation_domain_id":"uint64","period_start_ns":"int64","period_complete":"boolean",
       "interval_wire_bytes_ab":"uint64"},
@@ -129,7 +129,7 @@ void TestStrictConfig() {
     }));
 }
 
-class Registry final : public IConfigChannelRegistryV1 {
+class Registry final : public IConfigChannelRegistry {
  public:
     ConfigChannelSnapshot snapshot;
     int calls = 0;
@@ -145,7 +145,7 @@ void TestResolveAndOwnership() {
     assert(ParseConfig(kConfig, &parsed).ok());
     Registry registry;
     auto mutable_content = std::make_shared<std::string>(kConfig);
-    registry.snapshot = {"link_baseline",         1, "json",         "baseliner.task.v1", parsed.sha256_hex,
+    registry.snapshot = {"link_baseline",         1, "json",         "flowsql.baseliner.task", parsed.sha256_hex,
                          mutable_content->size(), 0, mutable_content};
     ConfigSnapshot out;
     assert(ResolveConfig(R"({"config":"config.link_baseline@1"})", "mysql.npm", &registry, &out).ok());
@@ -222,23 +222,23 @@ const char* kSingle = R"({
                 "feature_type":"value_basic","profile":"default"}]}})";
 void TestSingleSourceContract() {
     for (const char* category : {"sqlite", "mysql", "postgres", "clickhouse"}) {
-        const auto source = std::string(category) + ".npm.npm_basic_history_v1";
+        const auto source = std::string(category) + ".npm.npm_basic_history";
         const auto full = Changed([&](auto& d) { d["source"].SetString(source.c_str(), d.GetAllocator()); });
         ConfigSnapshot config;
         auto status = ParseConfig(full, &config);
         if (!status.ok()) std::cerr << status.path << ": " << status.message << '\n';
         assert(status.ok());
         assert(config.config.database_source && !config.config.dataframe_source);
-        assert(config.config.source_relation == "npm_basic_history_v1");
+        assert(config.config.source_relation == "npm_basic_history");
         assert(config.original_json == full);
         rapidjson::Document doc;
         doc.Parse(full.c_str());
         doc["datasets"][0].RemoveMember("table");
         assert(ParseConfig(Serialize(doc), &config).ok());
-        assert(config.config.datasets[0].table == "npm_basic_history_v1");
+        assert(config.config.datasets[0].table == "npm_basic_history");
         doc["datasets"][0].AddMember("table", "another_table", doc.GetAllocator());
         Bad(Serialize(doc), ConfigError::kValue);
-        doc["datasets"][0]["table"].SetString("npm_basic_history_v1");
+        doc["datasets"][0]["table"].SetString("npm_basic_history");
         rapidjson::Value other(doc["datasets"][0], doc.GetAllocator());
         other["id"].SetString("other");
         doc["datasets"].PushBack(other, doc.GetAllocator());

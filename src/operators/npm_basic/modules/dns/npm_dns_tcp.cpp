@@ -24,14 +24,14 @@ namespace {
 constexpr uint64_t kDirectionCharge = 256;
 }
 
-void NpmDnsTcpFramerV1::ForgetFrame(DirectionState* state) noexcept {
+void NpmDnsTcpFramer::ForgetFrame(DirectionState* state) noexcept {
     std::vector<uint8_t> empty;
     state->frame.swap(empty);
     if (budget_ && state->frame_charge) budget_->Release(NpmBudgetCategory::kModuleState, state->frame_charge);
     state->frame_charge = 0;
 }
 
-void NpmDnsTcpFramerV1::EraseDirection(const DirectionKey& key) noexcept {
+void NpmDnsTcpFramer::EraseDirection(const DirectionKey& key) noexcept {
     const auto found = directions_.find(key);
     if (found == directions_.end()) return;
     ForgetFrame(&found->second);
@@ -39,8 +39,8 @@ void NpmDnsTcpFramerV1::EraseDirection(const DirectionKey& key) noexcept {
     if (budget_) budget_->Release(NpmBudgetCategory::kModuleState, kDirectionCharge);
 }
 
-int NpmDnsTcpFramerV1::ConsumeData(DirectionState* state, const NpmTcpStreamContextV1& context,
-                                   const NpmTcpStreamEventV1& event, std::vector<NpmDnsUdpResultV1>* results) {
+int NpmDnsTcpFramer::ConsumeData(DirectionState* state, const NpmTcpStreamContext& context,
+                                 const NpmTcpStreamEvent& event, std::vector<NpmDnsUdpResult>* results) {
     if (event.bytes.size == 0 || !event.bytes.data) return EINVAL;
     size_t position = 0;
     while (position < event.bytes.size && !state->disabled) {
@@ -82,8 +82,8 @@ int NpmDnsTcpFramerV1::ConsumeData(DirectionState* state, const NpmTcpStreamCont
     return 0;
 }
 
-int NpmDnsTcpFramerV1::OnReadable(const NpmTcpStreamContextV1& context, INpmTcpStreamCursorV1& cursor,
-                                  std::vector<NpmDnsUdpResultV1>* results) {
+int NpmDnsTcpFramer::OnReadable(const NpmTcpStreamContext& context, INpmTcpStreamCursor& cursor,
+                                std::vector<NpmDnsUdpResult>* results) {
     if (!transactions_ || !results || !context.session || context.session->session_id == 0 ||
         (context.direction != NpmPacketDirection::kAToB && context.direction != NpmPacketDirection::kBToA))
         return EINVAL;
@@ -101,23 +101,23 @@ int NpmDnsTcpFramerV1::OnReadable(const NpmTcpStreamContextV1& context, INpmTcpS
             }
         }
         auto& state = found->second;
-        if (context.origin != NpmTcpStreamOriginV1::kSyn) state.disabled = true;
-        NpmTcpStreamEventV1 event;
+        if (context.origin != NpmTcpStreamOrigin::kSyn) state.disabled = true;
+        NpmTcpStreamEvent event;
         while (cursor.Peek(&event)) {
-            if (event.kind == NpmTcpStreamEventKindV1::kData) {
+            if (event.kind == NpmTcpStreamEventKind::kData) {
                 if (!state.disabled) {
                     const int error = ConsumeData(&state, context, event, results);
                     if (error != 0) return error;
                 }
                 if (event.bytes.size == 0 || cursor.Consume(event.bytes.size) != 0) return EINVAL;
-            } else if (event.kind == NpmTcpStreamEventKindV1::kGap) {
+            } else if (event.kind == NpmTcpStreamEventKind::kGap) {
                 state.disabled = true;
                 state.prefix_size = 0;
                 ForgetFrame(&state);
                 const int error = transactions_->OnResponsePathGap(context.session->session_id, context.direction,
                                                                    context.observed_at_ns, results);
                 if (error != 0 || cursor.Consume(0) != 0) return error != 0 ? error : EINVAL;
-            } else if (event.kind == NpmTcpStreamEventKindV1::kEnd) {
+            } else if (event.kind == NpmTcpStreamEventKind::kEnd) {
                 state.disabled = true;
                 state.prefix_size = 0;
                 ForgetFrame(&state);
@@ -133,8 +133,7 @@ int NpmDnsTcpFramerV1::OnReadable(const NpmTcpStreamContextV1& context, INpmTcpS
     }
 }
 
-int NpmDnsTcpFramerV1::OnSessionEnd(uint64_t session_id, int64_t observed_at_ns,
-                                    std::vector<NpmDnsUdpResultV1>* results) {
+int NpmDnsTcpFramer::OnSessionEnd(uint64_t session_id, int64_t observed_at_ns, std::vector<NpmDnsUdpResult>* results) {
     if (!transactions_ || !results || session_id == 0) return EINVAL;
     const int error = transactions_->OnSessionEnd(session_id, observed_at_ns, results);
     if (error != 0) return error;
@@ -143,7 +142,7 @@ int NpmDnsTcpFramerV1::OnSessionEnd(uint64_t session_id, int64_t observed_at_ns,
     return 0;
 }
 
-void NpmDnsTcpFramerV1::Abort() noexcept {
+void NpmDnsTcpFramer::Abort() noexcept {
     for (auto& direction : directions_) {
         ForgetFrame(&direction.second);
         if (budget_) budget_->Release(NpmBudgetCategory::kModuleState, kDirectionCharge);

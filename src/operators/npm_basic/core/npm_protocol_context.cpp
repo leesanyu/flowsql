@@ -37,7 +37,7 @@ NpmProtocolContextError NpmProtocolContext::Create(IQuerier* querier, std::uniqu
     if (output == nullptr) return NpmProtocolContextError::kNullOutput;
     if (querier == nullptr) return NpmProtocolContextError::kNullQuerier;
 
-    auto* pool = static_cast<IProtocolPipelinePoolV1*>(querier->First(IID_PROTOCOL_PIPELINE_POOL_V1));
+    auto* pool = static_cast<IProtocolPipelinePool*>(querier->First(IID_PROTOCOL_PIPELINE_POOL));
     if (pool == nullptr) return NpmProtocolContextError::kProviderNotFound;
 
     IProtocol* protocol = pool->Protocol();
@@ -61,7 +61,7 @@ NpmProtocolContextError NpmProtocolContext::Create(IQuerier* querier, std::uniqu
     return NpmProtocolContextError::kNone;
 }
 
-NpmProtocolContext::NpmProtocolContext(IProtocolPipelinePoolV1* pool, IProtocol* protocol,
+NpmProtocolContext::NpmProtocolContext(IProtocolPipelinePool* pool, IProtocol* protocol,
                                        protocol::IDictionary* dictionary, int32_t pipeno)
     : pool_(pool), dictionary_(dictionary), pipeno_(pipeno), identifier_(protocol, pipeno) {}
 

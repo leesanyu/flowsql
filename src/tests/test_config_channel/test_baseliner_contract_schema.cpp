@@ -33,7 +33,7 @@ size_t CheckDefaults(const Value& schema, const Value* supplied, const Value& ef
     if (schema.HasMember("oneOf")) {
         size_t matches = 0;
         for (const auto& branch : schema["oneOf"].GetArray()) {
-            DataSemanticsErrorV1 error;
+            DataSemanticsError error;
             if (ValidateOperatorConfiguration(branch, effective, contract, &error) == 0) {
                 ++matches;
                 checked += CheckDefaults(branch, supplied, effective, contract);
@@ -114,7 +114,7 @@ void CheckOutputs(const Json& contract, const baseliner::ConfigSnapshot& config)
 int main() {
     auto contract = Read("/config/semantics/examples/operator-contract-baseliner.json");
     auto fixtures = Read("/src/tests/test_config_channel/fixtures/operator-baseliner-configs.json");
-    DataSemanticsErrorV1 issue;
+    DataSemanticsError issue;
     for (const auto& fixture : fixtures.GetObject()) {
         const auto& value = fixture.value;
         baseliner::ConfigSnapshot production;

@@ -23,7 +23,7 @@ std::string Encode(const rapidjson::Value& v) {
     v.Accept(w);
     return b.GetString();
 }
-rapidjson::Value Counts(const PacketSinkCountsV1& c, Allocator& a) {
+rapidjson::Value Counts(const PacketSinkCounts& c, Allocator& a) {
     rapidjson::Value v(rapidjson::kObjectType);
     v.AddMember("input", c.input, a);
     v.AddMember("confirmed", c.confirmed, a);
@@ -31,11 +31,11 @@ rapidjson::Value Counts(const PacketSinkCountsV1& c, Allocator& a) {
     v.AddMember("unknown", c.unknown, a);
     return v;
 }
-rapidjson::Value Counters(ICaptureBlockStreamReaderV2* reader, const CaptureSourceSetV2& sources, Allocator& a) {
+rapidjson::Value Counters(ICaptureBlockStreamReader* reader, const CaptureSourceSet& sources, Allocator& a) {
     rapidjson::Value rows(rapidjson::kArrayType);
     for (const auto& input : sources.inputs) {
         rapidjson::Value row(rapidjson::kObjectType);
-        CaptureCountersV1 c;
+        CaptureCounters c;
         const int rc = reader ? reader->ReadInputCounters(input.source_id, &c) : ENOTSUP;
         if (rc || c.generation != input.generation) c.available_mask = 0;
         row.AddMember("source_id", input.source_id, a);
@@ -62,15 +62,15 @@ rapidjson::Value Counters(ICaptureBlockStreamReaderV2* reader, const CaptureSour
 int32_t SchedulerPlugin::TryExecutePacketSink(const SourceResolveResult& resolved, const SqlStatement& stmt,
                                               std::string& response, bool* handled) {
     *handled = false;
-    std::unique_ptr<IPacketSinkWriterV1> writer;
-    PacketSinkReportV1 fallback;
+    std::unique_ptr<IPacketSinkWriter> writer;
+    PacketSinkReport fallback;
     fallback.state = "failed";
     fallback.code = "PACKET_SINK_UNAVAILABLE";
     fallback.stage = "sink_resolve";
     const auto control = SchedulerBatchRuntime::CurrentControl();
     std::shared_ptr<IBlockStreamChannel> reader;
-    ICaptureBlockStreamReaderV2* capture = nullptr;
-    CaptureSourceSetV2 sources;
+    ICaptureBlockStreamReader* capture = nullptr;
+    CaptureSourceSet sources;
     bool source_failed = false, stopped = false;
     uint64_t delivery_waits = 0, delivery_wait_ns = 0;
     auto publication = [&] {
@@ -133,9 +133,8 @@ int32_t SchedulerPlugin::TryExecutePacketSink(const SourceResolveResult& resolve
     int create = ENOTSUP;
     try {
         if (querier_)
-            querier_->Traverse(IID_PACKET_SINK_FACTORY_V1, [&](void* p) {
-                create =
-                    static_cast<IPacketSinkFactoryV1*>(p)->CreateWriter({1, stmt.dest, NextStreamTaskId()}, &writer);
+            querier_->Traverse(IID_PACKET_SINK_FACTORY, [&](void* p) {
+                create = static_cast<IPacketSinkFactory*>(p)->CreateWriter({1, stmt.dest, NextStreamTaskId()}, &writer);
                 return create == ENOTSUP ? 0 : -1;
             });
         const bool netadapter = resolved.channels.size() == 1 && resolved.channels[0] &&
@@ -147,8 +146,7 @@ int32_t SchedulerPlugin::TryExecutePacketSink(const SourceResolveResult& resolve
             return reject(create == EBUSY ? "PACKET_SINK_IN_USE" : "PACKET_SINK_UNAVAILABLE", create ? create : EIO);
         if (!netadapter || stmt.sources.size() != 1 || resolved.block_channels.size() != 1)
             return reject("PACKET_SINK_SOURCE_UNSUPPORTED");
-        if (!stmt.columns.empty() || !stmt.where_clause.empty() || !stmt.stage_filters.empty() || stmt.HasOperator() ||
-            !stmt.with_params.empty())
+        if (!stmt.columns.empty() || !stmt.where_clause.empty() || !stmt.stage_filters.empty() || stmt.HasOperator())
             return reject("PACKET_SINK_SQL_UNSUPPORTED");
         if (!control) return reject("ASYNC_EXECUTION_REQUIRED");
         struct Wake {
@@ -164,16 +162,16 @@ int32_t SchedulerPlugin::TryExecutePacketSink(const SourceResolveResult& resolve
         }
         std::string detail;
         int rc = CreateExclusiveBlockReader(querier_, NextStreamTaskId(), resolved.block_channels[0].get(),
-                                            kEmptyCanonicalFilterPlanV1, &reader, &detail);
+                                            kEmptyCanonicalFilterPlan, &reader, &detail);
         if (rc || !reader) {
             fallback.code = "PACKET_CAPTURE_READER_UNAVAILABLE";
             fallback.stage = "sink_open";
             return finish(rc ? rc : EIO, "failed");
         }
-        capture = dynamic_cast<ICaptureBlockStreamReaderV2*>(reader.get());
-        auto* schema = dynamic_cast<IBlockStreamSchemaV1*>(reader.get());
+        capture = dynamic_cast<ICaptureBlockStreamReader*>(reader.get());
+        auto* schema = dynamic_cast<IBlockStreamSchema*>(reader.get());
         if (!capture || !schema || capture->DescribeSources(&sources) ||
-            ValidateCaptureSourceSetV2(sources) != CaptureDescriptionErrorV1::kNone) {
+            ValidateCaptureSourceSet(sources) != CaptureDescriptionError::kNone) {
             fallback.code = "PACKET_CAPTURE_CONTRACT_REQUIRED";
             fallback.stage = "sink_open";
             reader->Cancel();

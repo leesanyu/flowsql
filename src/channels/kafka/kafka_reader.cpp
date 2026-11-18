@@ -10,7 +10,7 @@
 
 namespace flowsql::channels::kafka {
 StructuredReader::StructuredReader(std::string name, StructuredConfig config,
-                                   std::shared_ptr<IKafkaClientSessionV1> session)
+                                   std::shared_ptr<IKafkaClientSession> session)
     : name_(std::move(name)), config_(std::move(config)), session_(std::move(session)) {
     arrow_schema_ = StructuredSchema(config_);
     schema_ = arrow_schema_->ToString(true);
@@ -19,9 +19,9 @@ int StructuredReader::Open() {
     if (opened_) return EALREADY;
     if (cancelled_ || !session_) return ECANCELED;
     void* capability = nullptr;
-    int rc = session_->QueryInterface(IID_KAFKA_CONSUMER_SESSION_V1, &capability);
+    int rc = session_->QueryInterface(IID_KAFKA_CONSUMER_SESSION, &capability);
     if (rc || !capability) return rc ? rc : ENOTSUP;
-    consumer_ = static_cast<IKafkaConsumerSessionV1*>(capability);
+    consumer_ = static_cast<IKafkaConsumerSession*>(capability);
     rc = consumer_->StartConsumer(config_.offset_reset.c_str(), config_.max_message_bytes);
     if (!rc) opened_ = true;
     return rc;
@@ -48,11 +48,11 @@ BlockPollEvent StructuredReader::PollBlock(int timeout_ms) {
     if (terminal_) return {BlockPollEvent::kError, nullptr, terminal_error_};
     if (!opened_ || timeout_ms < 0 || timeout_ms > 30000) return Error(EINVAL);
     if (outstanding_) return {BlockPollEvent::kError, nullptr, EBUSY};
-    std::vector<KafkaMessageV1> messages;
+    std::vector<KafkaMessage> messages;
     std::map<int32_t, int64_t> next;
     size_t bytes = 0;
     do {
-        KafkaMessageV1 message;
+        KafkaMessage message;
         int rc = consumer_->PollMessage(messages.empty() ? timeout_ms : 0, &message);
         if (rc == EAGAIN) break;
         if (rc == ECANCELED) return {BlockPollEvent::kCancelled, nullptr, rc};
@@ -90,7 +90,7 @@ int StructuredReader::ReleaseBlock(const std::shared_ptr<arrow::RecordBatch>& bl
     return 0;
 }
 namespace {
-class Definition final : public IBlockStreamChannel, public IBlockStreamSchemaV1 {
+class Definition final : public IBlockStreamChannel, public IBlockStreamSchema {
  public:
     Definition(std::string name, std::shared_ptr<arrow::Schema> schema)
         : name_(std::move(name)), schema_(schema->ToString(true)), arrow_schema_(std::move(schema)) {}
@@ -147,14 +147,14 @@ void Plugin::List(std::function<void(const char*, const char*, IBlockStreamChann
         if (rows["items"].Size() < 100) break;
     }
 }
-void Plugin::DescribeChannelTypes(std::function<void(const BlockStreamChannelTypeDescriptorV1&)> callback) const {
-    BlockStreamChannelTypeDescriptorV1 descriptor;
+void Plugin::DescribeChannelTypes(std::function<void(const BlockStreamChannelTypeDescriptor&)> callback) const {
+    BlockStreamChannelTypeDescriptor descriptor;
     descriptor.channel_type = "kafka";
     descriptor.display_name = "Kafka 结构化 JSON / 原始包";
     descriptor.allowed_roles = {"source"};
     callback(descriptor);
 }
-int Plugin::Resolve(const FilterDomainResolveRequestV1& request, FilterDomainResolveResultV1* result) const {
+int Plugin::Resolve(const FilterDomainResolveRequest& request, FilterDomainResolveResult* result) const {
     if (!request.target_category || std::string(request.target_category) != "kafka" || !request.output_schema ||
         !request.output_schema->Equals(*packet::PacketFamilySchema(), true))
         return ENOTSUP;
@@ -162,7 +162,7 @@ int Plugin::Resolve(const FilterDomainResolveRequestV1& request, FilterDomainRes
     next.target_category = "pcapfile";
     return pcapfile::PcapFilterDomainResolver().Resolve(next, result);
 }
-int Plugin::CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** output) {
+int Plugin::CreateReader(const BlockStreamReaderConfig& config, IBlockStreamChannel** output) {
     if (!output) return EINVAL;
     *output = nullptr;
     if (!config.source_category || std::strcmp(config.source_category, "kafka")) return ENOTSUP;
@@ -179,10 +179,10 @@ int Plugin::CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamCh
         std::lock_guard<std::mutex> lock(readers_mutex_);
         if (!reader_names_.insert(config.source_name).second) return EBUSY;
     }
-    IKafkaClientSessionV1* raw = nullptr;
+    IKafkaClientSession* raw = nullptr;
     std::string error;
     int rc = OpenSession(config.source_name, "source", &raw, &error);
-    std::shared_ptr<IKafkaClientSessionV1> session(raw, [this](IKafkaClientSessionV1* value) {
+    std::shared_ptr<IKafkaClientSession> session(raw, [this](IKafkaClientSession* value) {
         if (value) ReleaseSession(value);
     });
     try {

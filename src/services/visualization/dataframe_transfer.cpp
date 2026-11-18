@@ -84,7 +84,7 @@ std::shared_ptr<httplib::Client> DataFrameTransferClient::Client() const {
     return client;
 }
 
-std::vector<DataFrameSourceInfoV1> DataFrameTransferClient::Sources(std::string* error) const {
+std::vector<DataFrameSourceInfo> DataFrameTransferClient::Sources(std::string* error) const {
     if (error) error->clear();
     if (!Available()) {
         if (error) *error = "DATA_PLANE_UNAVAILABLE";
@@ -95,7 +95,7 @@ std::vector<DataFrameSourceInfoV1> DataFrameTransferClient::Sources(std::string*
         if (error) *error = "DATA_PLANE_UNAVAILABLE";
         return {};
     }
-    auto response = client->Get("/channels/dataframe/exploration/v1/sources");
+    auto response = client->Get("/channels/dataframe/exploration/sources");
     rapidjson::Document document;
     if (!response || response->status != 200) {
         if (error) *error = "DATA_PLANE_UNAVAILABLE";
@@ -107,7 +107,7 @@ std::vector<DataFrameSourceInfoV1> DataFrameTransferClient::Sources(std::string*
         if (error) *error = "DATA_PLANE_UNAVAILABLE";
         return {};
     }
-    std::vector<DataFrameSourceInfoV1> result;
+    std::vector<DataFrameSourceInfo> result;
     for (const auto& item : document["sources"].GetArray()) {
         auto source_id = Text(item, "source_id"), label = Text(item, "label");
         if (!source_id.empty() && !label.empty()) result.push_back({std::move(source_id), std::move(label)});
@@ -117,7 +117,7 @@ std::vector<DataFrameSourceInfoV1> DataFrameTransferClient::Sources(std::string*
 
 bool DataFrameTransferClient::Acquire(const std::string& request_id, const std::string& source_id, uint64_t max_bytes,
                                       const std::shared_ptr<std::atomic_bool>& cancelled, uint32_t timeout_ms,
-                                      DataFrameSnapshotInfoV1* output, std::string* error) {
+                                      DataFrameSnapshotInfo* output, std::string* error) {
     if (!output || !error) return false;
     *output = {};
     error->clear();
@@ -145,7 +145,7 @@ bool DataFrameTransferClient::Acquire(const std::string& request_id, const std::
     }
     // Bounded wait: the source retires an abandoned request, and local cancellation reports the same code.
     auto response =
-        client->Post("/channels/dataframe/exploration/v1/snapshots/acquire", body.GetString(), "application/json");
+        client->Post("/channels/dataframe/exploration/snapshots/acquire", body.GetString(), "application/json");
     if (cancelled && cancelled->load()) {
         *error = "CANCELLED";
         return false;
@@ -195,7 +195,7 @@ bool DataFrameTransferClient::Acquire(const std::string& request_id, const std::
         opened.st_ino != current.st_ino) {
         if (fd >= 0) close(fd);
         *error = "DATA_PLANE_UNAVAILABLE";
-        client->Post("/channels/dataframe/exploration/v1/snapshots/release",
+        client->Post("/channels/dataframe/exploration/snapshots/release",
                      "{\"transfer_id\":" + JsonString(transfer_id) + "}", "application/json");
         return false;
     }
@@ -203,7 +203,7 @@ bool DataFrameTransferClient::Acquire(const std::string& request_id, const std::
     auto mapped = arrow::io::MemoryMappedFile::Open(path, arrow::io::FileMode::READ);
     if (!mapped.ok()) {
         *error = "DATA_PLANE_UNAVAILABLE";
-        client->Post("/channels/dataframe/exploration/v1/snapshots/release",
+        client->Post("/channels/dataframe/exploration/snapshots/release",
                      "{\"transfer_id\":" + JsonString(transfer_id) + "}", "application/json");
         return false;
     }
@@ -215,7 +215,7 @@ bool DataFrameTransferClient::Acquire(const std::string& request_id, const std::
         path_status.st_dev != opened.st_dev || path_status.st_ino != opened.st_ino) {
         (*mapped)->Close();
         *error = "DATA_PLANE_UNAVAILABLE";
-        client->Post("/channels/dataframe/exploration/v1/snapshots/release",
+        client->Post("/channels/dataframe/exploration/snapshots/release",
                      "{\"transfer_id\":" + JsonString(transfer_id) + "}", "application/json");
         return false;
     }
@@ -223,7 +223,7 @@ bool DataFrameTransferClient::Acquire(const std::string& request_id, const std::
     if (!reader.ok() || (*reader)->num_record_batches() != 1) {
         if (reader.ok()) (*mapped)->Close();
         *error = "DATA_PLANE_UNAVAILABLE";
-        client->Post("/channels/dataframe/exploration/v1/snapshots/release",
+        client->Post("/channels/dataframe/exploration/snapshots/release",
                      "{\"transfer_id\":" + JsonString(transfer_id) + "}", "application/json");
         return false;
     }
@@ -246,7 +246,7 @@ bool DataFrameTransferClient::Acquire(const std::string& request_id, const std::
         reader = arrow::Status::Invalid("invalid transfer");
         (*mapped)->Close();
         *error = "DATA_PLANE_UNAVAILABLE";
-        client->Post("/channels/dataframe/exploration/v1/snapshots/release",
+        client->Post("/channels/dataframe/exploration/snapshots/release",
                      "{\"transfer_id\":" + JsonString(transfer_id) + "}", "application/json");
         return false;
     }
@@ -259,7 +259,7 @@ bool DataFrameTransferClient::Acquire(const std::string& request_id, const std::
     output->expires_at_unix = expires;
     output->mapping = std::move(*mapped);
     output->batch = std::move(*batch);
-    const auto release_response = client->Post("/channels/dataframe/exploration/v1/snapshots/release",
+    const auto release_response = client->Post("/channels/dataframe/exploration/snapshots/release",
                                                "{\"transfer_id\":" + JsonString(transfer_id) + "}", "application/json");
     if (!release_response || release_response->status != 200) {
         output->batch.reset();
@@ -283,7 +283,7 @@ bool DataFrameTransferClient::Acquire(const std::string& request_id, const std::
 }
 
 bool DataFrameTransferClient::Lookup(const std::string& snapshot_id, std::shared_ptr<arrow::RecordBatch>* batch,
-                                     DataFrameSnapshotInfoV1* meta) {
+                                     DataFrameSnapshotInfo* meta) {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = snapshots_.find(snapshot_id);
     if (found == snapshots_.end() || found->second.expires_at <= std::chrono::steady_clock::now()) return false;

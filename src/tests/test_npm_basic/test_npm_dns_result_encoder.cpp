@@ -53,15 +53,15 @@ class FailingPool final : public arrow::MemoryPool {
 };
 
 template <typename Address>
-class Emitter final : public npm::INpmResultEmitterV1 {
+class Emitter final : public npm::INpmResultEmitter {
  public:
     explicit Emitter(std::shared_ptr<Budget> budget) : budget_(std::move(budget)) {}
     int Emit(std::string_view entity, const arrow::RecordBatch& rows) override {
         ++calls;
         assert(entity == (sizeof(Address) == 4 ? "dns_transaction_ipv4" : "dns_transaction_ipv6") && budget_->used > 0);
-        const auto descriptor = npm::NpmDnsTransactionEntityDescriptorV1(
+        const auto descriptor = npm::NpmDnsTransactionEntityDescriptor(
             sizeof(Address) == 4 ? flowsql::packet::AddressFamily::kIPv4 : flowsql::packet::AddressFamily::kIPv6);
-        assert(npm::ValidateNpmEntityRowsV1("dns", descriptor, rows).error == npm::NpmProtocolContractErrorV1::kNone);
+        assert(npm::ValidateNpmEntityRows("dns", descriptor, rows).error == npm::NpmProtocolContractError::kNone);
         assert(rows.num_rows() == 1 && rows.schema()->Equals(*descriptor.schema, true));
         auto id = std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("entity_instance_id"));
         auto domain = std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("observation_domain_id"));
@@ -116,24 +116,24 @@ void TestEncodeAndFailures() {
     row.qclass = 1;
     row.query_at_ns = 100;
     row.observed_at_ns = 200;
-    assert(npm::EmitNpmDnsTransactionV1(session, budget, emitter) == 0);
+    assert(npm::EmitNpmDnsTransaction(session, budget, emitter) == 0);
     assert(emitter.calls == 1 && budget->used == 0);
     emitter.error = EIO;
-    assert(npm::EmitNpmDnsTransactionV1(session, budget, emitter) == EIO);
+    assert(npm::EmitNpmDnsTransaction(session, budget, emitter) == EIO);
     assert(emitter.calls == 2 && budget->used == 0);
     budget->limit = 1;
-    assert(npm::EmitNpmDnsTransactionV1(session, budget, emitter) == ENOSPC);
+    assert(npm::EmitNpmDnsTransaction(session, budget, emitter) == ENOSPC);
     assert(emitter.calls == 2 && budget->used == 0);
     budget->limit = 65536;
     FailingPool pool;
-    assert(npm::EmitNpmDnsTransactionV1(session, budget, emitter, &pool) == ENOMEM);
+    assert(npm::EmitNpmDnsTransaction(session, budget, emitter, &pool) == ENOMEM);
     assert(emitter.calls == 2 && budget->used == 0);
     row.entity_instance_id = 0;
-    assert(npm::EmitNpmDnsTransactionV1(session, budget, emitter) == EINVAL);
+    assert(npm::EmitNpmDnsTransaction(session, budget, emitter) == EINVAL);
     assert(emitter.calls == 2 && budget->used == 0);
     row.entity_instance_id = 9;
     row.qname = std::string(1025, 'x');
-    assert(npm::EmitNpmDnsTransactionV1(session, budget, emitter) == EINVAL);
+    assert(npm::EmitNpmDnsTransaction(session, budget, emitter) == EINVAL);
     assert(emitter.calls == 2 && budget->used == 0);
 }
 

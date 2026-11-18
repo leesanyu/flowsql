@@ -80,7 +80,7 @@ try {
   assert(workflows.some((w) => w.workflow.some((s) => s.type === 'view' && s.query.some((q) => q.op === 'raw'))))
   checks.push('real_graphic_walker_workflows')
   for (const data of completedRequests) {
-    const response = await fetch(base + '/api/visualization/v1/compute', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    const response = await fetch(base + '/api/visualization/compute', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...data, request_id: crypto.randomUUID() }) })
     const result = await response.json()
     assert.equal(response.status, 200, JSON.stringify(result)); assert.equal(result.execution, 'database'); results.push(result); resultWorkflows.push(data.workflow)

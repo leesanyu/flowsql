@@ -42,8 +42,8 @@ int main(int argc, char** argv) {
     const auto bridge_options = "worker_host=127.0.0.1;worker_port=" + port;
     const char* options[]{config.c_str(), nullptr, catalog_options.c_str(), bridge_options.c_str(), nullptr};
     assert(loader->Load(".", libs, options, 5) == 0 && loader->StartAll() == 0);
-    auto* contracts = static_cast<IOperatorContractCatalogV1*>(loader->First(IID_OPERATOR_CONTRACT_CATALOG_V1));
-    auto* publisher = static_cast<IPythonOperatorPublisherV1*>(loader->First(IID_PYTHON_OPERATOR_PUBLISHER_V1));
+    auto* contracts = static_cast<IOperatorContractCatalog*>(loader->First(IID_OPERATOR_CONTRACT_CATALOG));
+    auto* publisher = static_cast<IPythonOperatorPublisher*>(loader->First(IID_PYTHON_OPERATOR_PUBLISHER));
     auto* bridge = static_cast<IBridge*>(loader->First(IID_BRIDGE));
     assert(contracts && publisher && bridge);
     auto invoke = [&](const std::string& uri, const Value& request, std::string* response) {
@@ -69,19 +69,19 @@ int main(int argc, char** argv) {
         assert(rc == expected);
     };
     upload("good.py", "py_demo.py", error::OK);
-    DataSemanticsErrorV1 issue;
-    OperatorComponentContractV1 first, current;
+    DataSemanticsError issue;
+    OperatorComponentContract first, current;
     assert(contracts->Lookup("py", "demo", &first, &issue) == 0);
     assert(first.contract_state == "declared" && first.contract_ref == "operator_contract.py.demo@1");
     assert(first.component_revision == Hash(Read(root + "/good.py")));
     auto held = bridge->FindOperator("py", "demo");
-    auto* identity = dynamic_cast<IOperatorContractIdentityV1*>(held.get());
+    auto* identity = dynamic_cast<IOperatorContractIdentity*>(held.get());
     assert(identity && identity->ContractIdentity().component_revision == first.component_revision);
     auto parallel = bridge->FindOperator("py", "demo");
     assert(parallel != held);
     assert(held->Configure("factor", "3") == 0 && parallel->Configure("factor", "7") == 0);
     std::string prepared;
-    auto* adapter = dynamic_cast<IOperatorConfigAdapterV1*>(held.get());
+    auto* adapter = dynamic_cast<IOperatorConfigAdapter*>(held.get());
     assert(adapter && adapter->ResolveInvocation(R"({"parameters":{"factor":"3"},"inputs":[],"execution_context":{}})",
                                                  &prepared, &issue) == 0);
     Json effective;
@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
         assert(contracts->Lookup("py", "demo", &current, &issue) == 0);
         assert(current.component_revision == first.component_revision && current.contract_ref == first.contract_ref);
         auto unchanged = bridge->FindOperator("py", "demo");
-        assert(dynamic_cast<IOperatorContractIdentityV1*>(unchanged.get())->ContractIdentity().component_revision ==
+        assert(dynamic_cast<IOperatorContractIdentity*>(unchanged.get())->ContractIdentity().component_revision ==
                first.component_revision);
     }
     assert(contracts->Lookup("py", "other", &current, &issue) == 0 && current.component_revision.empty());

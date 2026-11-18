@@ -568,8 +568,8 @@ BaselineSerializationResult BaselineRelationTask::QuerySeriesSnapshot(
 
 BaselineStatus BaselineRelationTask::Close() { return BaselineTaskBase::Close(); }
 
-BaselineStateUsageV1 BaselineRelationTask::DoQueryStateUsage() const {
-    BaselineStateUsageV1 usage;
+BaselineStateUsage BaselineRelationTask::DoQueryStateUsage() const {
+    BaselineStateUsage usage;
     usage.runtime_identities = static_cast<uint64_t>(managed_sources_.size());
     usage.model_identities = static_cast<uint64_t>(artifacts_by_series_.size());
     for (const auto& source : managed_sources_) {
@@ -658,7 +658,7 @@ void BaselineRelationTask::ReleaseRuntimeForSource(const std::string& source) {
     managed_sources_.erase(index);
 }
 
-BaselineStatus BaselineRelationTask::DoReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope) {
+BaselineStatus BaselineRelationTask::DoReleaseIdentity(std::string_view key, BaselineStateReleaseScope scope) {
     const std::string source(key);
     if (managed_sources_.find(source) == managed_sources_.end() &&
         artifacts_by_series_.find(source) == artifacts_by_series_.end()) {
@@ -668,7 +668,7 @@ BaselineStatus BaselineRelationTask::DoReleaseIdentity(std::string_view key, Bas
         }
     }
     ReleaseRuntimeForSource(source);
-    if (scope == BaselineStateReleaseScopeV1::kAllState) {
+    if (scope == BaselineStateReleaseScope::kAllState) {
         seeds_by_series_.erase(source);
         artifacts_by_series_.erase(source);
     }
@@ -953,15 +953,9 @@ void BaselineRelationTask::ResetFusionCleanupRuntime() {
     fusion_cleanup_watermark_bucket_id_ = 0;
 }
 
-RelationRollingResult BaselineRelationTask::SubmitObservation(
-    const RelationRollingObservation& obs,
-    const RelationRollingSubmitOptions& options) {
-    return SubmitObservationWithReadiness(obs, options).result;
-}
-
-BaselineRelationEvaluationResultV1 BaselineRelationTask::SubmitObservationWithReadiness(
-    const RelationRollingObservation& obs, const RelationRollingSubmitOptions& options) {
-    BaselineRelationEvaluationResultV1 evaluation;
+BaselineRelationEvaluationResult BaselineRelationTask::SubmitObservation(const RelationRollingObservation& obs,
+                                                                         const RelationRollingSubmitOptions& options) {
+    BaselineRelationEvaluationResult evaluation;
     auto& result = evaluation.result;
     result.series_key = obs.series_key;
     result.bucket_id = obs.bucket_id;
@@ -1142,7 +1136,7 @@ BaselineRelationEvaluationResultV1 BaselineRelationTask::SubmitObservationWithRe
                 }
 
                 RollingBaselineResult rolling;
-                BaselineEvaluationReadinessV1 readiness = BaselineEvaluationReadinessV1::kUnavailable;
+                BaselineEvaluationReadiness readiness = BaselineEvaluationReadiness::kUnavailable;
                 if (summary.task_kind == BaselineTaskKind::kValue) {
                     ValueRollingObservation routed_obs;
                     routed_obs.series_key = identity.routed_series_key;

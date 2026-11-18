@@ -11,8 +11,8 @@ namespace flowsql::channels::kafka {
 namespace {
 using Clock = std::chrono::steady_clock;
 }
-PacketWriter::PacketWriter(PacketSinkConfig c, PacketSinkContextV1 context,
-                           std::shared_ptr<IKafkaClientSessionV1> session, std::shared_ptr<void> lease)
+PacketWriter::PacketWriter(PacketSinkConfig c, PacketSinkContext context, std::shared_ptr<IKafkaClientSession> session,
+                           std::shared_ptr<void> lease)
     : config_(std::move(c)),
       context_(std::move(context)),
       lease_(std::move(lease)),
@@ -78,7 +78,7 @@ int PacketWriter::Fail(int rc, const char* code, const char* stage) {
     report_.stage = stage;
     return cancelled_ ? ECANCELED : rc;
 }
-int PacketWriter::Open(const CaptureSourceSetV2& sources, std::shared_ptr<arrow::Schema> schema) {
+int PacketWriter::Open(const CaptureSourceSet& sources, std::shared_ptr<arrow::Schema> schema) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (report_.state != "created") return cancelled_ ? ECANCELED : EINVAL;
@@ -93,9 +93,9 @@ int PacketWriter::Open(const CaptureSourceSetV2& sources, std::shared_ptr<arrow:
         return Fail(EINVAL, e.what(), "sink_open");
     }
     void* p = nullptr;
-    int rc = session_->QueryInterface(IID_KAFKA_PRODUCER_SESSION_V1, &p);
+    int rc = session_->QueryInterface(IID_KAFKA_PRODUCER_SESSION, &p);
     if (rc || !p) return Fail(rc ? rc : ENOTSUP, "PACKET_PRODUCER_UNAVAILABLE", "sink_open");
-    producer_ = static_cast<IKafkaProducerSessionV1*>(p);
+    producer_ = static_cast<IKafkaProducerSession*>(p);
     std::string probe;
     rc = session_->Probe(std::min(config_.delivery_timeout_ms, 30000u), &probe);
     if (rc) return Fail(rc, "PACKET_SINK_CONNECTION_FAILED", "sink_open");
@@ -103,7 +103,7 @@ int PacketWriter::Open(const CaptureSourceSetV2& sources, std::shared_ptr<arrow:
     report_.state = cancelled_ ? "cancelled" : "open";
     return cancelled_ ? ECANCELED : 0;
 }
-int PacketWriter::Write(const CapturePollEventV2& event) {
+int PacketWriter::Write(const CapturePollEvent& event) {
     const auto deadline = Clock::now() + std::chrono::milliseconds(config_.delivery_timeout_ms);
     const uint64_t packets = event.block.batch ? std::max<int64_t>(0, event.block.batch->num_rows()) : 0;
     {
@@ -111,20 +111,20 @@ int PacketWriter::Write(const CapturePollEventV2& event) {
         if (report_.state != "open") return cancelled_ ? ECANCELED : EINVAL;
         // A plain timeout has neither a message nor a sequence number.
         if (event.block.kind == BlockPollEvent::kTimeout && !event.block.batch && event.progress.empty() &&
-            event.struct_size >= sizeof(CapturePollEventV2) && event.contract_version == 2 && !event.block.err)
+            event.struct_size >= sizeof(CapturePollEvent) && event.contract_version == 2 && !event.block.err)
             return 0;
         ++report_.messages.input;
         report_.packets.input += packets;
         report_.state = "writing";
         report_.stage = "sink_encode";
     }
-    KafkaDeliveryV1 delivery{0, 1, 0};
+    KafkaDelivery delivery{0, 1, 0};
     int rc = 0;
     const char* code = "INVALID_PACKET_ENVELOPE";
     const char* stage = "sink_encode";
     try {
         if (poll_sequence_ == UINT64_MAX) rc = EOVERFLOW;
-        auto encoded = rc ? arrow::Result<KafkaMessageV1>(arrow::Status::Invalid("PACKET_SEQUENCE_EXHAUSTED"))
+        auto encoded = rc ? arrow::Result<KafkaMessage>(arrow::Status::Invalid("PACKET_SEQUENCE_EXHAUSTED"))
                           : codec_.Encode(event, epoch_, poll_sequence_ + 1,
                                           [&] { return cancelled_ || Clock::now() >= deadline; });
         if (!encoded.ok()) {
@@ -140,7 +140,7 @@ int PacketWriter::Write(const CapturePollEventV2& event) {
                 rc = cancelled_ ? ECANCELED : ETIMEDOUT;
                 code = "PACKET_SINK_TIMEOUT";
             } else {
-                std::vector<KafkaProduceMessageV1> messages;
+                std::vector<KafkaProduceMessage> messages;
                 messages.push_back({std::move(encoded->key), std::move(encoded->value)});
                 const auto bytes = messages[0].key.size() + messages[0].value.size();
                 {
@@ -201,18 +201,18 @@ void PacketWriter::Cancel() {
         report_.code = "CANCELLED";
     }
 }
-PacketSinkReportV1 PacketWriter::Report() const {
+PacketSinkReport PacketWriter::Report() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return report_;
 }
-int Plugin::CreateWriter(const PacketSinkContextV1& context, std::unique_ptr<IPacketSinkWriterV1>* out) {
+int Plugin::CreateWriter(const PacketSinkContext& context, std::unique_ptr<IPacketSinkWriter>* out) {
     if (!out) return EINVAL;
     out->reset();
     if (context.target.rfind("kafka.", 0) != 0) return ENOTSUP;
     if (context.contract_version != 1 || context.target.size() <= 6 || context.target.find('.', 6) != std::string::npos)
         return EINVAL;
     const auto name = context.target.substr(6);
-    KafkaChannelDescriptionV1 d;
+    KafkaChannelDescription d;
     int rc = DescribeChannel(name.c_str(), &d);
     if (rc) return rc;
     try {
@@ -230,11 +230,11 @@ int Plugin::CreateWriter(const PacketSinkContextV1& context, std::unique_ptr<IPa
         std::lock_guard<std::mutex> lock(readers_mutex_);
         writer_names_.erase(name);
     });
-    IKafkaClientSessionV1* raw = nullptr;
+    IKafkaClientSession* raw = nullptr;
     std::string error;
     rc = OpenSession(name.c_str(), "sink", &raw, &error);
     if (rc) return rc;
-    std::shared_ptr<IKafkaClientSessionV1> session(raw, [this](auto* p) { ReleaseSession(p); });
+    std::shared_ptr<IKafkaClientSession> session(raw, [this](auto* p) { ReleaseSession(p); });
     try {
         auto config = ParsePacketSinkConfig(Parse(static_cast<Client*>(raw)->SinkOptions()));
         *out = std::make_unique<PacketWriter>(config, context, std::move(session), std::move(lease));

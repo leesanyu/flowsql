@@ -10,7 +10,7 @@
 using namespace flowsql;
 using namespace flowsql::channels::kafka;
 namespace {
-const char* kConfig = R"({"encoding":"flowsql_packet_v1","stream_id":"probe-a",
+const char* kConfig = R"({"encoding":"flowsql_packet","stream_id":"probe-a",
   "observation_domain_id":"18446744073709551615",
   "inputs":[{"source_id":4294967295,"queue_id":4294967294,"source_name":"探针/eth0"}]})";
 std::string Golden() {
@@ -34,6 +34,9 @@ void Config() {
         }
         assert(rejected);
     };
+    auto obsolete = Parse(kConfig);
+    obsolete["encoding"].SetString("flowsql_packet_v1", obsolete.GetAllocator());
+    reject(obsolete);
     for (const char* name : {"encoding", "stream_id", "observation_domain_id", "inputs"}) {
         auto copy = Parse(kConfig);
         copy.RemoveMember(name);
@@ -52,7 +55,7 @@ void Config() {
         reject(copy);
     }
     auto duplicate = Parse(kConfig);
-    duplicate.AddMember("encoding", "flowsql_packet_v1", duplicate.GetAllocator());
+    duplicate.AddMember("encoding", "flowsql_packet", duplicate.GetAllocator());
     reject(duplicate);
     auto unknown = Parse(kConfig);
     unknown.AddMember("surprise", 1, unknown.GetAllocator());
@@ -79,7 +82,7 @@ void Config() {
 }
 void Codec() {
     auto c = ParsePacketSourceConfig(Parse(kConfig));
-    KafkaMessageV1 m;
+    KafkaMessage m;
     m.key = c.stream_id;
     m.key_is_null = false;
     m.value = Golden();

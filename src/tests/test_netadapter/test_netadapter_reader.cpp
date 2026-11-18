@@ -25,20 +25,20 @@ class Protocol final : public IProtocol {
     }
     protocol::IDictionary* Dictionary() override { return nullptr; }
 };
-class Backend final : public ICaptureBackendSessionV1 {
+class Backend final : public ICaptureBackendSession {
  public:
     explicit Backend(size_t count = 2, size_t frame_bytes = 64)
         : queue(count), packet(frame_bytes), held(count), checks(count) {
         for (size_t index = 0; index < count; ++index) {
-            CaptureBackendInputV1 i;
+            CaptureBackendInput i;
             i.interface_name = "test" + std::to_string(index + 1);
             i.buffer_bytes = 1024 * 1024;
             i.timestamp_source = "test";
             inputs.push_back(i);
         }
     }
-    const std::vector<CaptureBackendInputV1>& Inputs() const override { return inputs; }
-    int TryRead(uint32_t i, CapturePacketViewV1* out) override {
+    const std::vector<CaptureBackendInput>& Inputs() const override { return inputs; }
+    int TryRead(uint32_t i, CapturePacketView* out) override {
         ++checks[i];
         if (failure) return EIO;
         if (queue[i].empty()) return EAGAIN;
@@ -54,16 +54,16 @@ class Backend final : public ICaptureBackendSessionV1 {
         queue[i].pop_front();
         ++released;
     }
-    CaptureBacklogV1 Backlog(uint32_t i) const override {
-        return queue[i].empty() ? CaptureBacklogV1::kEmpty : CaptureBacklogV1::kPresent;
+    CaptureBacklog Backlog(uint32_t i) const override {
+        return queue[i].empty() ? CaptureBacklog::kEmpty : CaptureBacklog::kPresent;
     }
     int64_t IdleTimeNs(uint32_t) const override { return idle_time; }
-    int ReadCounters(uint32_t, CaptureCountersV1* out) override {
+    int ReadCounters(uint32_t, CaptureCounters* out) override {
         *out = {};
         return 0;
     }
     void Cancel() override { ++cancelled; }
-    std::vector<CaptureBackendInputV1> inputs;
+    std::vector<CaptureBackendInput> inputs;
     std::vector<std::deque<int64_t>> queue;
     std::vector<uint8_t> packet;
     std::vector<bool> held;
@@ -73,10 +73,10 @@ class Backend final : public ICaptureBackendSessionV1 {
     int64_t idle_time = 100000000000LL;
     std::chrono::steady_clock::duration work_time{}, work_per_packet{};
 };
-class Provider final : public ICaptureBackendProviderV1 {
+class Provider final : public ICaptureBackendProvider {
  public:
     const char* Backend() const override { return "af_packet"; }
-    int Open(const CaptureBackendConfigV1&, std::shared_ptr<ICaptureBackendSessionV1>* out, std::string*) override {
+    int Open(const CaptureBackendConfig&, std::shared_ptr<ICaptureBackendSession>* out, std::string*) override {
         *out = std::make_shared<::Backend>();
         return 0;
     }
@@ -86,8 +86,8 @@ class Querier final : public IQuerier {
     Protocol protocol;
     Provider provider;
     int Traverse(const Guid& iid, fntraverse call) override {
-        if (std::memcmp(&iid, &IID_CAPTURE_BACKEND_PROVIDER_V1, sizeof(Guid)) == 0)
-            call(static_cast<ICaptureBackendProviderV1*>(&provider));
+        if (std::memcmp(&iid, &IID_CAPTURE_BACKEND_PROVIDER, sizeof(Guid)) == 0)
+            call(static_cast<ICaptureBackendProvider*>(&provider));
         return 0;
     }
     void* First(const Guid& iid) override {
@@ -99,7 +99,7 @@ void CheckPollBudgets(Protocol* protocol, const std::shared_ptr<const packet::Pc
                            std::chrono::steady_clock::duration work_per_packet) {
         auto backend = std::make_shared<Backend>(count, frame_bytes);
         backend->work_per_packet = work_per_packet;
-        CaptureBackendConfigV1 config;
+        CaptureBackendConfig config;
         config.buffer_bytes = 128 * kMiB;
         for (const auto& input : backend->inputs) config.interfaces.push_back(input.interface_name);
         for (auto& queue : backend->queue)
@@ -117,7 +117,7 @@ void CheckPollBudgets(Protocol* protocol, const std::shared_ptr<const packet::Pc
             assert((fact != event.progress.end()) == (backend->checks[i] != 0));
             if (fact != event.progress.end()) {
                 assert(!fact->source_idle_confirmed && !fact->packet_observed);
-                assert(fact->backlog == CaptureBacklogV1::kPresent);
+                assert(fact->backlog == CaptureBacklog::kPresent);
             }
         }
         if (count == 65 && frame_bytes == 64) {
@@ -139,7 +139,7 @@ void CheckPollBudgets(Protocol* protocol, const std::shared_ptr<const packet::Pc
 
     for (size_t count : {size_t(1), size_t(32)}) {
         auto backend = std::make_shared<Backend>(count);
-        CaptureBackendConfigV1 config;
+        CaptureBackendConfig config;
         config.buffer_bytes = 64 * kMiB;
         for (const auto& input : backend->inputs) config.interfaces.push_back(input.interface_name);
         NetAdapterReader reader("idle-many", config, 7, 1, backend, protocol, std::make_shared<int>(), nullptr);
@@ -157,14 +157,14 @@ void CheckPollBudgets(Protocol* protocol, const std::shared_ptr<const packet::Pc
 }
 void CheckContinuingProgress(Protocol* protocol) {
     auto backend = std::make_shared<Backend>();
-    CaptureBackendConfigV1 config;
+    CaptureBackendConfig config;
     config.interfaces = {"test1", "test2"};
     NetAdapterReader reader("continuing", config, 7, 1, backend, protocol, std::make_shared<int>(), nullptr,
                             [] { return std::chrono::steady_clock::time_point{}; });
     assert(reader.Open() == 0);
-    CaptureSourceSetV2 sources;
+    CaptureSourceSet sources;
     assert(reader.DescribeSources(&sources) == 0);
-    CaptureProgressTrackerV2 tracker(sources);
+    MultiInputCaptureProgressTracker tracker(sources);
     int64_t previous = 0;
     for (int tick = 1; tick <= 32; ++tick) {
         backend->idle_time = tick * 10000 + 100;
@@ -176,7 +176,7 @@ void CheckContinuingProgress(Protocol* protocol) {
         assert(event.progress[1].source_idle_confirmed == (tick % 2 != 0));
         assert(reader.ReleaseBlock(event.block.batch) == 0);
         event.block.batch.reset();
-        assert(tracker.Observe(event.progress) == CaptureProgressErrorV1::kNone);
+        assert(tracker.Observe(event.progress) == CaptureProgressError::kNone);
         const auto common = tracker.CommonCandidateNs();
         assert(common && *common > previous && *common <= tick * 10000 + 15);
         previous = *common;
@@ -189,50 +189,50 @@ void CheckContinuingProgress(Protocol* protocol) {
         assert(event.block.kind == BlockPollEvent::kData);
         assert(reader.ReleaseBlock(event.block.batch) == 0);
         event.block.batch.reset();
-        assert(tracker.Observe(event.progress) == CaptureProgressErrorV1::kNone);
+        assert(tracker.Observe(event.progress) == CaptureProgressError::kNone);
         if (!backend->queue[0].empty())
             assert(!tracker.CommonCandidateNs());
         else
             assert(tracker.CommonCandidateNs() && *tracker.CommonCandidateNs() > previous);
     }
     const auto safe = tracker.CommonCandidateNs();
-    CaptureProgressV1 first, second;
+    CaptureProgress first, second;
     first.source_id = 0;
     second.source_id = 1;
     first.generation = second.generation = 1;
     first.fact_sequence = second.fact_sequence = 100;
     first.capture_time_ns = second.capture_time_ns = 350000;
     first.source_idle_confirmed = second.source_idle_confirmed = true;
-    first.backlog = CaptureBacklogV1::kEmpty;
-    second.backlog = CaptureBacklogV1::kUnknown;
+    first.backlog = CaptureBacklog::kEmpty;
+    second.backlog = CaptureBacklog::kUnknown;
     auto invalid = second;
     invalid.generation = 2;
-    assert(tracker.Observe({first, invalid}) == CaptureProgressErrorV1::kWrongQueue);
+    assert(tracker.Observe({first, invalid}) == CaptureProgressError::kWrongQueue);
     assert(tracker.CommonCandidateNs() == safe);
-    assert(tracker.Observe({first, second}) == CaptureProgressErrorV1::kNone);
+    assert(tracker.Observe({first, second}) == CaptureProgressError::kNone);
     assert(!tracker.CommonCandidateNs() && tracker.BlockedInputs() == std::vector<uint32_t>{1});
-    assert(tracker.Observe({first}) == CaptureProgressErrorV1::kInvalidSequence);
+    assert(tracker.Observe({first}) == CaptureProgressError::kInvalidSequence);
     second.fact_sequence = 101;
-    second.backlog = CaptureBacklogV1::kEmpty;
-    assert(tracker.Observe({second}) == CaptureProgressErrorV1::kNone);
+    second.backlog = CaptureBacklog::kEmpty;
+    assert(tracker.Observe({second}) == CaptureProgressError::kNone);
     assert(tracker.CommonCandidateNs() == 350000);
     second.fact_sequence = 102;
     second.capture_time_ns = 349999;
-    assert(tracker.Observe({second}) == CaptureProgressErrorV1::kNone && !tracker.CommonCandidateNs());
+    assert(tracker.Observe({second}) == CaptureProgressError::kNone && !tracker.CommonCandidateNs());
     reader.Cancel();
     assert(reader.Close() == 0);
 }
 int main() {
     Protocol protocol;
     auto backend = std::make_shared<Backend>();
-    CaptureBackendConfigV1 config;
+    CaptureBackendConfig config;
     config.interfaces = {"test1", "test2"};
     auto lease = std::make_shared<int>(1);
     std::weak_ptr<int> retained = lease;
     auto reader = std::make_unique<NetAdapterReader>("test", config, 7, 1, backend, &protocol, lease, nullptr);
     lease.reset();
     assert(reader->Open() == 0);
-    CaptureSourceSetV2 sources;
+    CaptureSourceSet sources;
     assert(reader->DescribeSources(&sources) == 0 && sources.inputs.size() == 2);
     for (int i = 0; i < 100; ++i) backend->queue[0].push_back(i);
     backend->queue[1].push_back(50);
@@ -250,7 +250,7 @@ int main() {
     } else {
         assert(ids->Value(1) == 1);
     }
-    assert(event.progress.size() == 2 && event.progress[0].backlog == CaptureBacklogV1::kPresent);
+    assert(event.progress.size() == 2 && event.progress[0].backlog == CaptureBacklog::kPresent);
     assert(reader->PollCapture(0).block.kind == BlockPollEvent::kTimeout);
     auto slice = event.block.batch->column(6)->Slice(0, 1);
     assert(reader->ReleaseBlock(event.block.batch) == 0);
@@ -308,7 +308,7 @@ int main() {
     assert(rejected_backend->released > 0 && rejected_backend->released <= 2 * kInputPacketQuantum);
     assert(rejected.progress.size() == 2);
     for (const auto& fact : rejected.progress)
-        assert(!fact.packet_observed && !fact.source_idle_confirmed && fact.backlog == CaptureBacklogV1::kPresent);
+        assert(!fact.packet_observed && !fact.source_idle_confirmed && fact.backlog == CaptureBacklog::kPresent);
     filtered.Cancel();
     assert(filtered.Close() == 0);
     CaptureMemoryPool budget(128);
@@ -337,7 +337,7 @@ int main() {
         domain = doc["observation_domain_id"].GetUint64();
     });
     IBlockStreamChannel* managed = nullptr;
-    BlockStreamReaderConfigV1 request;
+    BlockStreamReaderConfig request;
     request.task_id = "test";
     request.source_category = "netadapter";
     request.source_name = "manager";

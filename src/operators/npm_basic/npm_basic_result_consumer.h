@@ -14,9 +14,8 @@
 namespace flowsql::npm {
 
 /** Database implementation for the task-private managed result consumer factory. */
-__attribute__((visibility("default"))) std::unique_ptr<INpmResultConsumerFactoryV1>
-MakeNpmDatabaseResultConsumerFactory(IDatabaseChannel* channel, std::string input_namespace,
-                                     std::optional<uint32_t> retention_days = std::nullopt);
+__attribute__((visibility("default"))) std::unique_ptr<INpmResultConsumerFactory> MakeNpmDatabaseResultConsumerFactory(
+    IDatabaseChannel* channel, std::string input_namespace, std::optional<uint32_t> retention_days = std::nullopt);
 
 }  // namespace flowsql::npm
 

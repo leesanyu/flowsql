@@ -69,14 +69,14 @@ void AddAnswer(Bytes* bytes) {
 
 flowsql::Span<const uint8_t> View(const Bytes& bytes) { return {bytes.data(), bytes.size()}; }
 
-int Send(npm::NpmDnsUdpTrackerV1* tracker, uint64_t session, Direction direction, const Bytes& bytes, int64_t time,
-         std::vector<npm::NpmDnsUdpResultV1>* rows, bool complete = true) {
+int Send(npm::NpmDnsUdpTracker* tracker, uint64_t session, Direction direction, const Bytes& bytes, int64_t time,
+         std::vector<npm::NpmDnsUdpResult>* rows, bool complete = true) {
     return tracker->OnDatagram(session, direction, View(bytes), complete, time, rows);
 }
 
 void TestMatchedRcodesAndIsolation() {
-    npm::NpmDnsUdpTrackerV1 tracker({{1001}, 5'000'000'000, 256});
-    std::vector<npm::NpmDnsUdpResultV1> rows;
+    npm::NpmDnsUdpTracker tracker({{1001}, 5'000'000'000, 256});
+    std::vector<npm::NpmDnsUdpResult> rows;
     assert(Send(&tracker, 1, Direction::kAToB, Message(7, 0), 100, &rows) == 0);
     assert(Send(&tracker, 2, Direction::kAToB, Message(7, 0), 110, &rows) == 0);
     assert(Send(&tracker, 1, Direction::kBToA, Message(7, 0, "other"), 120, &rows) == 0);
@@ -103,8 +103,8 @@ void TestMatchedRcodesAndIsolation() {
 }
 
 void TestRetriesOrphansAndEnd() {
-    npm::NpmDnsUdpTrackerV1 tracker({{1001}, 5'000'000'000, 2});
-    std::vector<npm::NpmDnsUdpResultV1> rows;
+    npm::NpmDnsUdpTracker tracker({{1001}, 5'000'000'000, 2});
+    std::vector<npm::NpmDnsUdpResult> rows;
     assert(Send(&tracker, 5, Direction::kAToB, Message(42, 0, "A"), 100, &rows) == 0);
     assert(Send(&tracker, 5, Direction::kAToB, Message(42, 0, "a"), 130, &rows) == 0);
     assert(tracker.PendingCount(5) == 1);
@@ -132,29 +132,28 @@ void TestRetriesOrphansAndEnd() {
 }
 
 void TestMalformedTruncatedAndUnsupported() {
-    npm::NpmDnsUdpTrackerV1 tracker({{1001}, 5'000'000'000, 256});
-    std::vector<npm::NpmDnsUdpResultV1> rows;
+    npm::NpmDnsUdpTracker tracker({{1001}, 5'000'000'000, 256});
+    std::vector<npm::NpmDnsUdpResult> rows;
     auto query = Message(9, 0);
     auto response = Response(9);
-    npm::NpmDnsParsedMessageV1 parsed;
+    npm::NpmDnsParsedMessage parsed;
     for (size_t length = 0; length < 12; ++length) {
         Bytes short_body(response.begin(), response.begin() + length);
-        assert(npm::ParseNpmDnsUdpMessageV1(View(short_body), true, &parsed) == npm::NpmDnsMessageStatusV1::kMalformed);
+        assert(npm::ParseNpmDnsUdpMessage(View(short_body), true, &parsed) == npm::NpmDnsMessageStatus::kMalformed);
         assert(!parsed.key_available);
     }
     auto bad_count = Message(9, 0x8000, "a", 1, 1, 2);
-    assert(npm::ParseNpmDnsUdpMessageV1(View(bad_count), true, &parsed) == npm::NpmDnsMessageStatusV1::kMalformed);
+    assert(npm::ParseNpmDnsUdpMessage(View(bad_count), true, &parsed) == npm::NpmDnsMessageStatus::kMalformed);
     assert(!parsed.key_available);
     auto pointer_loop = response;
     pointer_loop[12] = 0xc0;
     pointer_loop[13] = 0x0c;
-    assert(npm::ParseNpmDnsUdpMessageV1(View(pointer_loop), true, &parsed) == npm::NpmDnsMessageStatusV1::kMalformed);
+    assert(npm::ParseNpmDnsUdpMessage(View(pointer_loop), true, &parsed) == npm::NpmDnsMessageStatus::kMalformed);
     assert(!parsed.key_available);
     auto pointer_outside = response;
     pointer_outside[12] = 0xff;
     pointer_outside[13] = 0xff;
-    assert(npm::ParseNpmDnsUdpMessageV1(View(pointer_outside), true, &parsed) ==
-           npm::NpmDnsMessageStatusV1::kMalformed);
+    assert(npm::ParseNpmDnsUdpMessage(View(pointer_outside), true, &parsed) == npm::NpmDnsMessageStatus::kMalformed);
     assert(!parsed.key_available);
     assert(Send(&tracker, 9, Direction::kAToB, query, 100, &rows) == 0);
     auto clipped = response;
@@ -186,27 +185,27 @@ void TestMalformedTruncatedAndUnsupported() {
 }
 
 void TestNamesSectionsAndOptBounds() {
-    npm::NpmDnsParsedMessageV1 parsed;
+    npm::NpmDnsParsedMessage parsed;
     auto valid = Response(21);
     AddAnswer(&valid);
-    assert(npm::ParseNpmDnsUdpMessageV1(View(valid), true, &parsed) == npm::NpmDnsMessageStatusV1::kComplete);
+    assert(npm::ParseNpmDnsUdpMessage(View(valid), true, &parsed) == npm::NpmDnsMessageStatus::kComplete);
     assert(parsed.key_available && parsed.message.wire_qname == std::string("\1a\0", 3));
     auto bad_rr = valid;
     bad_rr.pop_back();
-    assert(npm::ParseNpmDnsUdpMessageV1(View(bad_rr), true, &parsed) == npm::NpmDnsMessageStatusV1::kMalformed);
+    assert(npm::ParseNpmDnsUdpMessage(View(bad_rr), true, &parsed) == npm::NpmDnsMessageStatus::kMalformed);
     assert(parsed.key_available);
     auto bad_opt = Response(22);
     AddOpt(&bad_opt, 1, 1);
-    assert(npm::ParseNpmDnsUdpMessageV1(View(bad_opt), true, &parsed) == npm::NpmDnsMessageStatusV1::kMalformed);
+    assert(npm::ParseNpmDnsUdpMessage(View(bad_opt), true, &parsed) == npm::NpmDnsMessageStatus::kMalformed);
     assert(parsed.key_available);
     auto duplicate_opt = Response(23);
     AddOpt(&duplicate_opt, 1);
     duplicate_opt[11] = 2;
     const Bytes opt(duplicate_opt.begin() + Response(23).size(), duplicate_opt.end());
     duplicate_opt.insert(duplicate_opt.end(), opt.begin(), opt.end());
-    assert(npm::ParseNpmDnsUdpMessageV1(View(duplicate_opt), true, &parsed) == npm::NpmDnsMessageStatusV1::kMalformed);
+    assert(npm::ParseNpmDnsUdpMessage(View(duplicate_opt), true, &parsed) == npm::NpmDnsMessageStatus::kMalformed);
     auto escaped = Message(24, 0, "a.b");
-    assert(npm::ParseNpmDnsUdpMessageV1(View(escaped), true, &parsed) == npm::NpmDnsMessageStatusV1::kComplete);
+    assert(npm::ParseNpmDnsUdpMessage(View(escaped), true, &parsed) == npm::NpmDnsMessageStatus::kComplete);
     assert(parsed.qname_display == "a\\.b");
     auto long_name = Message(25, 0);
     long_name.resize(12);
@@ -217,17 +216,17 @@ void TestNamesSectionsAndOptBounds() {
     long_name.push_back(0);
     Put16(&long_name, 1);
     Put16(&long_name, 1);
-    assert(npm::ParseNpmDnsUdpMessageV1(View(long_name), true, &parsed) == npm::NpmDnsMessageStatusV1::kComplete);
+    assert(npm::ParseNpmDnsUdpMessage(View(long_name), true, &parsed) == npm::NpmDnsMessageStatus::kComplete);
     long_name.insert(long_name.end() - 5, {'y', 'z'});
     long_name[12 + 3 * 64] = 63;
-    assert(npm::ParseNpmDnsUdpMessageV1(View(long_name), true, &parsed) == npm::NpmDnsMessageStatusV1::kMalformed);
+    assert(npm::ParseNpmDnsUdpMessage(View(long_name), true, &parsed) == npm::NpmDnsMessageStatus::kMalformed);
     Bytes oversized(65536, 0);
-    assert(npm::ParseNpmDnsUdpMessageV1(View(oversized), true, &parsed) == npm::NpmDnsMessageStatusV1::kMalformed);
+    assert(npm::ParseNpmDnsUdpMessage(View(oversized), true, &parsed) == npm::NpmDnsMessageStatus::kMalformed);
 }
 
 void TestCaptureWatermarkDeadlines() {
-    npm::NpmDnsUdpTrackerV1 tracker({{1001}, 1'000'000, 3});
-    std::vector<npm::NpmDnsUdpResultV1> rows;
+    npm::NpmDnsUdpTracker tracker({{1001}, 1'000'000, 3});
+    std::vector<npm::NpmDnsUdpResult> rows;
     assert(!tracker.NextEventDeadlineNs());
     assert(Send(&tracker, 50, Direction::kAToB, Message(1, 0), 100, &rows) == 0);
     assert(tracker.NextEventDeadlineNs() == 1'000'100);
@@ -272,8 +271,8 @@ void TestPendingBudgetRelease() {
         uint64_t limit = 4096;
     };
     auto budget = std::make_shared<Budget>();
-    npm::NpmDnsUdpTrackerV1 tracker({{1001}, 5'000'000'000, 2}, budget);
-    std::vector<npm::NpmDnsUdpResultV1> rows;
+    npm::NpmDnsUdpTracker tracker({{1001}, 5'000'000'000, 2}, budget);
+    std::vector<npm::NpmDnsUdpResult> rows;
     assert(Send(&tracker, 60, Direction::kAToB, Message(1, 0), 100, &rows) == 0);
     assert(budget->Usage().module_state_bytes == 4096);
     assert(Send(&tracker, 60, Direction::kAToB, Message(2, 0), 110, &rows) == ENOSPC);

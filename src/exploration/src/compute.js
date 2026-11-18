@@ -1,7 +1,7 @@
 import { contract } from './bridge.js'
 
 export async function api(path, options = {}) {
-  const response = await fetch('/api/visualization/v1/' + path, options)
+  const response = await fetch('/api/visualization/' + path, options)
   const body = await response.json()
   if (!response.ok) throw Object.assign(new Error(body.message || '数据探索请求失败'), { code: body.code })
   return body
@@ -15,7 +15,7 @@ export function computationClient(source, notify, fail) {
   const cancel = () => {
     ++epoch
     for (const [id, controller] of pending) {
-      fetch('/api/visualization/v1/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request_id: id }), keepalive: true }).catch(() => {})
+      fetch('/api/visualization/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request_id: id }), keepalive: true }).catch(() => {})
       controller.abort()
     }
     pending.clear()

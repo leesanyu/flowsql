@@ -1325,7 +1325,7 @@ class PcapFilterAstLowerer {
     }
 
     std::unordered_set<uint32_t> used_ids_;
-    uint32_t next_synthetic_id_ = kFilterDomainSyntheticNodeIdBaseV1;
+    uint32_t next_synthetic_id_ = kFilterDomainSyntheticNodeIdBase;
     bool synthetic_ids_exhausted_ = false;
     int error_code_ = 0;
     std::string* error_ = nullptr;
@@ -1631,16 +1631,16 @@ void CanonicalizePacketFilterRuleKeys(packet::PacketFilterRule* rule) {
     }
 }
 
-int PcapFilterDomainResolver::Resolve(const FilterDomainResolveRequestV1& request,
-                                      FilterDomainResolveResultV1* result) const {
+int PcapFilterDomainResolver::Resolve(const FilterDomainResolveRequest& request,
+                                      FilterDomainResolveResult* result) const {
     if (result) *result = {};
     if (!result) return EINVAL;
-    if (request.contract_version != kFilterDomainResolverContractVersionV1 || !request.target_category ||
+    if (request.contract_version != kFilterDomainResolverContractVersion || !request.target_category ||
         !request.target_name || !request.output_schema || !request.expression || request.target_name[0] == '\0') {
         result->diagnostic = "pcapfile domain resolve request is incomplete or has the wrong version";
         return EINVAL;
     }
-    if (request.target_kind != FilterDomainTargetKindV1::kSource || LowerAscii(request.target_category) != "pcapfile") {
+    if (request.target_kind != FilterDomainTargetKind::kSource || LowerAscii(request.target_category) != "pcapfile") {
         return ENOTSUP;
     }
     const auto expected_schema = packet::PacketFamilyFilterSchema();

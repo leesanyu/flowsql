@@ -25,6 +25,8 @@
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
+#include <framework/interfaces/ioperator_catalog.h>
+#include <framework/interfaces/istream_manager.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -119,16 +121,16 @@ class SchedulerE2eProtocol final : public IProtocol {
     IProtocol* delegate_ = nullptr;
 };
 
-class SchedulerHttp1Matcher final : public IFlowLabelMatcherV1 {
+class SchedulerHttp1Matcher final : public IFlowLabelMatcher {
  public:
-    int ClassifyBatch(const FlowLabelFactsV1* facts, uint32_t count, uint32_t* labels) const override {
+    int ClassifyBatch(const FlowLabelFacts* facts, uint32_t count, uint32_t* labels) const override {
         if (facts == nullptr || labels == nullptr) return EINVAL;
         for (uint32_t index = 0; index < count; ++index) {
             labels[index] = facts[index].destination.port == 80 || facts[index].destination.port == 443 ? 1001 : 0;
         }
         return 0;
     }
-    bool FindLabel(uint32_t id, FlowPrimaryLabelViewV1* view) const override {
+    bool FindLabel(uint32_t id, FlowPrimaryLabelView* view) const override {
         if (id != 1001) return false;
         if (view != nullptr) {
             view->label_id = 1001;
@@ -139,37 +141,21 @@ class SchedulerHttp1Matcher final : public IFlowLabelMatcherV1 {
     void Release() noexcept override { delete this; }
 };
 
-class SchedulerHttp1Labeling final : public IFlowLabelingProviderV1, public IConfigChannelRegistryV1 {
+class SchedulerHttp1Labeling final : public IFlowLabelingProvider {
  public:
-    FlowLabelingErrorV1 RuntimeStatus(FlowLabelingDiagnosticV1* diagnostic) const override {
+    FlowLabelingError RuntimeStatus(FlowLabelingDiagnostic* diagnostic) const override {
         if (diagnostic != nullptr) *diagnostic = {};
-        return FlowLabelingErrorV1::kNone;
+        return FlowLabelingError::kNone;
     }
-    FlowLabelingErrorV1 CreateMatcher(const FlowLabelingCompileRequestV1& request, IFlowLabelMatcherV1** output,
-                                      FlowLabelingDiagnosticV1* diagnostic) override {
+    FlowLabelingError CreateMatcher(const FlowLabelingCompileRequest& request, IFlowLabelMatcher** output,
+                                    FlowLabelingDiagnostic* diagnostic) override {
         if (request.snapshot == nullptr || request.snapshot->channel_name != "http1-e2e" ||
             request.snapshot->revision != 1 || output == nullptr) {
-            return FlowLabelingErrorV1::kInvalidSnapshot;
+            return FlowLabelingError::kInvalidSnapshot;
         }
         *output = new SchedulerHttp1Matcher();
         if (diagnostic != nullptr) *diagnostic = {};
-        return FlowLabelingErrorV1::kNone;
-    }
-    int Resolve(const char* exact_reference, ConfigChannelSnapshot* snapshot, std::string* error) override {
-        if (exact_reference == nullptr || std::string(exact_reference) != "config.http1-e2e@1" || snapshot == nullptr) {
-            if (error != nullptr) *error = "unknown test snapshot";
-            return ENOENT;
-        }
-        ConfigChannelSnapshot next{};
-        next.channel_name = "http1-e2e";
-        next.revision = 1;
-        next.format = "yaml";
-        next.schema_id = "flowsql.io/flow-labeling/v1alpha1";
-        next.content = std::make_shared<const std::string>("labels: []");
-        next.content_bytes = next.content->size();
-        *snapshot = std::move(next);
-        if (error != nullptr) error->clear();
-        return 0;
+        return FlowLabelingError::kNone;
     }
 };
 
@@ -255,7 +241,7 @@ struct SchedulerE2eTransformSnapshot {
     bool input_schema_matched = false;
 };
 
-class SchedulerE2eTransformTask final : public IBlockTransformTaskV1 {
+class SchedulerE2eTransformTask final : public IBlockTransformTask {
  public:
     explicit SchedulerE2eTransformTask(SchedulerE2eTransformKind kind) : kind_(kind) {}
 
@@ -276,15 +262,14 @@ class SchedulerE2eTransformTask final : public IBlockTransformTaskV1 {
     }
 
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
-                     std::vector<BlockTransformOutputV1>* outputs) override {
+                     std::vector<BlockTransformOutput>* outputs) override {
         ++process_calls;
         if (!input || !outputs || !outputs->empty()) return -EINVAL;
         input_rows.push_back(input->num_rows());
         if (kind_ != SchedulerE2eTransformKind::kPacketToProtocol) {
             if (kind_ != SchedulerE2eTransformKind::kStopOnFirst) outputs->push_back({input, ts_ms});
-            return static_cast<int>(kind_ == SchedulerE2eTransformKind::kStopOnFirst
-                                        ? BlockTransformStatusV1::kStop
-                                        : BlockTransformStatusV1::kContinue);
+            return static_cast<int>(kind_ == SchedulerE2eTransformKind::kStopOnFirst ? BlockTransformStatus::kStop
+                                                                                     : BlockTransformStatus::kContinue);
         }
 
         auto sequence = std::dynamic_pointer_cast<arrow::UInt64Array>(input->GetColumnByName("sequence"));
@@ -318,10 +303,10 @@ class SchedulerE2eTransformTask final : public IBlockTransformTaskV1 {
         outputs->push_back({arrow::RecordBatch::Make(SchedulerE2eTransformSchema(), input->num_rows(),
                                                      {output_sequence, output_captured_len, output_protocol}),
                             ts_ms});
-        return static_cast<int>(BlockTransformStatusV1::kContinue);
+        return static_cast<int>(BlockTransformStatus::kContinue);
     }
 
-    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+    int Flush(std::vector<BlockTransformOutput>* outputs) override {
         ++flush_calls;
         return outputs && outputs->empty() ? 0 : EINVAL;
     }
@@ -341,7 +326,7 @@ class SchedulerE2eTransformTask final : public IBlockTransformTaskV1 {
     std::string last_error_;
 };
 
-class SchedulerE2eTransformProvider final : public IBlockTransformOperatorV1 {
+class SchedulerE2eTransformProvider final : public IBlockTransformOperator {
  public:
     SchedulerE2eTransformProvider(std::string name, SchedulerE2eTransformKind kind)
         : name_(std::move(name)), kind_(kind) {}
@@ -350,10 +335,10 @@ class SchedulerE2eTransformProvider final : public IBlockTransformOperatorV1 {
     std::string Name() const override { return name_; }
     std::string Description() const override { return "scheduler cross-module E2E transform"; }
 
-    int CreateTask(const BlockTransformTaskConfigV1& config, IBlockTransformTaskV1** task) override {
+    int CreateTask(const BlockTransformTaskConfig& config, IBlockTransformTask** task) override {
         ++create_calls;
         if (!task || !config.task_id || !config.with_params_json || !config.pushed_filter_plan_json ||
-            config.contract_version != kBlockTransformContractVersionV1) {
+            config.contract_version != kBlockTransformContractVersion) {
             return EINVAL;
         }
         task_ids.emplace_back(config.task_id);
@@ -364,7 +349,7 @@ class SchedulerE2eTransformProvider final : public IBlockTransformOperatorV1 {
         return 0;
     }
 
-    void ReleaseTask(IBlockTransformTaskV1* task) override {
+    void ReleaseTask(IBlockTransformTask* task) override {
         auto* concrete = dynamic_cast<SchedulerE2eTransformTask*>(task);
         ASSERT_TRUE(concrete != nullptr);
         SchedulerE2eTransformSnapshot snapshot;
@@ -415,13 +400,13 @@ struct SchedulerE2eManagedTrace {
     std::string target;
 };
 
-class SchedulerE2eManagedTask final : public IBlockTransformTaskV1, public IBlockTransformManagedSinkTaskV1 {
+class SchedulerE2eManagedTask final : public IBlockTransformTask, public IBlockTransformManagedSinkTask {
  public:
     explicit SchedulerE2eManagedTask(SchedulerE2eManagedTrace* trace) : trace_(trace) {}
 
-    int BindManagedSink(const BlockTransformManagedSinkBindingV1& binding) override {
+    int BindManagedSink(const BlockTransformManagedSinkBinding& binding) override {
         if (trace_->bind_calls++ != 0 || trace_->open_calls != 0 ||
-            binding.contract_version != kBlockTransformManagedSinkContractVersionV1 ||
+            binding.contract_version != kBlockTransformManagedSinkContractVersion ||
             binding.struct_size != sizeof(binding) || !binding.sink_channel || !binding.target || !binding.relation ||
             binding.relation[0] != '\0') {
             return EINVAL;
@@ -446,15 +431,15 @@ class SchedulerE2eManagedTask final : public IBlockTransformTaskV1, public IBloc
     }
 
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
-                     std::vector<BlockTransformOutputV1>* outputs) override {
+                     std::vector<BlockTransformOutput>* outputs) override {
         if (!input || !outputs || !outputs->empty() || !channel_->IsConnected()) return -EINVAL;
         ++trace_->process_calls;
         trace_->input_rows += input->num_rows();
         outputs->push_back({input, ts_ms});
-        return static_cast<int>(BlockTransformStatusV1::kContinue);
+        return static_cast<int>(BlockTransformStatus::kContinue);
     }
 
-    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+    int Flush(std::vector<BlockTransformOutput>* outputs) override {
         if (!outputs || !outputs->empty() || !channel_->IsConnected()) return EINVAL;
         ++trace_->flush_calls;
         return 0;
@@ -469,19 +454,19 @@ class SchedulerE2eManagedTask final : public IBlockTransformTaskV1, public IBloc
     IDatabaseChannel* channel_ = nullptr;
 };
 
-class SchedulerE2eManagedProvider final : public IBlockTransformOperatorV1 {
+class SchedulerE2eManagedProvider final : public IBlockTransformOperator {
  public:
     explicit SchedulerE2eManagedProvider(SchedulerE2eManagedTrace* trace) : trace_(trace) {}
     void SetDatabaseFactory(IDatabaseFactory* factory) { factory_ = factory; }
     std::string Category() const override { return "test"; }
     std::string Name() const override { return "managed_probe"; }
     std::string Description() const override { return "managed sink lifecycle probe"; }
-    int CreateTask(const BlockTransformTaskConfigV1&, IBlockTransformTaskV1** task) override {
+    int CreateTask(const BlockTransformTaskConfig&, IBlockTransformTask** task) override {
         if (!task) return EINVAL;
         *task = new SchedulerE2eManagedTask(trace_);
         return 0;
     }
-    void ReleaseTask(IBlockTransformTaskV1* task) override {
+    void ReleaseTask(IBlockTransformTask* task) override {
         auto* probe = dynamic_cast<SchedulerE2eManagedTask*>(task);
         ASSERT_TRUE(probe != nullptr);
         trace_->channel_alive_at_release = probe->ChannelAlive();
@@ -513,15 +498,16 @@ struct DatabaseInputTrace {
     int flushed = 0;
     bool alive = false;
 };
-class DatabaseInputProbe final : public IBlockTransformTaskV2,
-                                 public IBlockTransformDatabaseInputTaskV1,
+class DatabaseInputProbe final : public IBlockTransformTask,
+                                 public IBlockTransformTimeDrivenTask,
+                                 public IBlockTransformDatabaseInputTask,
                                  public IBlockStreamChannel,
-                                 public IBlockStreamInputProgressV1,
-                                 public IBlockTransformInputProgressTaskV1 {
+                                 public IBlockStreamInputProgress,
+                                 public IBlockTransformInputProgressTask {
  public:
     explicit DatabaseInputProbe(DatabaseInputTrace* trace) : trace_(trace) {}
-    int CreateDatabaseInput(const BlockDatabaseInputBindingV1& binding, BlockDatabaseInputV1* output) override {
-        ASSERT_TRUE(ValidBlockDatabaseInputBindingV1(binding));
+    int CreateDatabaseInput(const BlockDatabaseInputBinding& binding, BlockDatabaseInput* output) override {
+        ASSERT_TRUE(ValidBlockDatabaseInputBinding(binding));
         ASSERT_EQ(std::string(binding.exact_source), "sqlite.local");
         ASSERT_TRUE(!created_);
         ++trace_->created;
@@ -556,27 +542,26 @@ class DatabaseInputProbe final : public IBlockTransformTaskV2,
         return 0;
     }
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts,
-                     std::vector<BlockTransformOutputV1>* outputs) override {
+                     std::vector<BlockTransformOutput>* outputs) override {
         ++trace_->processed;
         ASSERT_EQ(input->num_rows(), trace_->failure == 9 ? 0 : 1);
         ASSERT_TRUE(input->schema()->Equals(*schema_));
         if (trace_->failure == 3) return -EIO;
         outputs->push_back({input, ts});
-        return static_cast<int>(trace_->failure == 5 ? BlockTransformStatusV1::kStop
-                                                     : BlockTransformStatusV1::kContinue);
+        return static_cast<int>(trace_->failure == 5 ? BlockTransformStatus::kStop : BlockTransformStatus::kContinue);
     }
-    int Flush(std::vector<BlockTransformOutputV1>*) override {
+    int Flush(std::vector<BlockTransformOutput>*) override {
         ++trace_->flushed;
         return trace_->failure == 4 ? EIO : 0;
     }
-    int ReadInputProgress(BlockInputProgressV1* progress) const override {
+    int ReadInputProgress(BlockInputProgress* progress) const override {
         ASSERT_TRUE(released_);
         if (trace_->failure == 6) return EIO;
         if (trace_->failure == 11) throw std::runtime_error("progress read failure");
         progress->datasets = {{"probe", "epoch", "position", 1}};
         return 0;
     }
-    int AcceptInputProgress(const BlockInputProgressV1& progress) override {
+    int AcceptInputProgress(const BlockInputProgress& progress) override {
         ASSERT_TRUE(released_ && trace_->processed == 1 && progress.datasets.size() == 1);
         ASSERT_EQ(progress.datasets[0].committed_position, "position");
         ++trace_->progress_accepted;
@@ -592,11 +577,11 @@ class DatabaseInputProbe final : public IBlockTransformTaskV2,
         }
     }
     std::string LastError() const override { return "database input probe"; }
-    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override {
+    int GetTimeDriveState(BlockTransformTimeDriveState* state) override {
         state->armed = 0;
         return 0;
     }
-    int OnTime(const BlockTransformTimeEventV1&, std::vector<BlockTransformOutputV1>*) override { return 0; }
+    int OnTime(const BlockTransformTimeEvent&, std::vector<BlockTransformOutput>*) override { return 0; }
     const char* Category() override { return "test"; }
     const char* Name() override { return "db_input"; }
     const char* Type() override { return ChannelType::kBlockStream; }
@@ -641,7 +626,7 @@ class DatabaseInputProbe final : public IBlockTransformTaskV2,
     bool timeout_sent_ = false;
     bool cancelled_ = false;
 };
-class DatabaseInputProvider final : public IBlockTransformOperatorV2, public IBlockTransformExecutionPolicyProviderV1 {
+class DatabaseInputProvider final : public IBlockTransformOperator, public IBlockTransformExecutionPolicyProvider {
  public:
     DatabaseInputTrace trace;
     int RequiresAsyncExecution(const char* with, const char* source, bool* output) const override {
@@ -656,11 +641,11 @@ class DatabaseInputProvider final : public IBlockTransformOperatorV2, public IBl
     std::string Category() const override { return "test"; }
     std::string Name() const override { return "database_input"; }
     std::string Description() const override { return "database input same-task fixture"; }
-    int CreateTask(const BlockTransformTaskConfigV2&, IBlockTransformTaskV2** task) override {
+    int CreateTask(const BlockTransformTaskConfig&, IBlockTransformTask** task) override {
         *task = new DatabaseInputProbe(&trace);
         return 0;
     }
-    void ReleaseTask(IBlockTransformTaskV2* task) override {
+    void ReleaseTask(IBlockTransformTask* task) override {
         auto* p = dynamic_cast<DatabaseInputProbe*>(task);
         ASSERT_TRUE(p && p->Released());
         ++trace.task_released;
@@ -885,7 +870,7 @@ static std::vector<uint8_t> MakeSchedulerE2eIcmpCapture() {
         false, {{1, 100, MakeSchedulerE2eIcmpPacket(false)}, {1, 200, MakeSchedulerE2eIcmpPacket(true)}});
 }
 
-class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockStreamReaderFactoryV1 {
+class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockStreamReaderFactory {
  public:
     enum class Mode { kNormal, kSourceError, kCancelled, kReleaseError, kInvalidPacket };
     class Source final : public IBlockStreamChannel {
@@ -904,7 +889,7 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
         bool IsFinished() const override { return false; }
     };
 
-    class Reader final : public ICaptureBlockStreamReaderV2 {
+    class Reader final : public ICaptureBlockStreamReader {
      public:
         Reader(SchedulerCaptureFixture* fixture, uint64_t generation) : fixture_(fixture), generation_(generation) {
             auto bytes = std::make_shared<std::vector<uint8_t>>(MakeSchedulerE2eHttp1Packet(false, 0x10, 100, 0, ""));
@@ -995,9 +980,9 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
             wait_cv_.notify_all();
         }
         bool IsFinished() const override { return !fixture_->endless && step_ > batches_.size() + 2; }
-        int DescribeSources(CaptureSourceSetV2* sources) const override {
+        int DescribeSources(CaptureSourceSet* sources) const override {
             if (!sources) return EINVAL;
-            CaptureQueueIdentityV1 identity;
+            CaptureQueueIdentity identity;
             identity.source_name = "capturetest.live";
             identity.source_id = 7;
             identity.observation_domain_id = 77;
@@ -1010,9 +995,10 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
             sources->limits.max_outstanding_batches = 1;
             return 0;
         }
-        CapturePollEventV2 PollCapture(int) override {
+        CapturePollEvent PollCapture(int) override {
+            if (step_ == 0) ++fixture_->ready_readers;
             ++fixture_->poll_capture_calls;
-            CapturePollEventV2 event;
+            CapturePollEvent event;
             if (cancelled_) {
                 event.block.kind = BlockPollEvent::kCancelled;
             } else if (step_ == 0 && fixture_->mode == Mode::kSourceError) {
@@ -1044,7 +1030,7 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
             ++step_;
             return event;
         }
-        int ReadInputCounters(uint32_t, CaptureCountersV1* counters) const override {
+        int ReadInputCounters(uint32_t, CaptureCounters* counters) const override {
             if (!counters) return EINVAL;
             *counters = {};
             counters->generation = generation_;
@@ -1052,15 +1038,15 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
         }
 
      private:
-        CaptureProgressV1 MakeFact(uint64_t sequence, bool packet_seen, bool idle) const {
-            CaptureProgressV1 fact;
+        CaptureProgress MakeFact(uint64_t sequence, bool packet_seen, bool idle) const {
+            CaptureProgress fact;
             fact.source_id = 7;
             fact.generation = generation_;
             fact.fact_sequence = sequence;
             fact.capture_time_ns = 1'000'000'000 + static_cast<int64_t>(sequence - 1);
             fact.packet_observed = packet_seen;
             fact.source_idle_confirmed = idle;
-            fact.backlog = CaptureBacklogV1::kEmpty;
+            fact.backlog = CaptureBacklog::kEmpty;
             return fact;
         }
         SchedulerCaptureFixture* fixture_;
@@ -1082,7 +1068,7 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
     void List(std::function<void(const char*, const char*, IBlockStreamChannel*)> callback) override {
         callback("capturetest", "live", &source_);
     }
-    int CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** reader) override {
+    int CreateReader(const BlockStreamReaderConfig& config, IBlockStreamChannel** reader) override {
         if (!reader) return EINVAL;
         *reader = nullptr;
         if (!config.source_category || !config.source_name || std::string(config.source_category) != "capturetest" ||
@@ -1100,6 +1086,7 @@ class SchedulerCaptureFixture final : public IBlockStreamFactory, public IBlockS
     int create_calls = 0;
     int release_calls = 0;
     std::atomic<int> release_blocks{0};
+    std::atomic<int> ready_readers{0};
     int poll_capture_calls = 0;
     uint64_t generation = 0;
     Mode mode = Mode::kNormal;
@@ -1806,7 +1793,7 @@ class SchedulerDnsBudget final : public npm::INpmTaskBudget {
     npm::NpmBudgetUsage usage_;
 };
 
-static std::shared_ptr<arrow::RecordBatch> MakeSchedulerDnsRows(const npm::NpmEntityDescriptorV1& entity) {
+static std::shared_ptr<arrow::RecordBatch> MakeSchedulerDnsRows(const npm::NpmEntityDescriptor& entity) {
     std::vector<std::shared_ptr<arrow::Array>> columns;
     for (const auto& field : entity.schema->fields()) {
         std::unique_ptr<arrow::ArrayBuilder> builder;
@@ -1927,31 +1914,38 @@ int main() {
         out << "  stream_channels:\n";
         out << "    - type: ring\n";
         out << "      name: in\n";
-        out << "      option: \"ring_size=256;batch_rows=128;overflow=drop;ring_mode=spsc;finite=false\"\n";
+        out << "      role: both\n      options: "
+               "{\"ring_size\":256,\"batch_rows\":128,\"overflow\":\"drop\",\"ring_mode\":\"spsc\",\"finite\":false}\n";
         out << "    - type: ring\n";
         out << "      name: out\n";
-        out << "      option: \"ring_size=256;batch_rows=128;overflow=drop;ring_mode=spsc;finite=false\"\n";
+        out << "      role: both\n      options: "
+               "{\"ring_size\":256,\"batch_rows\":128,\"overflow\":\"drop\",\"ring_mode\":\"spsc\",\"finite\":false}\n";
         out << "    - type: ring\n";
         out << "      name: stop_in\n";
-        out << "      option: \"ring_size=256;batch_rows=128;overflow=drop;ring_mode=spsc;finite=false\"\n";
+        out << "      role: both\n      options: "
+               "{\"ring_size\":256,\"batch_rows\":128,\"overflow\":\"drop\",\"ring_mode\":\"spsc\",\"finite\":false}\n";
         out << "    - type: ring\n";
         out << "      name: stop_out\n";
-        out << "      option: \"ring_size=256;batch_rows=128;overflow=drop;ring_mode=spsc;finite=false\"\n";
+        out << "      role: both\n      options: "
+               "{\"ring_size\":256,\"batch_rows\":128,\"overflow\":\"drop\",\"ring_mode\":\"spsc\",\"finite\":false}\n";
         out << "    - type: ring\n";
         out << "      name: svc_out\n";
-        out << "      option: \"ring_size=256;batch_rows=128;overflow=drop;ring_mode=spsc;finite=false\"\n";
+        out << "      role: both\n      options: "
+               "{\"ring_size\":256,\"batch_rows\":128,\"overflow\":\"drop\",\"ring_mode\":\"spsc\",\"finite\":false}\n";
         out << "    - type: ring\n";
         out << "      name: df_out\n";
-        out << "      option: \"ring_size=256;batch_rows=128;overflow=drop;ring_mode=spsc;finite=false\"\n";
+        out << "      role: both\n      options: "
+               "{\"ring_size\":256,\"batch_rows\":128,\"overflow\":\"drop\",\"ring_mode\":\"spsc\",\"finite\":false}\n";
         out << "    - type: tcp_session_mock\n";
         out << "      name: tcp_src\n";
-        out << "      option: "
-               "\"mode=keyed;total_records=64;batch_rows=8;partition_count=4;emit_interval_ms=0;ring_size=256;overflow="
-               "drop\"\n";
+        out << "      role: both\n      options: "
+               "{\"mode\":\"keyed\",\"total_records\":64,\"batch_rows\":8,\"partition_count\":4,\"emit_interval_ms\":0,"
+               "\"ring_size\":256,\"overflow\":\"drop\"}\n";
         out << "    - type: tcp_session_mock\n";
         out << "      name: tcp_src_stateless\n";
-        out << "      option: "
-               "\"mode=stateless;total_records=64;batch_rows=8;emit_interval_ms=0;ring_size=256;overflow=drop\"\n";
+        out << "      role: both\n      options: "
+               "{\"mode\":\"stateless\",\"total_records\":64,\"batch_rows\":8,\"emit_interval_ms\":0,\"ring_size\":256,"
+               "\"overflow\":\"drop\"}\n";
         out.flush();
     }
 
@@ -1969,18 +1963,17 @@ int main() {
     SchedulerE2eManagedProvider managed_transform(&managed_trace);
     SchedulerCaptureFixture capture_fixture;
     SchedulerHttp1Labeling http1_labeling;
-    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V2, &database_input_provider);
+    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR, &database_input_provider);
     loader->Regist(IID_PROTOCOL, &pcap_protocol);
     loader->Regist(IID_BLOCK_STREAM_OPERATOR, &block_operator);
-    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &packet_transform);
-    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &passthrough_transform);
-    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &parameter_capture_transform);
-    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &stop_capture_transform);
-    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &managed_transform);
+    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR, &packet_transform);
+    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR, &passthrough_transform);
+    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR, &parameter_capture_transform);
+    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR, &stop_capture_transform);
+    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR, &managed_transform);
     loader->Regist(IID_BLOCK_STREAM_FACTORY, static_cast<IBlockStreamFactory*>(&capture_fixture));
-    loader->Regist(IID_BLOCK_STREAM_READER_FACTORY_V1, static_cast<IBlockStreamReaderFactoryV1*>(&capture_fixture));
-    loader->Regist(IID_FLOW_LABELING_PROVIDER_V1, static_cast<IFlowLabelingProviderV1*>(&http1_labeling));
-    loader->Regist(IID_CONFIG_CHANNEL_REGISTRY_V1, static_cast<IConfigChannelRegistryV1*>(&http1_labeling));
+    loader->Regist(IID_BLOCK_STREAM_READER_FACTORY, static_cast<IBlockStreamReaderFactory*>(&capture_fixture));
+    loader->Regist(IID_FLOW_LABELING_PROVIDER, static_cast<IFlowLabelingProvider*>(&http1_labeling));
     const char* libs[] = {
         "libflowsql_config_channel.so", "libflowsql_database.so", "libflowsql_builtin.so",
         "libflowsql_catalog.so",        "libflowsql_npi.so",      "libflowsql_pcapfile.so",
@@ -2011,17 +2004,36 @@ int main() {
     ASSERT_TRUE(npi_protocol != nullptr);
     pcap_protocol.SetDelegate(npi_protocol);
     ASSERT_EQ(loader->StartAll(), 0);
+    auto* operator_catalog = static_cast<IOperatorCatalog*>(loader->First(IID_OPERATOR_CATALOG));
+    ASSERT_TRUE(operator_catalog != nullptr);
+    for (const char* name : {"passthrough", "concat", "hstack", "passthrough_stream", "count_window_stream",
+                             "dataframe_dispatch_stream", "tcp_service_merge_stream"}) {
+        ASSERT_TRUE(operator_catalog->QueryStatus("builtin", name) != OperatorStatus::kNotFound);
+    }
+
     std::puts("[INFO] plugins started");
+    auto publish_labels = FindRouteHandler(loader, "POST", "/channels/config/publish");
+    ASSERT_TRUE(publish_labels != nullptr);
+    std::string labeling_response;
+    // The synthetic matcher is local; its exact configuration must also exist in the real contract registry.
+    ASSERT_EQ(publish_labels("/channels/config/publish",
+                             R"({"name":"http1-e2e","expected_current_revision":0,"format":"yaml",)"
+                             R"("schema_id":"flowsql.io/flow-labeling","content_base64":"bGFiZWxzOiBbXQ=="})",
+                             labeling_response),
+              error::OK);
+    rapidjson::Document labeling_revision;
+    labeling_revision.Parse(labeling_response.c_str());
+    ASSERT_TRUE(!labeling_revision.HasParseError() && labeling_revision["revision"].GetUint64() == 1);
 
     auto* factory = static_cast<IDatabaseFactory*>(loader->First(IID_DATABASE_FACTORY));
     auto* registry = static_cast<IChannelRegistry*>(loader->First(IID_CHANNEL_REGISTRY));
     auto* stream_factory = static_cast<IStreamFactory*>(loader->First(IID_STREAM_FACTORY));
     auto* op_registry = static_cast<IOperatorRegistry*>(loader->First(IID_OPERATOR_REGISTRY));
     auto* capability_registry =
-        static_cast<ICppOperatorPluginRegistryV1*>(loader->First(IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1));
+        static_cast<ICppOperatorPluginRegistry*>(loader->First(IID_CPP_OPERATOR_PLUGIN_REGISTRY));
     auto* binaddon_host = static_cast<IBinAddonHost*>(loader->First(IID_BINADDON_HOST));
     auto* binaddon_plugin = dynamic_cast<IPlugin*>(binaddon_host);
-    auto* filter_domain_resolver = static_cast<IFilterDomainResolverV1*>(loader->First(IID_FILTER_DOMAIN_RESOLVER_V1));
+    auto* filter_domain_resolver = static_cast<IFilterDomainResolver*>(loader->First(IID_FILTER_DOMAIN_RESOLVER));
     ASSERT_TRUE(factory != nullptr);
     ASSERT_TRUE(registry != nullptr);
     ASSERT_TRUE(stream_factory != nullptr);
@@ -2059,6 +2071,23 @@ int main() {
     ASSERT_TRUE(stream_list != nullptr);
     ASSERT_TRUE(stream_add != nullptr);
     ASSERT_TRUE(stream_remove != nullptr);
+
+    {
+        const auto modify = FindRouteHandler(loader, "POST", "/channels/stream/modify");
+        ASSERT_TRUE(modify != nullptr);
+        for (const char* invalid :
+             {R"({"type":"ring","name":"in","option":"ring_size=256"})",
+              R"({"config":{"type":"ring","name":"in","options":{}}})", R"({"type":"ring","name":"in","options":"{}"})",
+              R"({"type":"ring","name":"in","role":42,"options":{}})"}) {
+            std::string response;
+            ASSERT_EQ(stream_add("/channels/stream/add", invalid, response), error::BAD_REQUEST);
+            ASSERT_EQ(modify("/channels/stream/modify", invalid, response), error::BAD_REQUEST);
+        }
+        const auto manager = static_cast<IStreamManager*>(loader->First(IID_STREAM_MANAGER));
+        ASSERT_TRUE(manager != nullptr);
+        ASSERT_TRUE(manager->AddChannel("ring", "invalid_old_option", "ring_size=256") != 0);
+        ASSERT_TRUE(manager->ModifyChannel("ring", "in", "ring_size=256") != 0);
+    }
 
     {
         for (int failure = 0; failure <= 12; ++failure) {
@@ -2268,16 +2297,18 @@ int main() {
                   error::OK);
         ASSERT_EQ(activate("/operators/activate", R"JSON({"name":"custom.parameter_capture_stream"})JSON", rsp),
                   error::OK);
-        ASSERT_EQ(stream_add("/channels/stream/add",
-                             R"JSON({"type":"ring","name":"npm_parameter_in",)JSON"
-                             R"JSON("option":"ring_mode=spsc;ring_size=256;overflow=drop;finite=false"})JSON",
-                             rsp),
-                  error::OK);
-        ASSERT_EQ(stream_add("/channels/stream/add",
-                             R"JSON({"type":"ring","name":"npm_parameter_out",)JSON"
-                             R"JSON("option":"ring_mode=spsc;ring_size=256;overflow=drop;finite=false"})JSON",
-                             rsp),
-                  error::OK);
+        ASSERT_EQ(
+            stream_add("/channels/stream/add",
+                       R"JSON({"type":"ring","name":"npm_parameter_in",)JSON"
+                       R"JSON("options":{"ring_mode":"spsc","ring_size":256,"overflow":"drop","finite":false}})JSON",
+                       rsp),
+            error::OK);
+        ASSERT_EQ(
+            stream_add("/channels/stream/add",
+                       R"JSON({"type":"ring","name":"npm_parameter_out",)JSON"
+                       R"JSON("options":{"ring_mode":"spsc","ring_size":256,"overflow":"drop","finite":false}})JSON",
+                       rsp),
+            error::OK);
         const std::string stream_sql =
             "SELECT * FROM ring.npm_parameter_in "
             "USING custom.parameter_capture_stream WITH "
@@ -2494,7 +2525,7 @@ int main() {
             ASSERT_TRUE(provider.with_params[0].find(expected_mode) != std::string::npos);
             ASSERT_TRUE(provider.with_params[1].find(expected_mode) != std::string::npos);
             ASSERT_EQ(provider.pushed_plans,
-                      std::vector<std::string>({kEmptyCanonicalFilterPlanV1, kEmptyCanonicalFilterPlanV1}));
+                      std::vector<std::string>({kEmptyCanonicalFilterPlan, kEmptyCanonicalFilterPlan}));
             ASSERT_EQ(provider.released.size(), 2u);
             ASSERT_EQ(provider.released[0].open_calls, 1);
             ASSERT_EQ(provider.released[0].process_calls, 0);
@@ -2608,7 +2639,7 @@ int main() {
         activated.Parse(rsp.c_str());
         ASSERT_TRUE(!activated.HasParseError() && activated.IsObject());
         ASSERT_EQ(activated["abi_version"].GetInt(), 2);
-        ASSERT_EQ(activated["operator_count"].GetInt(), 2);
+        ASSERT_EQ(activated["operator_count"].GetInt(), 1);
         ASSERT_TRUE(activated["operators"].IsArray());
         ASSERT_EQ(activated["operators"].Size(), rapidjson::SizeType(1));
         ASSERT_EQ(std::string(activated["operators"][0].GetString()), "npm.basic");
@@ -2619,20 +2650,18 @@ int main() {
         ASSERT_TRUE(!activated_detail.HasParseError() && activated_detail.IsObject());
         const auto& plugin_detail = activated_detail["plugin"];
         ASSERT_EQ(std::string(plugin_detail["status"].GetString()), "activated");
-        ASSERT_EQ(plugin_detail["operator_count"].GetInt(), 2);
+        ASSERT_EQ(plugin_detail["operator_count"].GetInt(), 1);
         ASSERT_TRUE(plugin_detail["operators"].IsArray());
         ASSERT_EQ(std::string(plugin_detail["operators"][0].GetString()), "npm.basic");
         ASSERT_TRUE(plugin_detail["operator_details"].IsArray());
-        ASSERT_EQ(plugin_detail["operator_details"].Size(), rapidjson::SizeType(2));
+        ASSERT_EQ(plugin_detail["operator_details"].Size(), rapidjson::SizeType(1));
         const auto& npm_detail = plugin_detail["operator_details"][0];
         ASSERT_EQ(std::string(npm_detail["name"].GetString()), "npm.basic");
-        ASSERT_EQ(std::string(npm_detail["contract"].GetString()), "block_transform_v1");
-        ASSERT_EQ(std::string(plugin_detail["operator_details"][1]["contract"].GetString()), "block_transform_v2");
+        ASSERT_EQ(std::string(npm_detail["contract"].GetString()), "block_transform");
 
         const std::string realtime_without_capture =
             "SELECT * FROM " + input_namespace +
-            " USING npm.basic WITH run_mode='realtime',source_domains='0:77',observing='basic_ipv4' INTO "
-            "dataframe.npm_realtime_no_capture";
+            R"JSON( USING npm.basic WITH parameters='{"schema_version":1,"core":{"run_mode":"realtime"}}',source_domains='0:77',observing='basic_ipv4' INTO dataframe.npm_realtime_no_capture)JSON";
         ASSERT_TRUE(exec("/scheduler/batch/execute", MakeReq(realtime_without_capture), rsp) != error::OK);
         ASSERT_TRUE(rsp.find("run_mode conflicts with bound source capabilities") != std::string::npos);
 
@@ -2648,8 +2677,8 @@ int main() {
         };
         const auto query_history = [&](const std::string& run_id, const std::string& destination) {
             ASSERT_EQ(exec("/scheduler/batch/execute",
-                           MakeReq("SELECT * FROM sqlite.local.npm_basic_ipv4_history_v1 WHERE __npm_run_id='" +
-                                   run_id + "' ORDER BY revision INTO dataframe." + destination),
+                           MakeReq("SELECT * FROM sqlite.local.npm_basic_ipv4_history WHERE __npm_run_id='" + run_id +
+                                   "' ORDER BY revision INTO dataframe." + destination),
                            rsp),
                       error::OK);
             return read_frame(destination);
@@ -2664,18 +2693,22 @@ int main() {
             return std::string(result["result"]["run_id"].GetString());
         };
         const std::string live_base =
-            "SELECT * FROM capturetest.live USING npm.basic WITH "
-            "input_namespace='periodic-equivalence',source_domains='7:77',"
-            "output_interval_ns=10000000,out_of_order_tolerance_ns=0";
-        for (const auto& sql : {live_base, live_base + " INTO dataframe.npm_live_rejected",
-                                live_base + " THEN test.parameter_capture INTO dataframe.npm_chain_rejected"}) {
+            R"JSON(SELECT * FROM capturetest.live USING npm.basic WITH input_namespace='periodic-equivalence',source_domains='7:77',parameters='{"schema_version":1,"core":{"output_interval_ns":10000000,"out_of_order_tolerance_ns":0}}')JSON";
+        // Supply a valid observation selection so these cases reach the continuous-output boundary.
+        const std::string unmanaged = live_base + ",observing='basic_ipv4'";
+        for (const auto& sql : {unmanaged, unmanaged + " INTO dataframe.npm_live_rejected",
+                                unmanaged + " THEN test.parameter_capture INTO dataframe.npm_chain_rejected"}) {
             ASSERT_TRUE(exec("/scheduler/batch/execute", MakeReq(sql), rsp) != error::OK);
+            if (rsp.find("continuous npm.basic requires INTO") == std::string::npos)
+                std::fprintf(stderr, "continuous output rejection: %s\n", rsp.c_str());
             ASSERT_TRUE(rsp.find("continuous npm.basic requires INTO") != std::string::npos);
         }
         ASSERT_TRUE(
-            exec("/scheduler/batch/execute",
-                 MakeReq("SELECT * FROM capturetest.live USING npm.basic WITH run_mode='offline' INTO sqlite.local"),
-                 rsp) != error::OK);
+            exec(
+                "/scheduler/batch/execute",
+                MakeReq(
+                    R"JSON(SELECT * FROM capturetest.live USING npm.basic WITH parameters='{"schema_version":1,"core":{"run_mode":"offline"}}' INTO sqlite.local)JSON"),
+                rsp) != error::OK);
         ASSERT_TRUE(rsp.find("run_mode conflicts with bound source capabilities") != std::string::npos);
 
         constexpr int64_t periodic_interval = 10'000'000;
@@ -2740,9 +2773,7 @@ int main() {
                 ASSERT_EQ(stream_add("/channels/stream/add", encoded.GetString(), rsp), error::OK);
                 const std::string sql =
                     "SELECT * FROM pcapfile." + name +
-                    " USING npm.basic WITH "
-                    "input_namespace='periodic-equivalence',source_domains='0:77',observing='basic_ipv4',"
-                    "output_interval_ns=10000000,out_of_order_tolerance_ns=0 INTO dataframe." +
+                    R"JSON( USING npm.basic WITH input_namespace='periodic-equivalence',source_domains='0:77',observing='basic_ipv4',parameters='{"schema_version":1,"core":{"output_interval_ns":10000000,"out_of_order_tolerance_ns":0}}' INTO dataframe.)JSON" +
                     name;
                 ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), rsp), error::OK);
                 auto batch = read_frame(name);
@@ -2770,12 +2801,14 @@ int main() {
                                                true, {{0, 20'000'000, periodic_packet}, {0, 1, periodic_packet}}));
         ASSERT_EQ(stream_add("/channels/stream/add", MakePcapSourceAddRequest(late_channel, late_path), rsp),
                   error::OK);
-        ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq("SELECT * FROM pcapfile." + late_channel +
-                               " USING npm.basic WITH source_domains='0:77',output_interval_ns=10000000,"
-                               "out_of_order_tolerance_ns=0 INTO sqlite.local"),
-                       rsp),
-                  error::INTERNAL_ERROR);
+        ASSERT_EQ(
+            exec(
+                "/scheduler/batch/execute",
+                MakeReq(
+                    "SELECT * FROM pcapfile." + late_channel +
+                    R"JSON( USING npm.basic WITH source_domains='0:77',parameters='{"schema_version":1,"core":{"output_interval_ns":10000000,"out_of_order_tolerance_ns":0}}' INTO sqlite.local)JSON"),
+                rsp),
+            error::INTERNAL_ERROR);
         ASSERT_TRUE(rsp.find("late npm.basic packet") != std::string::npos);
         ASSERT_TRUE(rsp.find("source=0") != std::string::npos);
         ASSERT_TRUE(rsp.find("timestamp_ns=1") != std::string::npos);
@@ -2819,7 +2852,7 @@ int main() {
             ASSERT_TRUE(!run_id.empty());
             ASSERT_EQ(std::string(running["status"].GetString()), "running");
             ASSERT_EQ(std::string(running["managed_result"]["entities"][0]["history_relation"].GetString()),
-                      "npm_basic_ipv4_history_v1");
+                      "npm_basic_ipv4_history");
             auto prefix = query_history(run_id, "npm_running_prefix");
             for (int attempt = 0; prefix->num_rows() != 3 && attempt < 100; ++attempt) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -2866,6 +2899,7 @@ int main() {
             capture_fixture.hold_last_release = true;
             const int readers_before = capture_fixture.release_calls;
             const int blocks_before = capture_fixture.release_blocks;
+            const int ready_before = capture_fixture.ready_readers;
             const std::string task_id = cancel ? "npm-fact-before-release-cancel" : "npm-fact-before-release-stop";
             rapidjson::Document request;
             request.SetObject();
@@ -2878,6 +2912,22 @@ int main() {
             request.Accept(writer);
             ASSERT_EQ(submit_batch("/scheduler/batch/submit", body.GetString(), rsp), error::OK);
             const std::string identity_body = "{\"runtime_task_id\":\"" + task_id + "\"}";
+            // Open publishes all managed semantics before polling. Synchronize startup separately from Stop/Cancel.
+            const auto startup_begin = std::chrono::steady_clock::now();
+            while (capture_fixture.ready_readers == ready_before) {
+                ASSERT_EQ(status_batch("/scheduler/batch/status", identity_body, rsp), error::OK);
+                rapidjson::Document startup;
+                startup.Parse(rsp.c_str());
+                ASSERT_TRUE(!startup.HasParseError());
+                const std::string startup_status = startup["status"].GetString();
+                ASSERT_TRUE(startup_status == "pending" || startup_status == "running");
+                ASSERT_TRUE(std::chrono::steady_clock::now() - startup_begin < std::chrono::seconds(30));
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            std::printf("[INFO] held-release startup ready after %lld ms\n",
+                        static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                   std::chrono::steady_clock::now() - startup_begin)
+                                                   .count()));
             std::string run_id;
             rapidjson::Document status;
             for (int attempt = 0; attempt < 300; ++attempt) {
@@ -2893,7 +2943,7 @@ int main() {
             }
             ASSERT_TRUE(!run_id.empty());
             ASSERT_EQ(capture_fixture.release_blocks.load(), blocks_before + 1);
-            const auto history_sql = "SELECT * FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='" + run_id + "'";
+            const auto history_sql = "SELECT * FROM npm_basic_ipv4_history WHERE __npm_run_id='" + run_id + "'";
             const auto prefix = query_history(run_id, "npm_fact_before_release_history");
             ASSERT_EQ(prefix->num_rows(), 3);
             for (int64_t row = 0; row < prefix->num_rows(); ++row) {
@@ -2940,8 +2990,8 @@ int main() {
             "SELECT * FROM capturetest.live USING npm.basic WITH "
             "source_domains='7:77',features='basic,session',observing='session_ipv4' INTO sqlite.local");
         ASSERT_EQ(exec("/scheduler/batch/execute",
-                       MakeReq("SELECT * FROM sqlite.local.npm_session_ipv4_final_v1 WHERE __npm_run_id='" +
-                               session_run + "' INTO dataframe.npm_live_session"),
+                       MakeReq("SELECT * FROM sqlite.local.npm_session_ipv4_final WHERE __npm_run_id='" + session_run +
+                               "' INTO dataframe.npm_live_session"),
                        rsp),
                   error::OK);
         ASSERT_EQ(read_frame("npm_live_session")->num_rows(), 1);
@@ -2986,10 +3036,9 @@ int main() {
             ASSERT_TRUE(entity.HasMember("final_relation") && entity["final_relation"].IsString());
             ASSERT_TRUE(entity.HasMember("rows_written") && entity["rows_written"].IsInt64());
             const std::string entity_id = entity["entity_id"].GetString();
-            const std::string version = std::to_string(entity["schema_version"].GetUint());
-            ASSERT_EQ(std::string(entity["history_relation"].GetString()), "npm_" + entity_id + "_history_v" + version);
-            ASSERT_EQ(std::string(entity["latest_relation"].GetString()), "npm_" + entity_id + "_latest_v" + version);
-            ASSERT_EQ(std::string(entity["final_relation"].GetString()), "npm_" + entity_id + "_final_v" + version);
+            ASSERT_EQ(std::string(entity["history_relation"].GetString()), "npm_" + entity_id + "_history");
+            ASSERT_EQ(std::string(entity["latest_relation"].GetString()), "npm_" + entity_id + "_latest");
+            ASSERT_EQ(std::string(entity["final_relation"].GetString()), "npm_" + entity_id + "_final");
             if (entity_id == "basic_ipv4") basic_latest_relation = entity["latest_relation"].GetString();
         }
         ASSERT_TRUE(!managed_run_id.empty() && !basic_latest_relation.empty());
@@ -3019,23 +3068,22 @@ int main() {
         ASSERT_EQ(queried_domains->Value(0), 0U);
         ASSERT_EQ(registry->Unregister(managed_query_dataframe.c_str()), 0);
 
-        ASSERT_EQ(db->ExecuteSql("CREATE TRIGGER npm_live_consumer_fail BEFORE INSERT ON npm_basic_ipv4_v1_data "
+        ASSERT_EQ(db->ExecuteSql("CREATE TRIGGER npm_live_consumer_fail BEFORE INSERT ON npm_basic_ipv4_data "
                                  "BEGIN SELECT RAISE(FAIL, 'fixture consumer failure'); END"),
                   0);
         const int consumer_releases_before = capture_fixture.release_calls;
         const std::string consumer_fail_sql =
-            "SELECT * FROM capturetest.live USING npm.basic WITH input_namespace='capturetest.live',"
-            "source_domains='7:77',run_mode='realtime' INTO sqlite.local";
+            R"JSON(SELECT * FROM capturetest.live USING npm.basic WITH input_namespace='capturetest.live',source_domains='7:77',parameters='{"schema_version":1,"core":{"run_mode":"realtime"}}' INTO sqlite.local)JSON";
         const int consumer_fail_rc = exec("/scheduler/batch/execute", MakeReq(consumer_fail_sql), rsp);
         ASSERT_TRUE(consumer_fail_rc != error::OK);
         ASSERT_EQ(capture_fixture.release_calls, consumer_releases_before + 1);
         ASSERT_EQ(db->ExecuteSql("DROP TRIGGER npm_live_consumer_fail"), 0);
 
-        const auto dns_entity = npm::NpmDnsTransactionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
+        const auto dns_entity = npm::NpmDnsTransactionEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
         auto dns_factory = npm::MakeNpmDatabaseResultConsumerFactory(db, input_namespace);
         auto dns_budget = std::make_shared<SchedulerDnsBudget>();
         const std::string dns_run_id = "scheduler-dns-" + suffix;
-        std::unique_ptr<npm::INpmManagedResultConsumerV1> dns_consumer;
+        std::unique_ptr<npm::INpmManagedResultConsumer> dns_consumer;
         ASSERT_EQ(dns_factory->Create({"scheduler-dns-task", dns_run_id}, {dns_entity}, dns_budget, &dns_consumer), 0);
         ASSERT_TRUE(dns_consumer != nullptr);
         ASSERT_EQ(
@@ -3046,7 +3094,7 @@ int main() {
         for (const char* relation : {"history", "latest", "final"}) {
             const std::string dataframe_name = std::string("scheduler_dns_") + relation;
             const std::string sql = "SELECT * FROM sqlite.local.npm_dns_transaction_ipv4_" + std::string(relation) +
-                                    "_v1 WHERE __npm_run_id='" + dns_run_id + "' INTO dataframe." + dataframe_name;
+                                    " WHERE __npm_run_id='" + dns_run_id + "' INTO dataframe." + dataframe_name;
             ASSERT_EQ(exec("/scheduler/batch/execute", MakeReq(sql), rsp), error::OK);
             auto result_channel = std::dynamic_pointer_cast<IDataFrameChannel>(registry->Get(dataframe_name.c_str()));
             ASSERT_TRUE(result_channel != nullptr);
@@ -3059,9 +3107,9 @@ int main() {
             ASSERT_TRUE(batch->GetColumnByName("outcome") != nullptr);
             ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
         }
-        ASSERT_EQ(QueryCount(db, "SELECT * FROM npm_dns_transaction_ipv4_final_v1 WHERE __npm_run_id='" +
-                                     managed_run_id + "'"),
-                  0);
+        ASSERT_EQ(
+            QueryCount(db, "SELECT * FROM npm_dns_transaction_ipv4_final WHERE __npm_run_id='" + managed_run_id + "'"),
+            0);
 
         const std::string http1_channel = "scheduler_npm_http1";
         ASSERT_EQ(stream_add("/channels/stream/add", MakePcapSourceAddRequest(http1_channel, pcap_npm_http1), rsp),
@@ -3083,7 +3131,7 @@ int main() {
         DataFrame http1_result;
         ASSERT_EQ(http1_output->Read(&http1_result), 0);
         const auto http1_batch = http1_result.ToArrow();
-        const auto http1_entity = npm::NpmHttp1TransactionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
+        const auto http1_entity = npm::NpmHttp1TransactionEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
         ASSERT_TRUE(http1_batch != nullptr && http1_batch->num_rows() == 1);
         ASSERT_TRUE(http1_batch->schema()->Equals(*http1_entity.schema, true));
         const auto http1_outcome =
@@ -3124,7 +3172,7 @@ int main() {
         }
         ASSERT_TRUE(http1_run_ids[0] != http1_run_ids[1]);
         for (const char* relation : {"history", "latest", "final"}) {
-            const std::string name = "npm_http1_transaction_ipv4_" + std::string(relation) + "_v1";
+            const std::string name = "npm_http1_transaction_ipv4_" + std::string(relation);
             for (size_t run = 0; run < http1_run_ids.size(); ++run) {
                 const std::string destination = "scheduler_http1_" + std::string(relation) + std::to_string(run);
                 ASSERT_EQ(exec("/scheduler/batch/execute",
@@ -3176,7 +3224,7 @@ int main() {
         DataFrame tls_result;
         ASSERT_EQ(tls_output->Read(&tls_result), 0);
         const auto tls_batch = tls_result.ToArrow();
-        const auto tls_entity = npm::NpmTlsHandshakeEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
+        const auto tls_entity = npm::NpmTlsHandshakeEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
         ASSERT_TRUE(tls_batch != nullptr && tls_batch->num_rows() == 1);
         ASSERT_TRUE(tls_batch->schema()->Equals(*tls_entity.schema, true));
         const auto tls_outcome = std::dynamic_pointer_cast<arrow::StringArray>(tls_batch->GetColumnByName("outcome"));
@@ -3218,7 +3266,7 @@ int main() {
         }
         ASSERT_TRUE(tls_run_ids[0] != tls_run_ids[1]);
         for (const char* relation : {"history", "latest", "final"}) {
-            const std::string name = "npm_tls_handshake_ipv4_" + std::string(relation) + "_v1";
+            const std::string name = "npm_tls_handshake_ipv4_" + std::string(relation);
             for (size_t run = 0; run < tls_run_ids.size(); ++run) {
                 const std::string destination = "scheduler_tls_" + std::string(relation) + std::to_string(run);
                 ASSERT_EQ(exec("/scheduler/batch/execute",
@@ -3270,7 +3318,7 @@ int main() {
         DataFrame icmp_result;
         ASSERT_EQ(icmp_output->Read(&icmp_result), 0);
         const auto icmp_batch = icmp_result.ToArrow();
-        const auto icmp_entity = npm::NpmIcmpEventEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
+        const auto icmp_entity = npm::NpmIcmpEventEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
         ASSERT_TRUE(icmp_batch != nullptr && icmp_batch->num_rows() == 1);
         ASSERT_TRUE(icmp_batch->schema()->Equals(*icmp_entity.schema, true));
         const auto icmp_outcome = std::dynamic_pointer_cast<arrow::StringArray>(icmp_batch->GetColumnByName("outcome"));
@@ -3305,7 +3353,7 @@ int main() {
         }
         ASSERT_TRUE(icmp_run_ids[0] != icmp_run_ids[1]);
         for (const char* relation : {"history", "latest", "final"}) {
-            const std::string name = "npm_icmp_event_ipv4_" + std::string(relation) + "_v1";
+            const std::string name = "npm_icmp_event_ipv4_" + std::string(relation);
             for (size_t run = 0; run < icmp_run_ids.size(); ++run) {
                 const std::string destination = "scheduler_icmp_" + std::string(relation) + std::to_string(run);
                 ASSERT_EQ(exec("/scheduler/batch/execute",
@@ -3367,8 +3415,7 @@ int main() {
         filtered_managed.Parse(rsp.c_str());
         ASSERT_EQ(filtered_managed["result"]["entities"].Size(), 2U);
         const std::string filtered_run = filtered_managed["result"]["run_id"].GetString();
-        ASSERT_EQ(QueryCount(db, "SELECT * FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='" + filtered_run + "'"),
-                  1);
+        ASSERT_EQ(QueryCount(db, "SELECT * FROM npm_basic_ipv4_history WHERE __npm_run_id='" + filtered_run + "'"), 1);
         ASSERT_EQ(exec("/scheduler/batch/execute",
                        MakeReq("SELECT session_id FROM " + input_namespace +
                                " USING npm.basic WITH observing='basic_ipv4' WHERE session_id < 0 INTO sqlite.local"),
@@ -3376,8 +3423,7 @@ int main() {
                   error::OK);
         filtered_managed.Parse(rsp.c_str());
         const std::string projected_run = filtered_managed["result"]["run_id"].GetString();
-        ASSERT_EQ(QueryCount(db, "SELECT * FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='" + projected_run + "'"),
-                  1);
+        ASSERT_EQ(QueryCount(db, "SELECT * FROM npm_basic_ipv4_history WHERE __npm_run_id='" + projected_run + "'"), 1);
         ASSERT_EQ(exec("/scheduler/batch/execute",
                        MakeReq("SELECT * FROM " + input_namespace +
                                " USING npm.basic WHERE session_id > 0 INTO sqlite.local"),
@@ -3395,23 +3441,23 @@ int main() {
             error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("does not support managed sink") != std::string::npos);
 
-        CppOperatorCapabilityLeaseV1 live_lease;
-        ASSERT_EQ(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR_V1, &live_lease), 0);
-        auto* live_provider = static_cast<IBlockTransformOperatorV1*>(live_lease.capability);
+        CppOperatorCapabilityLease live_lease;
+        ASSERT_EQ(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR, &live_lease), 0);
+        auto* live_provider = static_cast<IBlockTransformOperator*>(live_lease.capability);
         ASSERT_TRUE(live_provider != nullptr);
         const std::string live_task_id = "npm-live-deactivation";
         const std::string live_with = "{\"input_namespace\":\"" + input_namespace + "\",\"source_domains\":\"0:77\"}";
         const std::string live_filter = R"({"version":1,"root":null})";
-        BlockTransformTaskConfigV1 live_config;
+        BlockTransformTaskConfig live_config;
         live_config.task_id = live_task_id.c_str();
         live_config.with_params_json = live_with.c_str();
         live_config.pushed_filter_plan_json = live_filter.c_str();
-        IBlockTransformTaskV1* live_task = nullptr;
+        IBlockTransformTask* live_task = nullptr;
         ASSERT_EQ(live_provider->CreateTask(live_config, &live_task), 0);
         ASSERT_TRUE(live_task != nullptr);
-        auto* managed_live_task = dynamic_cast<IBlockTransformManagedSinkTaskV1*>(live_task);
+        auto* managed_live_task = dynamic_cast<IBlockTransformManagedSinkTask*>(live_task);
         ASSERT_TRUE(managed_live_task != nullptr);
-        BlockTransformManagedSinkBindingV1 binding;
+        BlockTransformManagedSinkBinding binding;
         binding.sink_channel = db;
         binding.target = "sqlite.local";
         binding.category = "sqlite";
@@ -3661,12 +3707,19 @@ int main() {
         ASSERT_EQ(registry->Unregister(parameters_session_dataframe_name.c_str()), 0);
 
         const auto assert_npm_config_failure = [&](const std::string& destination, const std::string& invalid_sql,
-                                                   const std::vector<std::string>& fragments) {
+                                                   const std::string& field_path) {
             pcap_protocol.Reset();
             ASSERT_TRUE(exec("/scheduler/batch/execute", MakeReq(invalid_sql), rsp) != error::OK);
-            for (const auto& fragment : fragments) {
-                ASSERT_TRUE(rsp.find(fragment) != std::string::npos);
-            }
+            rapidjson::Document failure;
+            failure.Parse(rsp.c_str());
+            ASSERT_TRUE(!failure.HasParseError() && failure.HasMember("error"));
+            ASSERT_EQ(std::string(failure["error"]["code"].GetString()), "CONTRACT_INCOMPATIBLE");
+            const auto& checks = failure["error"]["details"]["checks"];
+            ASSERT_TRUE(checks.IsArray() && checks.Size() == 1);
+            const auto& reasons = checks[0]["reasons"];
+            ASSERT_TRUE(reasons.IsArray() && reasons.Size() == 1);
+            ASSERT_EQ(std::string(reasons[0]["code"].GetString()), "CONTRACT_INCOMPATIBLE");
+            ASSERT_EQ(std::string(reasons[0]["pointer"].GetString()), field_path);
             ASSERT_TRUE(registry->Get(destination.c_str()) == nullptr);
             ASSERT_EQ(pcap_protocol.layer_calls, 0);
         };
@@ -3674,34 +3727,34 @@ int main() {
         assert_npm_config_failure(invalid_core_destination,
                                   make_npm_parameters_sql(invalid_core_destination,
                                                           R"({"schema_version":1,"core":{"max_active_sessions":"1"}})"),
-                                  {"invalid parameters", "/core/max_active_sessions"});
+                                  "/parameters/core/max_active_sessions");
         const std::string invalid_session_destination = "scheduler_npm_invalid_session";
         assert_npm_config_failure(
             invalid_session_destination,
             make_npm_session_parameters_sql(invalid_session_destination,
                                             R"({"schema_version":1,"session":{"max_tcp_ranges_per_direction":7}})"),
-            {"invalid parameters", "/session/max_tcp_ranges_per_direction"});
-        const std::string conflict_destination = "scheduler_npm_parameter_conflict";
-        const std::string conflict_sql = "SELECT * FROM " + input_namespace +
-                                         " USING npm.basic WITH input_namespace='" + input_namespace +
-                                         "',source_domains='0:77',run_mode='offline',parameters='" +
-                                         R"({"schema_version":1})" + "' INTO dataframe." + conflict_destination;
-        assert_npm_config_failure(conflict_destination, conflict_sql, {"configuration source conflict", "/run_mode"});
+            "/parameters/session/max_tcp_ranges_per_direction");
+        const std::string conflict_destination = "scheduler_npm_flat_field_rejected";
+        const std::string conflict_sql =
+            "SELECT * FROM " + input_namespace + " USING npm.basic WITH input_namespace='" + input_namespace +
+            "',source_domains='0:77',observing='basic_ipv4',run_mode='offline',parameters='" +
+            R"({"schema_version":1})" + "' INTO dataframe." + conflict_destination;
+        assert_npm_config_failure(conflict_destination, conflict_sql, "/parameters/run_mode");
         ASSERT_EQ(registry->Unregister(session_dataframe_name.c_str()), 0);
 
         ASSERT_EQ(registry->Unregister(dataframe_name.c_str()), 0);
         ASSERT_EQ(deactivate("/operators/deactivate", plugin_request, rsp), error::OK);
-        CppOperatorCapabilityLeaseV1 missing_lease;
-        ASSERT_TRUE(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR_V1, &missing_lease) != 0);
+        CppOperatorCapabilityLease missing_lease;
+        ASSERT_TRUE(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR, &missing_lease) != 0);
         ASSERT_TRUE(missing_lease.capability == nullptr && !missing_lease.lifetime);
         assert_npm_unavailable("npm_after_deactivation");
 
         ASSERT_EQ(activate("/operators/activate", plugin_request, rsp), error::OK);
         ASSERT_EQ(binaddon_plugin->Stop(), 0);
-        ASSERT_TRUE(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR_V1, &missing_lease) != 0);
+        ASSERT_TRUE(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR, &missing_lease) != 0);
         ASSERT_EQ(binaddon_plugin->Start(), 0);
-        CppOperatorCapabilityLeaseV1 recovered_lease;
-        ASSERT_EQ(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR_V1, &recovered_lease), 0);
+        CppOperatorCapabilityLease recovered_lease;
+        ASSERT_EQ(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR, &recovered_lease), 0);
         recovered_lease = {};
 
         const std::string recovered_dataframe = "scheduler_npm_basic_recovered";
@@ -3720,7 +3773,7 @@ int main() {
         ASSERT_EQ(deactivate("/operators/deactivate", plugin_request, rsp), error::OK);
         ASSERT_EQ(binaddon_plugin->Stop(), 0);
         ASSERT_EQ(binaddon_plugin->Start(), 0);
-        ASSERT_TRUE(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR_V1, &missing_lease) != 0);
+        ASSERT_TRUE(capability_registry->Acquire("npm", "basic", IID_BLOCK_TRANSFORM_OPERATOR, &missing_lease) != 0);
         assert_npm_unavailable("npm_deactivated_restart");
         ASSERT_EQ(delete_operator("/operators/delete", plugin_request, rsp), error::OK);
         ASSERT_EQ(detail("/operators/detail", plugin_request, rsp), error::NOT_FOUND);
@@ -4738,16 +4791,16 @@ int main() {
     // T44: Story 14.11 T5 回归（缺失注册/非法配置/重复创建）
     {
         std::string rsp;
-        ASSERT_EQ(
-            stream_add("/channels/stream/add", R"({"type":"no_such_stream_type","name":"x_missing","option":""})", rsp),
-            error::BAD_REQUEST);
+        ASSERT_EQ(stream_add("/channels/stream/add",
+                             R"({"type":"no_such_stream_type","name":"x_missing","options":{}})", rsp),
+                  error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("add stream channel failed") != std::string::npos ||
                     rsp.find("unsupported stream channel type") != std::string::npos);
 
         ASSERT_EQ(
             stream_add(
                 "/channels/stream/add",
-                R"({"type":"ring","name":"x_invalid","option":"ring_mode=spsc;ring_size=3;overflow=drop;finite=false"})",
+                R"({"type":"ring","name":"x_invalid","options":{"ring_mode":"spsc","ring_size":3,"overflow":"drop","finite":false}})",
                 rsp),
             error::BAD_REQUEST);
         ASSERT_TRUE(rsp.find("add stream channel failed") != std::string::npos ||
@@ -4756,13 +4809,13 @@ int main() {
         ASSERT_EQ(
             stream_add(
                 "/channels/stream/add",
-                R"({"type":"ring","name":"x_dup","option":"ring_mode=spsc;ring_size=256;overflow=drop;finite=false;batch_rows=64"})",
+                R"({"type":"ring","name":"x_dup","options":{"ring_mode":"spsc","ring_size":256,"overflow":"drop","finite":false,"batch_rows":64}})",
                 rsp),
             error::OK);
         ASSERT_EQ(
             stream_add(
                 "/channels/stream/add",
-                R"({"type":"ring","name":"x_dup","option":"ring_mode=spsc;ring_size=256;overflow=drop;finite=false;batch_rows=64"})",
+                R"({"type":"ring","name":"x_dup","options":{"ring_mode":"spsc","ring_size":256,"overflow":"drop","finite":false,"batch_rows":64}})",
                 rsp),
             error::CONFLICT);
     }

@@ -1,5 +1,5 @@
 {
-  "schema_id": "flowsql.data-binding.v2",
+  "schema_id": "flowsql.data-binding",
   "object_key": {
     "provider_id": "manual",
     "object_id": "app.requests"
@@ -31,7 +31,7 @@
     }
   ],
   "source_snapshot": {
-    "schema_id": "flowsql.channel-dataset.v1",
+    "schema_id": "flowsql.channel-dataset",
     "object_key": {
       "provider_id": "manual",
       "object_id": "app.requests"

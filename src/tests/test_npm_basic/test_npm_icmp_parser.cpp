@@ -20,7 +20,7 @@ namespace {
 struct Fixture {
     std::vector<uint8_t> bytes;
     flowsql::testing::OwnedPacketLayer layer;
-    npm::NpmInputEventV1 event;
+    npm::NpmInputEvent event;
 
     Fixture(bool ipv6, std::vector<uint8_t> body, bool complete = true) {
         const size_t header = ipv6 ? 40 : 20;
@@ -55,7 +55,7 @@ struct Fixture {
             dst.bytes[3] = 2;
             layer.SetEndpoints(src, dst);
         }
-        event.kind = npm::NpmInputKindV1::kControlPacket;
+        event.kind = npm::NpmInputKind::kControlPacket;
         event.observation_domain_id = 77;
         event.packet.bytes = {bytes.data(), bytes.size()};
         event.packet.meta.captured_len = static_cast<uint32_t>(bytes.size());
@@ -100,15 +100,15 @@ void TestEcho() {
     for (bool ipv6 : {false, true}) {
         Fixture request(ipv6, {static_cast<uint8_t>(ipv6 ? 128 : 8), 0, 0, 0, 0x12, 0x34, 0, 9});
         auto check = [&](auto parsed) {
-            assert(npm::ParseNpmIcmpControlV1(request.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
-            assert(parsed.kind == npm::NpmIcmpMessageKindV1::kEchoRequest);
+            assert(npm::ParseNpmIcmpControl(request.event, &parsed) == npm::NpmIcmpParseError::kNone);
+            assert(parsed.kind == npm::NpmIcmpMessageKind::kEchoRequest);
             assert(parsed.echo_id == 0x1234 && parsed.echo_sequence == 9 && sizeof(parsed.src_ip) == (ipv6 ? 16 : 4));
             request.bytes[ipv6 ? 40 : 20] = static_cast<uint8_t>(ipv6 ? 129 : 0);
-            assert(npm::ParseNpmIcmpControlV1(request.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
-            assert(parsed.kind == npm::NpmIcmpMessageKindV1::kEchoReply);
+            assert(npm::ParseNpmIcmpControl(request.event, &parsed) == npm::NpmIcmpParseError::kNone);
+            assert(parsed.kind == npm::NpmIcmpMessageKind::kEchoReply);
             request.bytes[(ipv6 ? 40 : 20) + 1] = 1;
-            assert(npm::ParseNpmIcmpControlV1(request.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
-            assert(parsed.kind == npm::NpmIcmpMessageKindV1::kIgnored);
+            assert(npm::ParseNpmIcmpControl(request.event, &parsed) == npm::NpmIcmpParseError::kNone);
+            assert(parsed.kind == npm::NpmIcmpMessageKind::kIgnored);
         };
         if (ipv6)
             check(npm::NpmIcmpParsed6{});
@@ -117,15 +117,15 @@ void TestEcho() {
     }
     Fixture truncated(false, {8, 0, 0, 0, 0, 1, 0, 2}, false);
     npm::NpmIcmpParsed4 parsed;
-    assert(npm::ParseNpmIcmpControlV1(truncated.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
-    assert(parsed.kind == npm::NpmIcmpMessageKindV1::kEchoRequest && parsed.outer_truncated);
+    assert(npm::ParseNpmIcmpControl(truncated.event, &parsed) == npm::NpmIcmpParseError::kNone);
+    assert(parsed.kind == npm::NpmIcmpMessageKind::kEchoRequest && parsed.outer_truncated);
     Fixture short_header(false, {8, 0, 0, 0, 0, 1, 0});
-    assert(npm::ParseNpmIcmpControlV1(short_header.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
-    assert(parsed.kind == npm::NpmIcmpMessageKindV1::kIgnored);
+    assert(npm::ParseNpmIcmpControl(short_header.event, &parsed) == npm::NpmIcmpParseError::kNone);
+    assert(parsed.kind == npm::NpmIcmpMessageKind::kIgnored);
     Fixture fragment(false, {8, 0, 0, 0, 0, 1, 0, 2});
     fragment.bytes[6] = 0x20;
-    assert(npm::ParseNpmIcmpControlV1(fragment.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
-    assert(parsed.kind == npm::NpmIcmpMessageKindV1::kIgnored);
+    assert(npm::ParseNpmIcmpControl(fragment.event, &parsed) == npm::NpmIcmpParseError::kNone);
+    assert(parsed.kind == npm::NpmIcmpMessageKind::kIgnored);
     Fixture ipv6_fragment(true, {128, 0, 0, 0, 0, 1, 0, 2});
     ipv6_fragment.bytes.insert(ipv6_fragment.bytes.begin() + 40, 8, 0);
     ipv6_fragment.bytes[6] = 44;
@@ -137,8 +137,8 @@ void TestEcho() {
     ipv6_fragment.event.packet.meta.captured_len = static_cast<uint32_t>(ipv6_fragment.bytes.size());
     ipv6_fragment.event.body = {ipv6_fragment.bytes.data() + 48, 8};
     npm::NpmIcmpParsed6 parsed6;
-    assert(npm::ParseNpmIcmpControlV1(ipv6_fragment.event, &parsed6) == npm::NpmIcmpParseErrorV1::kNone);
-    assert(parsed6.kind == npm::NpmIcmpMessageKindV1::kIgnored);
+    assert(npm::ParseNpmIcmpControl(ipv6_fragment.event, &parsed6) == npm::NpmIcmpParseError::kNone);
+    assert(parsed6.kind == npm::NpmIcmpMessageKind::kIgnored);
 }
 
 void TestErrorsAndQuotes() {
@@ -147,8 +147,8 @@ void TestErrorsAndQuotes() {
     body.insert(body.end(), quote.begin(), quote.end());
     Fixture error(false, body);
     npm::NpmIcmpParsed4 parsed;
-    assert(npm::ParseNpmIcmpControlV1(error.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
-    assert(parsed.kind == npm::NpmIcmpMessageKindV1::kError && parsed.next_hop_mtu == 1500);
+    assert(npm::ParseNpmIcmpControl(error.event, &parsed) == npm::NpmIcmpParseError::kNone);
+    assert(parsed.kind == npm::NpmIcmpMessageKind::kError && parsed.next_hop_mtu == 1500);
     assert(parsed.quote_status == "tuple" && parsed.quoted_flow);
     assert(parsed.quoted_flow->observation_domain_id == 77 && parsed.quoted_flow->protocol == 6);
     assert(parsed.quoted_flow->src_port == 0x1234 && parsed.quoted_flow->dst_port == 80);
@@ -156,7 +156,7 @@ void TestErrorsAndQuotes() {
     error.event.packet.bytes = {error.bytes.data(), error.bytes.size()};
     error.event.packet.meta.captured_len = static_cast<uint32_t>(error.bytes.size());
     error.event.body = {error.bytes.data() + 20, error.bytes.size() - 20};
-    assert(npm::ParseNpmIcmpControlV1(error.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
+    assert(npm::ParseNpmIcmpControl(error.event, &parsed) == npm::NpmIcmpParseError::kNone);
     assert(parsed.quote_status == "unavailable" && !parsed.quoted_flow);
 
     quote = Quote4();
@@ -164,13 +164,13 @@ void TestErrorsAndQuotes() {
     body.assign({11, 0, 0, 0, 0, 0, 0, 0});
     body.insert(body.end(), quote.begin(), quote.end());
     Fixture ip_only(false, body);
-    assert(npm::ParseNpmIcmpControlV1(ip_only.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
+    assert(npm::ParseNpmIcmpControl(ip_only.event, &parsed) == npm::NpmIcmpParseError::kNone);
     assert(parsed.quote_status == "ip_only" && parsed.quoted_protocol == 6 && !parsed.quoted_flow);
     ip_only.bytes[28] = 0x46;
-    assert(npm::ParseNpmIcmpControlV1(ip_only.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
+    assert(npm::ParseNpmIcmpControl(ip_only.event, &parsed) == npm::NpmIcmpParseError::kNone);
     assert(parsed.quote_status == "unavailable");
     ip_only.bytes[28] = 0x65;
-    assert(npm::ParseNpmIcmpControlV1(ip_only.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
+    assert(npm::ParseNpmIcmpControl(ip_only.event, &parsed) == npm::NpmIcmpParseError::kNone);
     assert(parsed.quote_status == "invalid");
 
     auto quote6 = Quote6();
@@ -178,12 +178,12 @@ void TestErrorsAndQuotes() {
     body.insert(body.end(), quote6.begin(), quote6.end());
     Fixture ipv6(true, body);
     npm::NpmIcmpParsed6 parsed6;
-    assert(npm::ParseNpmIcmpControlV1(ipv6.event, &parsed6) == npm::NpmIcmpParseErrorV1::kNone);
-    assert(parsed6.kind == npm::NpmIcmpMessageKindV1::kError && parsed6.next_hop_mtu == 1500);
+    assert(npm::ParseNpmIcmpControl(ipv6.event, &parsed6) == npm::NpmIcmpParseError::kNone);
+    assert(parsed6.kind == npm::NpmIcmpMessageKind::kError && parsed6.next_hop_mtu == 1500);
     assert(parsed6.quote_status == "tuple" && parsed6.quoted_flow->protocol == 17);
     assert(parsed6.quoted_flow->src_port == 0x1234 && parsed6.quoted_flow->dst_port == 53);
     ipv6.bytes[48 + 6] = 0;
-    assert(npm::ParseNpmIcmpControlV1(ipv6.event, &parsed6) == npm::NpmIcmpParseErrorV1::kNone);
+    assert(npm::ParseNpmIcmpControl(ipv6.event, &parsed6) == npm::NpmIcmpParseError::kNone);
     assert(parsed6.quote_status == "ip_only" && !parsed6.quoted_flow);
 }
 
@@ -194,8 +194,8 @@ void TestErrorTypesAndQuoteBounds() {
         const auto quote = Quote4();
         body.insert(body.end(), quote.begin(), quote.end());
         Fixture input(false, body);
-        assert(npm::ParseNpmIcmpControlV1(input.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
-        assert(parsed.kind == npm::NpmIcmpMessageKindV1::kError && parsed.icmp_type == type && parsed.icmp_code == 7);
+        assert(npm::ParseNpmIcmpControl(input.event, &parsed) == npm::NpmIcmpParseError::kNone);
+        assert(parsed.kind == npm::NpmIcmpMessageKind::kError && parsed.icmp_type == type && parsed.icmp_code == 7);
         assert(parsed.quote_status == "tuple" && parsed.quoted_flow && !parsed.next_hop_mtu);
     }
     npm::NpmIcmpParsed6 parsed6;
@@ -204,9 +204,8 @@ void TestErrorTypesAndQuoteBounds() {
         const auto quote = Quote6();
         body.insert(body.end(), quote.begin(), quote.end());
         Fixture input(true, body);
-        assert(npm::ParseNpmIcmpControlV1(input.event, &parsed6) == npm::NpmIcmpParseErrorV1::kNone);
-        assert(parsed6.kind == npm::NpmIcmpMessageKindV1::kError && parsed6.icmp_type == type &&
-               parsed6.icmp_code == 9);
+        assert(npm::ParseNpmIcmpControl(input.event, &parsed6) == npm::NpmIcmpParseError::kNone);
+        assert(parsed6.kind == npm::NpmIcmpMessageKind::kError && parsed6.icmp_type == type && parsed6.icmp_code == 9);
         assert(parsed6.quote_status == "tuple" && parsed6.quoted_flow && !parsed6.next_hop_mtu);
     }
     auto quote = Quote4();
@@ -214,18 +213,18 @@ void TestErrorTypesAndQuoteBounds() {
     body.insert(body.end(), quote.begin(), quote.end());
     Fixture bounded(false, body);
     bounded.bytes[28 + 3] = 19;
-    assert(npm::ParseNpmIcmpControlV1(bounded.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
+    assert(npm::ParseNpmIcmpControl(bounded.event, &parsed) == npm::NpmIcmpParseError::kNone);
     assert(parsed.quote_status == "invalid" && !parsed.quoted_flow);
     bounded.bytes[28 + 3] = 20;
-    assert(npm::ParseNpmIcmpControlV1(bounded.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
+    assert(npm::ParseNpmIcmpControl(bounded.event, &parsed) == npm::NpmIcmpParseError::kNone);
     assert(parsed.quote_status == "ip_only" && !parsed.quoted_flow);
     bounded.bytes[28 + 3] = 40;
     bounded.bytes[28 + 6] = 1;
-    assert(npm::ParseNpmIcmpControlV1(bounded.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
+    assert(npm::ParseNpmIcmpControl(bounded.event, &parsed) == npm::NpmIcmpParseError::kNone);
     assert(parsed.quote_status == "ip_only" && !parsed.quoted_flow);
     bounded.bytes[28 + 6] = 0;
     bounded.bytes[28 + 9] = 1;
-    assert(npm::ParseNpmIcmpControlV1(bounded.event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
+    assert(npm::ParseNpmIcmpControl(bounded.event, &parsed) == npm::NpmIcmpParseError::kNone);
     assert(parsed.quote_status == "ip_only" && !parsed.quoted_flow);
 }
 
@@ -244,7 +243,7 @@ void TestShiftedWireQuotes() {
             event.packet.bytes = {storage.data() + shift, fixture.bytes.size()};
             event.body = {storage.data() + shift + network_header, body.size()};
             auto check = [&](auto parsed) {
-                assert(npm::ParseNpmIcmpControlV1(event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
+                assert(npm::ParseNpmIcmpControl(event, &parsed) == npm::NpmIcmpParseError::kNone);
                 assert(parsed.quote_status == "tuple" && parsed.quoted_flow && parsed.next_hop_mtu == 1500);
                 assert(parsed.quoted_flow->src_port == 0x1234);
                 assert(parsed.quoted_flow->dst_port == (ipv6 ? 53 : 80));
@@ -260,7 +259,7 @@ void TestShiftedWireQuotes() {
                     event.body_complete = false;
                     event.packet.bytes.size = network_header + length;
                     event.packet.meta.captured_len = network_header + length;
-                    assert(npm::ParseNpmIcmpControlV1(event, &parsed) == npm::NpmIcmpParseErrorV1::kNone);
+                    assert(npm::ParseNpmIcmpControl(event, &parsed) == npm::NpmIcmpParseError::kNone);
                     assert(!parsed.quoted_flow);
                     assert(parsed.quote_status == (length < 8 + network_header ? "unavailable" : "ip_only"));
                 }

@@ -13,34 +13,34 @@
 namespace flowsql::npm {
 
 /** Task-private TLS module; shared stream views live only within callbacks. */
-class NpmTlsProtocolModuleV1 final : public INpmProtocolModuleV1, public INpmTcpStreamConsumerV1 {
+class NpmTlsProtocolModule final : public INpmProtocolModule, public INpmTcpStreamConsumer {
  public:
-    NpmTlsProtocolModuleV1(NpmTlsConfigV1 config, std::shared_ptr<INpmTaskBudget> budget);
-    ~NpmTlsProtocolModuleV1() override;
+    NpmTlsProtocolModule(NpmTlsConfig config, std::shared_ptr<INpmTaskBudget> budget);
+    ~NpmTlsProtocolModule() override;
 
-    int OnInput(const NpmInputEventV1& input, INpmResultEmitterV1& emitter) override;
-    int OnSessionSnapshot(const NpmSessionView& session, int64_t observed_at_ns, INpmResultEmitterV1& emitter) override;
+    int OnInput(const NpmInputEvent& input, INpmResultEmitter& emitter) override;
+    int OnSessionSnapshot(const NpmSessionView& session, int64_t observed_at_ns, INpmResultEmitter& emitter) override;
     int OnSessionEnd(const NpmSessionView& session, NpmSessionEndReason reason, int64_t observed_at_ns,
-                     INpmResultEmitterV1& emitter) override;
+                     INpmResultEmitter& emitter) override;
     std::optional<int64_t> NextEventDeadlineNs() const override;
-    int OnTime(const NpmModuleTimeV1& time, INpmResultEmitterV1& emitter) override;
-    int Finish(int64_t observed_at_ns, INpmResultEmitterV1& emitter) override;
+    int OnTime(const NpmModuleTime& time, INpmResultEmitter& emitter) override;
+    int Finish(int64_t observed_at_ns, INpmResultEmitter& emitter) override;
     void Abort() noexcept override;
-    int OnTcpStreamReadable(const NpmTcpStreamContextV1& context, INpmTcpStreamCursorV1& cursor,
-                            INpmResultEmitterV1& emitter) override;
+    int OnTcpStreamReadable(const NpmTcpStreamContext& context, INpmTcpStreamCursor& cursor,
+                            INpmResultEmitter& emitter) override;
 
  private:
     struct SessionState {
         NpmTransactionIdentity identity;
-        std::unique_ptr<NpmTlsHandshakeTrackerV1> tracker;
+        std::unique_ptr<NpmTlsHandshakeTracker> tracker;
         uint64_t reserved_bytes = 0;
     };
     int RememberSession(const NpmSessionView& session);
-    int EmitResult(SessionState& state, std::optional<NpmTlsHandshakeResultV1>* result, INpmResultEmitterV1& emitter);
+    int EmitResult(SessionState& state, std::optional<NpmTlsHandshakeResult>* result, INpmResultEmitter& emitter);
     void ForgetSession(uint64_t session_id) noexcept;
     void ReleaseTracker(SessionState& state) noexcept;
 
-    NpmTlsConfigV1 config_;
+    NpmTlsConfig config_;
     std::shared_ptr<INpmTaskBudget> budget_;
     std::map<uint64_t, SessionState> sessions_;
     bool finished_ = false;

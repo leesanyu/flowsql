@@ -16,7 +16,7 @@ struct NpmTestPacketBinding {
     NpmPacketDirection direction = NpmPacketDirection::kAToB;
     Span<const uint8_t> payload;
     NpmTransportPacketFacts transport;
-    FlowLabelFactsV1 label_facts;
+    FlowLabelFacts label_facts;
     operator NpmPacketBindingView() const {
         NpmPacketBindingView view;
         if (key) view.key = key.View();

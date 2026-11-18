@@ -27,8 +27,8 @@ class Runtime {
     bool loaded_ = false;
 
  public:
-    IPacketSinkFactoryV1* factory = nullptr;
-    IKafkaConnectionServiceV1* sessions = nullptr;
+    IPacketSinkFactory* factory = nullptr;
+    IKafkaConnectionService* sessions = nullptr;
     Runtime(const rapidjson::Value& profile, const std::string& workspace) {
         const auto root = std::filesystem::path(workspace);
         std::filesystem::create_directories(root);
@@ -52,18 +52,19 @@ class Runtime {
         auto kafka = Encode(opts);
         auto catalog =
             "data_dir=" + (root / "frames").string() + ";operator_db_path=" + (root / "operators.db").string();
-        const char* libs[] = {"libflowsql_kafka.so", "libflowsql_builtin.so", "libflowsql_catalog.so",
-                              "libflowsql_scheduler.so"};
-        const char* configs[] = {kafka.c_str(), nullptr, catalog.c_str(), "batch_workers=1"};
-        Check(loader_->Load(get_absolute_process_path(), libs, configs, 4) == 0, "runtime_load");
+        const char* libs[] = {"libflowsql_config_channel.so", "libflowsql_kafka.so", "libflowsql_builtin.so",
+                              "libflowsql_catalog.so", "libflowsql_scheduler.so"};
+        const std::string semantics_option = "db_path=" + (root / "semantics.db").string();
+        const char* configs[] = {semantics_option.c_str(), kafka.c_str(), nullptr, catalog.c_str(), "batch_workers=1"};
+        Check(loader_->Load(get_absolute_process_path(), libs, configs, 5) == 0, "runtime_load");
         loaded_ = true;
         Check(loader_->StartAll() == 0, "runtime_start");
         if (!std::filesystem::exists(root / "configured")) {
             Call("/channels/kafka/connections/add", profile["connection"]);
             std::ofstream(root / "configured").put('1');
         }
-        factory = static_cast<IPacketSinkFactoryV1*>(loader_->First(IID_PACKET_SINK_FACTORY_V1));
-        sessions = static_cast<IKafkaConnectionServiceV1*>(loader_->First(IID_KAFKA_CONNECTION_SERVICE_V1));
+        factory = static_cast<IPacketSinkFactory*>(loader_->First(IID_PACKET_SINK_FACTORY));
+        sessions = static_cast<IKafkaConnectionService*>(loader_->First(IID_KAFKA_CONNECTION_SERVICE));
         Check(factory && sessions, "factory_discovery");
     }
     ~Runtime() {
@@ -88,21 +89,21 @@ class Runtime {
     }
     void Add(const std::string& name, const std::string& topic, const char* connection = "real") {
         auto j = Parse(
-            R"({"name":"out","connection_name":"real","role":"sink","topic":"events","payload_kind":"packet","payload_options":{"sink":{"encoding":"flowsql_packet_v1","stream_id":"probe-a","delivery_timeout_ms":5000}}})");
+            R"({"name":"out","connection_name":"real","role":"sink","topic":"events","payload_kind":"packet","payload_options":{"sink":{"encoding":"flowsql_packet","stream_id":"probe-a","delivery_timeout_ms":5000}}})");
         auto& a = j.GetAllocator();
         String(j, "name", name, a);
         String(j, "topic", topic, a);
         String(j, "connection_name", connection, a);
         Call("/channels/kafka/channels/add", j);
     }
-    std::unique_ptr<IPacketSinkWriterV1> Writer(const char* name) {
-        std::unique_ptr<IPacketSinkWriterV1> w;
+    std::unique_ptr<IPacketSinkWriter> Writer(const char* name) {
+        std::unique_ptr<IPacketSinkWriter> w;
         Check(factory->CreateWriter({1, std::string("kafka.") + name, "real-acceptance"}, &w) == 0 && w,
               "create_writer");
         return w;
     }
 };
-void Balanced(const PacketSinkReportV1& r) {
+void Balanced(const PacketSinkReport& r) {
     for (const auto* c : {&r.messages, &r.packets})
         Check(c->input == c->confirmed + c->not_sent + c->unknown, "report_conservation");
 }
@@ -112,7 +113,7 @@ uint64_t Get(const std::string& b, size_t at, size_t n) {
     for (size_t i = 0; i < n; ++i) v = (v << 8) | uint8_t(b[at + i]);
     return v;
 }
-std::string Compare(const KafkaProduceMessageV1& message, const CapturePollEventV2& e, uint64_t poll) {
+std::string Compare(const KafkaProduceMessage& message, const CapturePollEvent& e, uint64_t poll) {
     const auto& b = message.value;
     const uint64_t rows = e.block.batch ? e.block.batch->num_rows() : 0;
     Check(message.key == "probe-a" && b.size() >= 56 && b.compare(0, 4, "FSPK") == 0 && Get(b, 4, 2) == 1 &&
@@ -144,7 +145,7 @@ std::string Compare(const KafkaProduceMessageV1& message, const CapturePollEvent
     Check(at == b.size(), "wire_trailing_bytes");
     return b.substr(8, 16);
 }
-CapturePollEventV2 Large(uint64_t sequence, size_t bytes = 4096) {
+CapturePollEvent Large(uint64_t sequence, size_t bytes = 4096) {
     auto event = packet_sink_test::Event(sequence, 1);
     packet::PacketFamilyBatch records;
     auto owner = std::make_shared<std::string>(bytes, '\0');
@@ -253,7 +254,7 @@ int main(int argc, char** argv) {
                       << " elapsed_ms=" << elapsed << '\n';
             return 0;
         }
-        std::vector<CapturePollEventV2> events;
+        std::vector<CapturePollEvent> events;
         std::vector<uint64_t> sequences;
         std::vector<size_t> starts;
         std::vector<std::string> epochs;
@@ -262,14 +263,14 @@ int main(int argc, char** argv) {
             auto w = runtime.Writer("out");
             Check(!w->Open(sources, schema), "authenticated_open");
             uint64_t seq = 0;
-            auto publish = [&](CapturePollEventV2 e) {
+            auto publish = [&](CapturePollEvent e) {
                 Check(!w->Write(e), "authenticated_publish");
                 events.push_back(std::move(e));
                 sequences.push_back(++seq);
             };
             publish(packet_sink_test::Event(1));
             publish(packet_sink_test::Event(2, 0));
-            CapturePollEventV2 empty;
+            CapturePollEvent empty;
             Check(!w->Write(empty) && w->Report().messages.input == 2, "empty_timeout_no_message");
             if (!run && (label == "GSSAPI" || label == "OAUTHBEARER")) {
                 const int seconds = label == "GSSAPI" ? 70 : 35;

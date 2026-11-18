@@ -16,12 +16,12 @@ constexpr uint64_t kMaxParseChunk = 256;
 
 }  // namespace
 
-NpmTlsProtocolModuleV1::NpmTlsProtocolModuleV1(NpmTlsConfigV1 config, std::shared_ptr<INpmTaskBudget> budget)
+NpmTlsProtocolModule::NpmTlsProtocolModule(NpmTlsConfig config, std::shared_ptr<INpmTaskBudget> budget)
     : config_(std::move(config)), budget_(std::move(budget)) {}
 
-NpmTlsProtocolModuleV1::~NpmTlsProtocolModuleV1() { Abort(); }
+NpmTlsProtocolModule::~NpmTlsProtocolModule() { Abort(); }
 
-int NpmTlsProtocolModuleV1::RememberSession(const NpmSessionView& session) {
+int NpmTlsProtocolModule::RememberSession(const NpmSessionView& session) {
     if (!budget_ || !session.key || !session.session_id) return EINVAL;
     if (sessions_.find(session.session_id) != sessions_.end()) return 0;
     const uint64_t identity_charge = sizeof(SessionState) + 6 * sizeof(void*) + session.key->OwnedKeyBytes();
@@ -36,7 +36,7 @@ int NpmTlsProtocolModuleV1::RememberSession(const NpmSessionView& session) {
         state.identity.session_id = session.session_id;
         state.identity.key = *session.key;
         state.identity.charge = identity_charge;
-        state.tracker = std::make_unique<NpmTlsHandshakeTrackerV1>(session.session_id, config_);
+        state.tracker = std::make_unique<NpmTlsHandshakeTracker>(session.session_id, config_);
         state.reserved_bytes = bytes;
         sessions_.emplace(session.session_id, std::move(state));
         return 0;
@@ -46,7 +46,7 @@ int NpmTlsProtocolModuleV1::RememberSession(const NpmSessionView& session) {
     }
 }
 
-void NpmTlsProtocolModuleV1::ReleaseTracker(SessionState& state) noexcept {
+void NpmTlsProtocolModule::ReleaseTracker(SessionState& state) noexcept {
     if (!state.tracker) return;
     state.tracker->Abort();
     state.tracker.reset();
@@ -54,7 +54,7 @@ void NpmTlsProtocolModuleV1::ReleaseTracker(SessionState& state) noexcept {
     state.reserved_bytes = state.identity.charge;
 }
 
-void NpmTlsProtocolModuleV1::ForgetSession(uint64_t session_id) noexcept {
+void NpmTlsProtocolModule::ForgetSession(uint64_t session_id) noexcept {
     const auto found = sessions_.find(session_id);
     if (found == sessions_.end()) return;
     if (found->second.tracker) ReleaseTracker(found->second);
@@ -62,8 +62,8 @@ void NpmTlsProtocolModuleV1::ForgetSession(uint64_t session_id) noexcept {
     sessions_.erase(found);
 }
 
-int NpmTlsProtocolModuleV1::EmitResult(SessionState& state, std::optional<NpmTlsHandshakeResultV1>* result,
-                                       INpmResultEmitterV1& emitter) {
+int NpmTlsProtocolModule::EmitResult(SessionState& state, std::optional<NpmTlsHandshakeResult>* result,
+                                     INpmResultEmitter& emitter) {
     if (!*result) return 0;
     result->value().handshake.entity_instance_id = state.identity.session_id;
     auto emit = [&](auto family_result, const auto& key) {
@@ -73,7 +73,7 @@ int NpmTlsProtocolModuleV1::EmitResult(SessionState& state, std::optional<NpmTls
         family_result.a_port = key.a_port;
         family_result.b_port = key.b_port;
         family_result.transaction = std::move(**result);
-        return EmitNpmTlsHandshakeV1(family_result, budget_, emitter);
+        return EmitNpmTlsHandshake(family_result, budget_, emitter);
     };
     const auto& key = state.identity.key;
     const int error = key.Get4() ? emit(NpmTlsResult4{}, *key.Get4()) : emit(NpmTlsResult6{}, *key.Get6());
@@ -82,30 +82,30 @@ int NpmTlsProtocolModuleV1::EmitResult(SessionState& state, std::optional<NpmTls
     return error;
 }
 
-int NpmTlsProtocolModuleV1::OnInput(const NpmInputEventV1& input, INpmResultEmitterV1&) {
-    return finished_ || aborted_ || input.kind != NpmInputKindV1::kTcpPacket || !input.session || !input.transport
+int NpmTlsProtocolModule::OnInput(const NpmInputEvent& input, INpmResultEmitter&) {
+    return finished_ || aborted_ || input.kind != NpmInputKind::kTcpPacket || !input.session || !input.transport
                ? EINVAL
                : 0;
 }
 
-int NpmTlsProtocolModuleV1::OnSessionSnapshot(const NpmSessionView&, int64_t, INpmResultEmitterV1&) { return 0; }
+int NpmTlsProtocolModule::OnSessionSnapshot(const NpmSessionView&, int64_t, INpmResultEmitter&) { return 0; }
 
-int NpmTlsProtocolModuleV1::OnSessionEnd(const NpmSessionView& session, NpmSessionEndReason reason,
-                                         int64_t observed_at_ns, INpmResultEmitterV1& emitter) {
+int NpmTlsProtocolModule::OnSessionEnd(const NpmSessionView& session, NpmSessionEndReason reason,
+                                       int64_t observed_at_ns, INpmResultEmitter& emitter) {
     if (finished_ || aborted_) return EINVAL;
     const auto found = sessions_.find(session.session_id);
     if (found == sessions_.end()) return 0;
     int error = 0;
     if (found->second.tracker) {
-        std::optional<NpmTlsHandshakeResultV1> result;
+        std::optional<NpmTlsHandshakeResult> result;
         const auto tracked = found->second.tracker->OnSessionEnd(reason, observed_at_ns, &result);
-        error = tracked == NpmTlsTrackerErrorV1::kNone ? EmitResult(found->second, &result, emitter) : EINVAL;
+        error = tracked == NpmTlsTrackerError::kNone ? EmitResult(found->second, &result, emitter) : EINVAL;
     }
     ForgetSession(session.session_id);
     return error;
 }
 
-std::optional<int64_t> NpmTlsProtocolModuleV1::NextEventDeadlineNs() const {
+std::optional<int64_t> NpmTlsProtocolModule::NextEventDeadlineNs() const {
     std::optional<int64_t> minimum;
     if (finished_ || aborted_) return minimum;
     for (const auto& item : sessions_) {
@@ -116,58 +116,58 @@ std::optional<int64_t> NpmTlsProtocolModuleV1::NextEventDeadlineNs() const {
     return minimum;
 }
 
-int NpmTlsProtocolModuleV1::OnTime(const NpmModuleTimeV1& time, INpmResultEmitterV1& emitter) {
+int NpmTlsProtocolModule::OnTime(const NpmModuleTime& time, INpmResultEmitter& emitter) {
     if (finished_ || aborted_) return EINVAL;
     if (!time.watermark_ns) return 0;
     for (auto& item : sessions_) {
         auto& state = item.second;
         if (!state.tracker) continue;
-        std::optional<NpmTlsHandshakeResultV1> result;
+        std::optional<NpmTlsHandshakeResult> result;
         const auto tracked = state.tracker->OnCaptureWatermark(*time.watermark_ns, &result);
-        if (tracked != NpmTlsTrackerErrorV1::kNone) return EINVAL;
+        if (tracked != NpmTlsTrackerError::kNone) return EINVAL;
         const int error = EmitResult(state, &result, emitter);
         if (error) return error;
     }
     return 0;
 }
 
-int NpmTlsProtocolModuleV1::Finish(int64_t, INpmResultEmitterV1&) {
+int NpmTlsProtocolModule::Finish(int64_t, INpmResultEmitter&) {
     if (finished_ || aborted_ || !sessions_.empty()) return EINVAL;
     finished_ = true;
     return 0;
 }
 
-void NpmTlsProtocolModuleV1::Abort() noexcept {
+void NpmTlsProtocolModule::Abort() noexcept {
     if (aborted_) return;
     aborted_ = true;
     while (!sessions_.empty()) ForgetSession(sessions_.begin()->first);
 }
 
-int NpmTlsProtocolModuleV1::OnTcpStreamReadable(const NpmTcpStreamContextV1& context, INpmTcpStreamCursorV1& cursor,
-                                                INpmResultEmitterV1& emitter) {
+int NpmTlsProtocolModule::OnTcpStreamReadable(const NpmTcpStreamContext& context, INpmTcpStreamCursor& cursor,
+                                              INpmResultEmitter& emitter) {
     if (finished_ || aborted_ || !context.session) return EINVAL;
     const uint64_t session_id = context.session->session_id;
-    NpmTcpStreamEventV1 event;
+    NpmTcpStreamEvent event;
     while (cursor.Peek(&event)) {
         auto found = sessions_.find(session_id);
-        if (found == sessions_.end() && context.origin == NpmTcpStreamOriginV1::kSyn &&
-            event.kind == NpmTcpStreamEventKindV1::kData) {
+        if (found == sessions_.end() && context.origin == NpmTcpStreamOrigin::kSyn &&
+            event.kind == NpmTcpStreamEventKind::kData) {
             const int remembered = RememberSession(*context.session);
             if (remembered) return remembered;
             found = sessions_.find(session_id);
         }
         const uint64_t consumed_bytes =
-            event.kind == NpmTcpStreamEventKindV1::kData ? std::min<uint64_t>(event.bytes.size, kMaxParseChunk) : 0;
+            event.kind == NpmTcpStreamEventKind::kData ? std::min<uint64_t>(event.bytes.size, kMaxParseChunk) : 0;
         if (found != sessions_.end() && found->second.tracker) {
-            NpmTcpStreamEventV1 slice = event;
+            NpmTcpStreamEvent slice = event;
             if (consumed_bytes && consumed_bytes != event.bytes.size) {
                 slice.bytes.size = consumed_bytes;
                 slice.end = slice.begin + consumed_bytes;
             }
-            std::optional<NpmTlsHandshakeResultV1> result;
+            std::optional<NpmTlsHandshakeResult> result;
             const auto tracked = found->second.tracker->Consume(context, slice, &result);
-            if (tracked == NpmTlsTrackerErrorV1::kAllocationFailed) return ENOMEM;
-            if (tracked != NpmTlsTrackerErrorV1::kNone) return EINVAL;
+            if (tracked == NpmTlsTrackerError::kAllocationFailed) return ENOMEM;
+            if (tracked != NpmTlsTrackerError::kNone) return EINVAL;
             const int consumed = cursor.Consume(consumed_bytes);
             if (consumed) return consumed;
             const int emitted = EmitResult(found->second, &result, emitter);

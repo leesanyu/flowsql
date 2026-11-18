@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <services/gateway/config.h>
+#include <unistd.h>
 #include <yaml-cpp/yaml.h>
 
 #include <algorithm>
@@ -151,6 +152,51 @@ bool ExpectWebUploadRoot(const flowsql::gateway::ServiceConfig& service, const s
 std::string ReadFile(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+bool TestPluginObjectContract() {
+    char name[] = "/tmp/flowsql-plugin-config-XXXXXX";
+    const int fd = mkstemp(name);
+    if (fd < 0) return false;
+    close(fd);
+    const auto parse = [&](const std::string& yaml, flowsql::gateway::GatewayConfig* config) {
+        {
+            std::ofstream out(name);
+            out << yaml;
+        }
+        return flowsql::gateway::LoadConfig(name, config);
+    };
+    flowsql::gateway::GatewayConfig config;
+    bool ok = Expect(parse(R"YAML(services:
+  - name: scheduler
+    plugins:
+      - name: libexample.so
+        option: 'mode=current'
+        databases:
+          - type: sqlite
+            name: demo
+            path: ':memory:'
+)YAML",
+                           &config) == 0,
+                     "plugin objects must parse");
+    if (ok) {
+        ok = Expect(config.services.size() == 1 && config.services[0].plugins.size() == 1 &&
+                        config.services[0].plugins[0] == "libexample.so:mode=current" &&
+                        config.services[0].databases.size() == 1 &&
+                        config.services[0].databases[0].params.at("path") == ":memory:",
+                    "plugin object options and database definitions must be preserved") &&
+             ok;
+    }
+    for (const std::string& plugins :
+         {"[libexample.so]", "[{name: libexample.so}, libold.so]", "[{option: missing-name}]", "[{name: ''}]", "[[]]",
+          "{name: libexample.so}", "[{name: libexample.so, databases: wrong}]"}) {
+        flowsql::gateway::GatewayConfig invalid;
+        ok = Expect(parse("services:\n  - name: invalid\n    plugins: " + plugins + "\n", &invalid) != 0,
+                    "invalid plugin configuration must fail") &&
+             ok;
+    }
+    unlink(name);
+    return ok;
 }
 
 bool TestSingleProcessConfig() {
@@ -338,7 +384,8 @@ bool TestPcapFilePersistenceDocumentation() {
 }  // namespace
 
 int main() {
-    bool ok = TestSingleProcessConfig();
+    bool ok = TestPluginObjectContract();
+    ok = TestSingleProcessConfig() && ok;
     ok = TestGuardianConfig() && ok;
     ok = TestRuntimeAssets() && ok;
     ok = TestNoDefaultDatabaseChannels() && ok;

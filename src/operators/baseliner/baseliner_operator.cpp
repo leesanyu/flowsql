@@ -42,9 +42,9 @@ ConfigStatus ResolveCreation(const char* with, IQuerier* querier, ConfigSnapshot
     if (doc.HasMember("parameters") == doc.HasMember("config"))
         return {ConfigError::kValue, {}, "exactly one config or parameters required"};
     auto* registry =
-        querier ? static_cast<IConfigChannelRegistryV1*>(querier->First(IID_CONFIG_CHANNEL_REGISTRY_V1)) : nullptr;
+        querier ? static_cast<IConfigChannelRegistry*>(querier->First(IID_CONFIG_CHANNEL_REGISTRY)) : nullptr;
     ConfigSnapshot parsed;
-    struct SnapshotRegistry final : IConfigChannelRegistryV1 {
+    struct SnapshotRegistry final : IConfigChannelRegistry {
         ConfigChannelSnapshot snapshot;
         int Resolve(const char*, ConfigChannelSnapshot* out, std::string*) override {
             *out = snapshot;
@@ -75,21 +75,22 @@ ConfigStatus ResolveCreation(const char* with, IQuerier* querier, ConfigSnapshot
         return {ConfigError::kReference, {}, "config/parameters required"};
     return ResolveConfig(with, parsed.config.source, doc.HasMember("config") ? &cached : nullptr, result);
 }
-class BaselinerTask final : public IBlockTransformTaskV2,
-                            public IBlockTransformInputSourceTaskV1,
-                            public IBlockTransformDatabaseInputTaskV1,
-                            public IBlockTransformDataFrameInputTaskV1,
-                            public IBlockTransformInputProgressTaskV1,
-                            public IBlockTransformManagedSinkTaskV1,
-                            public IBlockTransformModelOutputTaskV1,
-                            public IBlockTransformResultOutputTaskV1,
-                            public IOperatorConfigAdapterV1,
-                            public IOperatorOutputObservationV1,
-                            public IOperatorOutputPublicationV1 {
+class BaselinerTask final : public IBlockTransformTask,
+                            public IBlockTransformTimeDrivenTask,
+                            public IBlockTransformInputSourceTask,
+                            public IBlockTransformDatabaseInputTask,
+                            public IBlockTransformDataFrameInputTask,
+                            public IBlockTransformInputProgressTask,
+                            public IBlockTransformManagedSinkTask,
+                            public IBlockTransformModelOutputTask,
+                            public IBlockTransformResultOutputTask,
+                            public IOperatorConfigAdapter,
+                            public IOperatorOutputObservation,
+                            public IOperatorOutputPublication {
  public:
     BaselinerTask(ConfigSnapshot config, IQuerier* querier, std::string run)
         : config_(std::move(config)), querier_(querier), run_(std::move(run)) {}
-    int ResolveInvocation(const char* request, std::string* result, DataSemanticsErrorV1* error) override {
+    int ResolveInvocation(const char* request, std::string* result, DataSemanticsError* error) override {
         return ResolveContractInvocation(querier_, &config_, request, result, error);
     }
     void SetOutputPublicationObserver(std::function<int()> observer) override { observer_ = std::move(observer); }
@@ -119,7 +120,7 @@ class BaselinerTask final : public IBlockTransformTaskV2,
         engine_.Close();
         store_.Close();
     }
-    int BindResultOutput(const BlockResultOutputBindingV1& binding) override {
+    int BindResultOutput(const BlockResultOutputBinding& binding) override {
         if (binding.struct_size != sizeof(binding) || binding.contract_version != 1 || !binding.target || opened_ ||
             failed_ || cancelled_ || result_bound_ || managed_)
             return Fail("invalid result output binding");
@@ -153,7 +154,7 @@ class BaselinerTask final : public IBlockTransformTaskV2,
         return cancelled_ ? Fail("results cancelled after publication") : 0;
     }
     std::string ModelOutputTarget() const override { return config_.model_output; }
-    int BindModelOutput(const BlockModelOutputBindingV1& binding) override {
+    int BindModelOutput(const BlockModelOutputBinding& binding) override {
         if (binding.struct_size != sizeof(binding) || binding.contract_version != 1 || !binding.primary_target ||
             opened_ || failed_ || cancelled_ || model_bound_ || config_.model_output.empty() ||
             bool(binding.database) == bool(binding.dataframe))
@@ -169,8 +170,8 @@ class BaselinerTask final : public IBlockTransformTaskV2,
         const auto target_channel = target.substr(0, b);
         const auto table = b == std::string::npos ? std::string{} : target.substr(b + 1);
         const std::set<std::string> reserved = {
-            "baseline_tasks",      "baseline_model_versions",     "baseline_source_positions",
-            "baseline_results_v1", "baseline_relation_fusion_v1", "baseline_maintenance_v1"};
+            "baseline_tasks",   "baseline_model_versions",  "baseline_source_positions",
+            "baseline_results", "baseline_relation_fusion", "baseline_maintenance"};
         if (primary == target_channel && reserved.count(table)) return Fail("model output overlaps managed relations");
         if (source_channel == target_channel)
             for (const auto& dataset : config_.config.datasets)
@@ -209,7 +210,7 @@ class BaselinerTask final : public IBlockTransformTaskV2,
         bound_ = true;
         return 0;
     }
-    int BindManagedSink(const BlockTransformManagedSinkBindingV1& binding) override {
+    int BindManagedSink(const BlockTransformManagedSinkBinding& binding) override {
         if (opened_ || managed_ || result_bound_ || failed_ || cancelled_ || binding.struct_size != sizeof(binding) ||
             binding.contract_version != 1 || !binding.sink_channel || !binding.target || !binding.category ||
             !binding.name || (binding.relation && binding.relation[0]))
@@ -219,8 +220,8 @@ class BaselinerTask final : public IBlockTransformTaskV2,
             std::string(channel->Category()) != binding.category || std::string(channel->Name()) != binding.name)
             return Fail("managed target binding mismatch");
         const std::set<std::string> reserved = {
-            "baseline_tasks",      "baseline_model_versions",     "baseline_source_positions",
-            "baseline_results_v1", "baseline_relation_fusion_v1", "baseline_maintenance_v1"};
+            "baseline_tasks",   "baseline_model_versions",  "baseline_source_positions",
+            "baseline_results", "baseline_relation_fusion", "baseline_maintenance"};
         for (const auto& dataset : config_.config.datasets)
             if (reserved.count(dataset.table)) return Fail("source overlaps managed baseline relations");
         if (model_bound_ && !model_dataframe_) {
@@ -279,7 +280,7 @@ class BaselinerTask final : public IBlockTransformTaskV2,
                     : rows_written_);
         w.Key("generation");
         w.Int64(store_.Generation());
-        text("results_relation", result_bound_ ? result_target_ : "baseline_results_v1");
+        text("results_relation", result_bound_ ? result_target_ : "baseline_results");
         text("models_relation", result_bound_ ? config_.model_output : "baseline_model_versions");
         w.Key("source_positions");
         w.StartArray();
@@ -329,11 +330,10 @@ class BaselinerTask final : public IBlockTransformTaskV2,
             return Fail("invalid baseliner Open/schema");
         auto* service = querier_ ? static_cast<IBaselineService*>(querier_->First(IID_BASELINE_SERVICE)) : nullptr;
         auto* control =
-            querier_
-                ? static_cast<IBaselineStateControlServiceV1*>(querier_->First(IID_BASELINE_STATE_CONTROL_SERVICE_V1))
-                : nullptr;
+            querier_ ? static_cast<IBaselineStateControlService*>(querier_->First(IID_BASELINE_STATE_CONTROL_SERVICE))
+                     : nullptr;
         auto* checkpoints =
-            querier_ ? static_cast<IBaselineCheckpointServiceV1*>(querier_->First(IID_BASELINE_CHECKPOINT_SERVICE_V1))
+            querier_ ? static_cast<IBaselineCheckpointService*>(querier_->First(IID_BASELINE_CHECKPOINT_SERVICE))
                      : nullptr;
         if ((managed_ || config_.config.state.idle_timeout_ms) && !checkpoints)
             return Fail("checkpoint service unavailable");
@@ -352,7 +352,7 @@ class BaselinerTask final : public IBlockTransformTaskV2,
         return 0;
     }
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t timestamp,
-                     std::vector<BlockTransformOutputV1>* outputs) override {
+                     std::vector<BlockTransformOutput>* outputs) override {
         if (!outputs || !outputs->empty() || !opened_ || failed_ || finished_ || cancelled_)
             return Fail("baseliner task unavailable");
         std::vector<Observation> observations;
@@ -368,7 +368,7 @@ class BaselinerTask final : public IBlockTransformTaskV2,
             observations = std::move(fresh);
         }
         engine_.SetTime(Now(), WallNow());
-        std::vector<BlockTransformOutputV1> staged;
+        std::vector<BlockTransformOutput> staged;
         if (Maintain(timestamp, &staged) != 0) return -EINVAL;
         if (engine_.ValidateBatch(observations) != 0) return Fail(engine_.LastError());
         const auto budget = config_.config.read.max_pending_bytes;
@@ -390,7 +390,7 @@ class BaselinerTask final : public IBlockTransformTaskV2,
                 return Fail(error_);
         }
         if (encoder.Flush(&batches, &error_) != 0) return Fail(error_);
-        std::vector<BlockTransformOutputV1> next;
+        std::vector<BlockTransformOutput> next;
         uint64_t bytes = 0;
         for (auto& batch : batches) {
             bytes += arrow::util::TotalBufferSize(*batch);
@@ -424,9 +424,9 @@ class BaselinerTask final : public IBlockTransformTaskV2,
             staged.insert(staged.end(), std::make_move_iterator(next.begin()), std::make_move_iterator(next.end()));
         for (const auto& item : staged) Capture(item.batch);
         *outputs = std::move(staged);
-        return static_cast<int>(BlockTransformStatusV1::kContinue);
+        return static_cast<int>(BlockTransformStatus::kContinue);
     }
-    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+    int Flush(std::vector<BlockTransformOutput>* outputs) override {
         if (!outputs || !outputs->empty() || !opened_ || failed_ || finished_ || cancelled_)
             return Fail("invalid baseliner Flush");
         if (engine_.Finish() != 0) return Fail(engine_.LastError());
@@ -492,9 +492,9 @@ class BaselinerTask final : public IBlockTransformTaskV2,
         results_.Cancel();
     }
     std::string LastError() const override { return error_; }
-    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override {
+    int GetTimeDriveState(BlockTransformTimeDriveState* state) override {
         if (!state) return EINVAL;
-        *state = {kBlockTransformTimeDriveStateV1Size, kBlockTransformTimeDriveVersionV1, 0, {}, 0};
+        *state = {kBlockTransformTimeDriveStateSize, kBlockTransformTimeDriveVersion, 0, {}, 0};
         if (opened_ && !failed_ && !finished_ && !cancelled_) {
             auto deadline = engine_.NextMaintenanceDeadline();
             if (managed_) {
@@ -508,7 +508,7 @@ class BaselinerTask final : public IBlockTransformTaskV2,
         }
         return 0;
     }
-    int OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* outputs) override {
+    int OnTime(const BlockTransformTimeEvent& event, std::vector<BlockTransformOutput>* outputs) override {
         if (!outputs || !outputs->empty() || !opened_ || failed_ || finished_ || cancelled_ ||
             event.struct_size != sizeof(event) || event.contract_version != 1)
             return Fail("invalid checkpoint time event");
@@ -521,10 +521,10 @@ class BaselinerTask final : public IBlockTransformTaskV2,
         }
         return 0;
     }
-    int CreateDatabaseInput(const BlockDatabaseInputBindingV1& binding, BlockDatabaseInputV1* output) override {
+    int CreateDatabaseInput(const BlockDatabaseInputBinding& binding, BlockDatabaseInput* output) override {
         if (!output) return EINVAL;
         *output = {};
-        if (!ValidBlockDatabaseInputBindingV1(binding) || opened_ || failed_ || cancelled_ || !bound_ || input_ ||
+        if (!ValidBlockDatabaseInputBinding(binding) || opened_ || failed_ || cancelled_ || !bound_ || input_ ||
             !config_.config.database_source || config_.config.source != binding.exact_source)
             return Fail("invalid database input binding");
         if (model_bound_ && !model_dataframe_ &&
@@ -564,13 +564,13 @@ class BaselinerTask final : public IBlockTransformTaskV2,
         output->schema = MakeSchema(SchemaKind::kObservation);
         return 0;
     }
-    int CreateDataFrameInput(const BlockDataFrameInputBindingV1& binding, BlockDataFrameInputV1* output) override {
+    int CreateDataFrameInput(const BlockDataFrameInputBinding& binding, BlockDataFrameInput* output) override {
         if (!output) return EINVAL;
         const bool valid_output =
-            output->struct_size == sizeof(*output) && output->contract_version == kBlockDataFrameInputVersionV1;
+            output->struct_size == sizeof(*output) && output->contract_version == kBlockDataFrameInputVersion;
         *output = {};
-        if (!valid_output || !ValidBlockDataFrameInputBindingV1(binding) || opened_ || failed_ || cancelled_ ||
-            !bound_ || input_ || !config_.config.dataframe_source || config_.config.source != binding.exact_source)
+        if (!valid_output || !ValidBlockDataFrameInputBinding(binding) || opened_ || failed_ || cancelled_ || !bound_ ||
+            input_ || !config_.config.dataframe_source || config_.config.source != binding.exact_source)
             return Fail("invalid DataFrame input binding");
         auto reader = std::make_shared<DataFrameSnapshotInput>();
         std::atomic_store(&input_, std::static_pointer_cast<IBlockStreamChannel>(reader));
@@ -606,7 +606,7 @@ class BaselinerTask final : public IBlockTransformTaskV2,
         owned->Close();
         std::atomic_store(&input_, std::shared_ptr<IBlockStreamChannel>{});
     }
-    int AcceptInputProgress(const BlockInputProgressV1& progress) override {
+    int AcceptInputProgress(const BlockInputProgress& progress) override {
         if (!opened_ || failed_ || finished_ || cancelled_) return Fail("invalid progress lifecycle");
         std::vector<std::string> ids;
         for (const auto& d : config_.config.datasets) ids.push_back(d.id);
@@ -643,7 +643,7 @@ class BaselinerTask final : public IBlockTransformTaskV2,
         return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
             .count();
     }
-    int Maintain(int64_t timestamp, std::vector<BlockTransformOutputV1>* outputs) {
+    int Maintain(int64_t timestamp, std::vector<BlockTransformOutput>* outputs) {
         if (!config_.config.state.idle_timeout_ms) return 0;
         std::vector<MaintenanceRow> rows;
         if (engine_.Maintain(&rows) != 0) return Fail(engine_.LastError());
@@ -754,7 +754,7 @@ class BaselinerTask final : public IBlockTransformTaskV2,
     int64_t model_rows_ = 0;
     bool model_bound_ = false;
     StoredGeneration saved_;
-    BlockInputProgressV1 durable_progress_;
+    BlockInputProgress durable_progress_;
     std::vector<std::shared_ptr<arrow::RecordBatch>> pending_;
     std::map<std::string, int64_t> pending_starts_;
     std::map<std::string, std::string> source_epochs_;
@@ -764,7 +764,7 @@ class BaselinerTask final : public IBlockTransformTaskV2,
     int64_t rows_written_ = 0;
     bool managed_ = false, dirty_ = false;
     std::shared_ptr<IBlockStreamChannel> input_;
-    BlockInputProgressV1 progress_;
+    BlockInputProgress progress_;
     std::atomic<bool> cancelled_{false};
     bool bound_ = false, opened_ = false, failed_ = false, finished_ = false;
     std::string error_;
@@ -778,14 +778,14 @@ int BaselinerOperator::Load(IQuerier* querier) {
 int BaselinerOperator::Start() {
     if (!querier_) return EINVAL;
     static const char component_anchor = 0;
-    DataSemanticsErrorV1 contract_error;
+    DataSemanticsError contract_error;
     // Direct-plugin and BinAddon paths share this immutable component declaration.
     // BinAddon performs the final association publication after activation.
     contract_identity_ = {"explore", "baseliner", contracts::ComponentDigest(&component_anchor), "", "", "unavailable"};
-    auto* catalog = static_cast<IOperatorContractCatalogV1*>(querier_->First(IID_OPERATOR_CONTRACT_CATALOG_V1));
+    auto* catalog = static_cast<IOperatorContractCatalog*>(querier_->First(IID_OPERATOR_CONTRACT_CATALOG));
     if (catalog) {
-        std::vector<PreparedOperatorContractV1> prepared;
-        OperatorComponentContractV1 previous;
+        std::vector<PreparedOperatorContract> prepared;
+        OperatorComponentContract previous;
         if (catalog->Lookup("explore", "baseliner", &previous, &contract_error) == 0 &&
             catalog->Prepare({{"explore", "baseliner", contract_identity_.component_revision,
                                contracts::kBaselinerContract, previous.component_revision}},
@@ -808,11 +808,11 @@ int BaselinerOperator::Unload() {
     querier_ = nullptr;
     return 0;
 }
-int BaselinerOperator::CreateTask(const BlockTransformTaskConfigV2& config, IBlockTransformTaskV2** task) {
+int BaselinerOperator::CreateTask(const BlockTransformTaskConfig& config, IBlockTransformTask** task) {
     if (!task) return EINVAL;
     *task = nullptr;
-    if (!started_ || config.struct_size != kBlockTransformTaskConfigV2Size ||
-        config.contract_version != kBlockTransformContractVersionV2 || !config.task_id || !config.task_id[0])
+    if (!started_ || config.struct_size != kBlockTransformTaskConfigSize ||
+        config.contract_version != kBlockTransformContractVersion || !config.task_id || !config.task_id[0])
         return EINVAL;
     if (config.pushed_filter_plan_json && config.pushed_filter_plan_json[0] &&
         std::strcmp(config.pushed_filter_plan_json, "{\"version\":1,\"root\":null}") != 0)
@@ -824,8 +824,8 @@ int BaselinerOperator::CreateTask(const BlockTransformTaskConfigV2& config, IBlo
                                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     return 0;
 }
-void BaselinerOperator::ReleaseTask(IBlockTransformTaskV2* task) { delete task; }
-int BaselinerOperator::ResolveInvocation(const char* request, std::string* result, DataSemanticsErrorV1* error) {
+void BaselinerOperator::ReleaseTask(IBlockTransformTask* task) { delete task; }
+int BaselinerOperator::ResolveInvocation(const char* request, std::string* result, DataSemanticsError* error) {
     return ResolveContractInvocation(querier_, nullptr, request, result, error);
 }
 int BaselinerOperator::NormalizeSourceConfig(const char* with, const char* source, std::string* output,
@@ -833,7 +833,7 @@ int BaselinerOperator::NormalizeSourceConfig(const char* with, const char* sourc
     if (!with || !source || !output) return EINVAL;
     ConfigSnapshot config;
     auto* registry =
-        querier_ ? static_cast<IConfigChannelRegistryV1*>(querier_->First(IID_CONFIG_CHANNEL_REGISTRY_V1)) : nullptr;
+        querier_ ? static_cast<IConfigChannelRegistry*>(querier_->First(IID_CONFIG_CHANNEL_REGISTRY)) : nullptr;
     auto status = ResolveConfig(with, source, registry, &config);
     if (!status.ok()) {
         if (error) *error = status.path + ": " + status.message;
@@ -862,7 +862,7 @@ int BaselinerOperator::RequiresAsyncExecution(const char* with, const char* sour
     *output = false;
     ConfigSnapshot config;
     auto* registry =
-        querier_ ? static_cast<IConfigChannelRegistryV1*>(querier_->First(IID_CONFIG_CHANNEL_REGISTRY_V1)) : nullptr;
+        querier_ ? static_cast<IConfigChannelRegistry*>(querier_->First(IID_CONFIG_CHANNEL_REGISTRY)) : nullptr;
     if (!ResolveConfig(with ? with : "", source, registry, &config).ok()) return EINVAL;
     *output = config.config.mode == Mode::kPoll;
     return 0;

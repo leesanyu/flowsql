@@ -78,7 +78,7 @@ def main():
                 ('alpha', '2026-01-01T00:01:00Z', None, 2, None, 'text'),
                 ('beta', '2026-01-01T00:02:00Z', 20, 3, None, 3)])
         channels = directory / 'channels.yml'
-        channels.write_text('channels:\n  database_channels:\n    - type: sqlite\n      name: example\n      path: ' + str(db) + '\n      readonly: "true"\n')
+        channels.write_text('channels:\n  database_channels:\n    - type: sqlite\n      name: example\n      dataset_instance_id: exploration-delivery-fixture\n      path: ' + str(db) + '\n      readonly: "true"\n')
         config_before, db_before = digest(channels), digest(db)
         deployment = directory / 'deploy.yaml'
         visual = port()

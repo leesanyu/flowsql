@@ -50,10 +50,10 @@ struct Injection {
         }
     }
 };
-class DatabaseProbe final : public IDatabaseChannel, public IDatabasePreparedCommandV1 {
+class DatabaseProbe final : public IDatabaseChannel, public IDatabasePreparedCommand {
  public:
     DatabaseProbe(IDatabaseChannel* database, Injection* injection) : database_(database), injection_(injection) {
-        prepared_ = dynamic_cast<IDatabasePreparedCommandV1*>(database);
+        prepared_ = dynamic_cast<IDatabasePreparedCommand*>(database);
         assert(prepared_);
     }
     const char* Category() override { return database_->Category(); }
@@ -83,11 +83,11 @@ class DatabaseProbe final : public IDatabaseChannel, public IDatabasePreparedCom
     int ExecuteSql(const char* sql) override { return database_->ExecuteSql(sql); }
     const char* GetLastError() override { return database_->GetLastError(); }
     bool IsConnected() override { return database_->IsConnected(); }
-    int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t count) override {
+    int ExecutePrepared(const char* sql, const DatabaseParameter* parameters, size_t count) override {
         injection_->Output();
         return prepared_->ExecutePrepared(sql, parameters, count);
     }
-    int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t per_execution,
+    int ExecutePreparedBatch(const char* sql, const DatabaseParameter* parameters, size_t per_execution,
                              size_t executions) override {
         injection_->Output();
         return prepared_->ExecutePreparedBatch(sql, parameters, per_execution, executions);
@@ -95,15 +95,16 @@ class DatabaseProbe final : public IDatabaseChannel, public IDatabasePreparedCom
 
  private:
     IDatabaseChannel* database_;
-    IDatabasePreparedCommandV1* prepared_;
+    IDatabasePreparedCommand* prepared_;
     Injection* injection_;
 };
-class TaskProbe final : public IBlockTransformTaskV2,
-                        public IBlockTransformCaptureFactTaskV2,
-                        public IBlockTransformManagedSinkTaskV1,
-                        public IBlockTransformInputSourceTaskV1 {
+class TaskProbe final : public IBlockTransformTask,
+                        public IBlockTransformTimeDrivenTask,
+                        public IBlockTransformCaptureFactTask,
+                        public IBlockTransformManagedSinkTask,
+                        public IBlockTransformInputSourceTask {
  public:
-    TaskProbe(IBlockTransformOperatorV2* provider, IBlockTransformTaskV2* task) : provider_(provider), task_(task) {
+    TaskProbe(IBlockTransformOperator* provider, IBlockTransformTask* task) : provider_(provider), task_(task) {
         const char* profile = std::getenv("FLOWSQL_NETADAPTER_TEST_PROFILE");
         injection_.profile = profile ? profile : "dual";
     }
@@ -112,29 +113,29 @@ class TaskProbe final : public IBlockTransformTaskV2,
         return task_->Open(std::move(schema), output);
     }
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts,
-                     std::vector<BlockTransformOutputV1>* outputs) override {
+                     std::vector<BlockTransformOutput>* outputs) override {
         injection_.Analysis();
         return task_->ProcessBlock(input, ts, outputs);
     }
-    int Flush(std::vector<BlockTransformOutputV1>* outputs) override { return task_->Flush(outputs); }
+    int Flush(std::vector<BlockTransformOutput>* outputs) override { return task_->Flush(outputs); }
     void Cancel() override { task_->Cancel(); }
     std::string LastError() const override { return task_->LastError(); }
     int BindInputSource(const char* source) override {
-        return dynamic_cast<IBlockTransformInputSourceTaskV1*>(task_)->BindInputSource(source);
+        return dynamic_cast<IBlockTransformInputSourceTask*>(task_)->BindInputSource(source);
     }
-    int BindManagedSink(const BlockTransformManagedSinkBindingV1& binding) override {
+    int BindManagedSink(const BlockTransformManagedSinkBinding& binding) override {
         database_ = std::make_unique<DatabaseProbe>(dynamic_cast<IDatabaseChannel*>(binding.sink_channel), &injection_);
         auto forwarded = binding;
         forwarded.sink_channel = database_.get();
-        return dynamic_cast<IBlockTransformManagedSinkTaskV1*>(task_)->BindManagedSink(forwarded);
+        return dynamic_cast<IBlockTransformManagedSinkTask*>(task_)->BindManagedSink(forwarded);
     }
-    int BindCaptureSources(const CaptureSourceSetV2& sources) override {
+    int BindCaptureSources(const CaptureSourceSet& sources) override {
         input_last_service_.resize(sources.inputs.size());
         input_service_max_ms_.resize(sources.inputs.size());
-        return dynamic_cast<IBlockTransformCaptureFactTaskV2*>(task_)->BindCaptureSources(sources);
+        return dynamic_cast<IBlockTransformCaptureFactTask*>(task_)->BindCaptureSources(sources);
     }
-    int AcceptCaptureFacts(const std::vector<CaptureProgressV1>& facts) override {
-        const int result = dynamic_cast<IBlockTransformCaptureFactTaskV2*>(task_)->AcceptCaptureFacts(facts);
+    int AcceptCaptureFacts(const std::vector<CaptureProgress>& facts) override {
+        const int result = dynamic_cast<IBlockTransformCaptureFactTask*>(task_)->AcceptCaptureFacts(facts);
         if (!result && !facts.empty()) {
             const auto now = MonotonicNs();
             if (!pending_since_ns_) pending_since_ns_ = now;
@@ -148,21 +149,21 @@ class TaskProbe final : public IBlockTransformTaskV2,
         }
         return result;
     }
-    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override {
-        const int result = task_->GetTimeDriveState(state);
+    int GetTimeDriveState(BlockTransformTimeDriveState* state) override {
+        const int result = dynamic_cast<IBlockTransformTimeDrivenTask*>(task_)->GetTimeDriveState(state);
         if (!result && state->armed) deadline_ns_ = state->deadline_ns;
         return result;
     }
-    int OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* outputs) override {
+    int OnTime(const BlockTransformTimeEvent& event, std::vector<BlockTransformOutput>* outputs) override {
         const auto deadline = deadline_ns_ > 0 ? deadline_ns_ : pending_since_ns_;
         if (deadline > 0) lateness_ms_.push_back(double(std::max<int64_t>(0, event.monotonic_now_ns - deadline)) / 1e6);
         if (last_time_ns_ > 0) service_gap_ms_.push_back(double(event.monotonic_now_ns - last_time_ns_) / 1e6);
         last_time_ns_ = event.monotonic_now_ns;
         pending_since_ns_ = 0;
-        return task_->OnTime(event, outputs);
+        return dynamic_cast<IBlockTransformTimeDrivenTask*>(task_)->OnTime(event, outputs);
     }
     std::string ManagedSinkResultJson() const override {
-        auto json = dynamic_cast<IBlockTransformManagedSinkTaskV1*>(task_)->ManagedSinkResultJson();
+        auto json = dynamic_cast<IBlockTransformManagedSinkTask*>(task_)->ManagedSinkResultJson();
         rapidjson::Document document;
         document.Parse(json.c_str());
         if (!document.IsObject()) return json;
@@ -196,8 +197,8 @@ class TaskProbe final : public IBlockTransformTaskV2,
     }
 
  private:
-    IBlockTransformOperatorV2* provider_;
-    IBlockTransformTaskV2* task_;
+    IBlockTransformOperator* provider_;
+    IBlockTransformTask* task_;
     Injection injection_;
     std::unique_ptr<DatabaseProbe> database_;
     int64_t pending_since_ns_ = 0, deadline_ns_ = 0, last_time_ns_ = 0;
@@ -205,7 +206,7 @@ class TaskProbe final : public IBlockTransformTaskV2,
     std::vector<int64_t> input_last_service_;
     std::vector<double> input_service_max_ms_;
 };
-class OperatorProbe final : public IBlockTransformOperatorV2 {
+class OperatorProbe final : public IBlockTransformOperator {
  public:
     explicit OperatorProbe(IQuerier* querier) {
         library_ = dlopen(FLOWSQL_REAL_NPM_PLUGIN_PATH, RTLD_NOW | RTLD_LOCAL);
@@ -214,35 +215,35 @@ class OperatorProbe final : public IBlockTransformOperatorV2 {
             reinterpret_cast<void* (*)(int, IQuerier*)>(dlsym(library_, "flowsql_create_operator_capability"));
         destroy_ = reinterpret_cast<void (*)(int, void*)>(dlsym(library_, "flowsql_destroy_operator_capability"));
         assert(create && destroy_);
-        delegate_ = static_cast<IBlockTransformOperatorV2*>(create(1, querier));
+        delegate_ = static_cast<IBlockTransformOperator*>(create(0, querier));
         assert(delegate_);
     }
     ~OperatorProbe() override {
-        destroy_(1, delegate_);
+        destroy_(0, delegate_);
         dlclose(library_);
     }
     std::string Category() const override { return "npm"; }
     std::string Name() const override { return "basic"; }
     std::string Description() const override { return "Test probe around production npm.basic"; }
-    int CreateTask(const BlockTransformTaskConfigV2& config, IBlockTransformTaskV2** output) override {
-        IBlockTransformTaskV2* task = nullptr;
+    int CreateTask(const BlockTransformTaskConfig& config, IBlockTransformTask** output) override {
+        IBlockTransformTask* task = nullptr;
         const int result = delegate_->CreateTask(config, &task);
         if (!result) *output = new TaskProbe(delegate_, task);
         return result;
     }
-    void ReleaseTask(IBlockTransformTaskV2* task) override { delete task; }
+    void ReleaseTask(IBlockTransformTask* task) override { delete task; }
 
  private:
     void* library_ = nullptr;
     void (*destroy_)(int, void*) = nullptr;
-    IBlockTransformOperatorV2* delegate_ = nullptr;
+    IBlockTransformOperator* delegate_ = nullptr;
 };
 
-class FailingInput final : public ICaptureBackendSessionV1 {
+class FailingInput final : public ICaptureBackendSession {
  public:
-    explicit FailingInput(std::shared_ptr<ICaptureBackendSessionV1> delegate) : delegate_(std::move(delegate)) {}
-    const std::vector<CaptureBackendInputV1>& Inputs() const override { return delegate_->Inputs(); }
-    int TryRead(uint32_t input, CapturePacketViewV1* packet) override {
+    explicit FailingInput(std::shared_ptr<ICaptureBackendSession> delegate) : delegate_(std::move(delegate)) {}
+    const std::vector<CaptureBackendInput>& Inputs() const override { return delegate_->Inputs(); }
+    int TryRead(uint32_t input, CapturePacketView* packet) override {
         if (input == 1 && Clock::now() - started_ >= std::chrono::seconds(3)) {
             std::cerr << "validation injected second-input EIO\n";
             return EIO;
@@ -250,18 +251,18 @@ class FailingInput final : public ICaptureBackendSessionV1 {
         return delegate_->TryRead(input, packet);
     }
     void ReleasePacket(uint32_t input) override { delegate_->ReleasePacket(input); }
-    CaptureBacklogV1 Backlog(uint32_t input) const override { return delegate_->Backlog(input); }
+    CaptureBacklog Backlog(uint32_t input) const override { return delegate_->Backlog(input); }
     int64_t IdleTimeNs(uint32_t input) const override { return delegate_->IdleTimeNs(input); }
-    int ReadCounters(uint32_t input, CaptureCountersV1* counters) override {
+    int ReadCounters(uint32_t input, CaptureCounters* counters) override {
         return delegate_->ReadCounters(input, counters);
     }
     void Cancel() override { delegate_->Cancel(); }
 
  private:
-    std::shared_ptr<ICaptureBackendSessionV1> delegate_;
+    std::shared_ptr<ICaptureBackendSession> delegate_;
     Clock::time_point started_ = Clock::now();
 };
-class InputFailureProvider final : public IPlugin, public ICaptureBackendProviderV1 {
+class InputFailureProvider final : public IPlugin, public ICaptureBackendProvider {
  public:
     int Option(const char*) override {
         const char* profile = std::getenv("FLOWSQL_NETADAPTER_TEST_PROFILE");
@@ -278,11 +279,11 @@ class InputFailureProvider final : public IPlugin, public ICaptureBackendProvide
         return 0;
     }
     const char* Backend() const override { return backend_.c_str(); }
-    int Open(const CaptureBackendConfigV1& config, std::shared_ptr<ICaptureBackendSessionV1>* output,
+    int Open(const CaptureBackendConfig& config, std::shared_ptr<ICaptureBackendSession>* output,
              std::string* error) override {
-        ICaptureBackendProviderV1* actual = nullptr;
-        querier_->Traverse(IID_CAPTURE_BACKEND_PROVIDER_V1, [&](void* value) {
-            auto* provider = static_cast<ICaptureBackendProviderV1*>(value);
+        ICaptureBackendProvider* actual = nullptr;
+        querier_->Traverse(IID_CAPTURE_BACKEND_PROVIDER, [&](void* value) {
+            auto* provider = static_cast<ICaptureBackendProvider*>(value);
             if (provider != this && config.backend == provider->Backend()) {
                 actual = provider;
                 return -1;
@@ -290,7 +291,7 @@ class InputFailureProvider final : public IPlugin, public ICaptureBackendProvide
             return 0;
         });
         assert(actual);
-        std::shared_ptr<ICaptureBackendSessionV1> session;
+        std::shared_ptr<ICaptureBackendSession> session;
         const int result = actual->Open(config, &session, error);
         if (!result) {
             std::cerr << "validation wrapped real " << config.backend << " inputs=" << session->Inputs().size() << "\n";
@@ -307,23 +308,23 @@ class InputFailureProvider final : public IPlugin, public ICaptureBackendProvide
 
 BEGIN_PLUGIN_REGIST(InputFailureProvider)
 ____INTERFACE(IID_PLUGIN, IPlugin)
-____INTERFACE(IID_CAPTURE_BACKEND_PROVIDER_V1, ICaptureBackendProviderV1)
+____INTERFACE(IID_CAPTURE_BACKEND_PROVIDER, ICaptureBackendProvider)
 END_PLUGIN_REGIST()
-extern "C" int flowsql_abi_version() { return kCppOperatorPluginAbiVersionV2; }
+extern "C" int flowsql_abi_version() { return kCppOperatorPluginAbiVersion; }
 extern "C" int flowsql_operator_count() { return 1; }
-extern "C" int flowsql_describe_operator(int index, CppOperatorDescriptorV2* descriptor) {
-    if (index || !descriptor || descriptor->struct_size < kCppOperatorDescriptorV2Size) return EINVAL;
+extern "C" int flowsql_describe_operator(int index, CppOperatorDescriptor* descriptor) {
+    if (index || !descriptor || descriptor->struct_size < kCppOperatorDescriptorSize) return EINVAL;
     *descriptor = {};
-    descriptor->struct_size = kCppOperatorDescriptorV2Size;
+    descriptor->struct_size = kCppOperatorDescriptorSize;
     descriptor->category = "npm";
     descriptor->name = "basic";
     descriptor->description = "Test probe around production npm.basic";
-    descriptor->contract_iid = IID_BLOCK_TRANSFORM_OPERATOR_V2;
+    descriptor->contract_iid = IID_BLOCK_TRANSFORM_OPERATOR;
     return 0;
 }
 extern "C" void* flowsql_create_operator_capability(int index, IQuerier* querier) {
-    return !index && querier ? static_cast<IBlockTransformOperatorV2*>(new OperatorProbe(querier)) : nullptr;
+    return !index && querier ? static_cast<IBlockTransformOperator*>(new OperatorProbe(querier)) : nullptr;
 }
 extern "C" void flowsql_destroy_operator_capability(int index, void* capability) {
-    if (!index) delete static_cast<IBlockTransformOperatorV2*>(capability);
+    if (!index) delete static_cast<IBlockTransformOperator*>(capability);
 }

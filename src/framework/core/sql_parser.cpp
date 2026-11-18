@@ -353,7 +353,6 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
         stmt.sources.push_back(std::move(src));
         SkipWhitespace();
     }
-    stmt.source = stmt.sources[0];  // 向后兼容
 
     const char* source_tail_begin = pos_;
     const char* extension_start = FindFlowExtensionStart(source_tail_begin, end_);
@@ -374,12 +373,12 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
                 return stmt;
             }
 
-            if (!HasDatabaseReferenceShape(stmt.source)) {
+            if (!HasDatabaseReferenceShape(stmt.sources.front())) {
                 stmt.stage_filters.push_back({0, stmt.where_clause});
             }
         } else {
             const std::string source_tail = TrimRange(source_clause_begin, source_tail_end);
-            if (!HasDatabaseReferenceShape(stmt.source) && !HasNativeSqlClause(source_tail)) {
+            if (!HasDatabaseReferenceShape(stmt.sources.front()) && !HasNativeSqlClause(source_tail)) {
                 stmt.error = "unexpected source SQL tail: " + source_tail;
                 return stmt;
             }
@@ -486,12 +485,6 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
             }
             ++stage;
         }
-
-        if (!stmt.operators.empty()) {
-            stmt.op_category = stmt.operators[0].category;
-            stmt.op_name = stmt.operators[0].name;
-            if (!stmt.operator_with_params.empty()) stmt.with_params = stmt.operator_with_params[0];
-        }
     } else {
         pos_ = saved_pos;
     }
@@ -504,11 +497,6 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
             return stmt;
         }
         pos_ = with_pos;
-    } else {
-        // 兼容无算子场景下的历史 WITH 语法。
-        if (!parse_with_params(&stmt.with_params, &stmt.error)) {
-            return stmt;
-        }
     }
 
     // [INTO <dest>]

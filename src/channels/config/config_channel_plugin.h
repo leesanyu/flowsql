@@ -26,7 +26,7 @@ class ConfigChannelPlugin final : public IPlugin,
                                   public DataSemanticsRegistry,
                                   public OperatorContractService,
                                   public IRouterHandle,
-                                  public IMetadataDescriptionV1 {
+                                  public IMetadataDescription {
  public:
     ConfigChannelPlugin()
         : OperatorContractService(static_cast<DataSemanticsRegistry&>(*this),
@@ -72,7 +72,7 @@ class ConfigChannelPlugin final : public IPlugin,
         std::string error;
         int rc = ConfigChannelProvider::Open(db_path_, &error);
         if (rc == 0) {
-            DataSemanticsErrorV1 semantics_error;
+            DataSemanticsError semantics_error;
             rc = DataSemanticsRegistry::Open(db_path_, &semantics_error);
             if (rc != 0) {
                 error = semantics_error.message;
@@ -112,9 +112,9 @@ class ConfigChannelPlugin final : public IPlugin,
     int32_t HandleResolve(const std::string& uri, const std::string& request, std::string& response);
 
     MetadataDescriptionService DescriptionService();
-    int LookupDescriptionOperator(const std::string&, uint32_t, OperatorComponentContractV1*, DataSemanticsErrorV1*);
-    int DescribeDatasetSource(const ChannelDatasetRequestV1&, ChannelDatasetSnapshotV1*, DataSemanticsErrorV1*);
-    int DescribeDataset(const ChannelDatasetRequestV1&, ChannelDatasetSnapshotV1*, DataSemanticsErrorV1*);
+    int LookupDescriptionOperator(const std::string&, uint32_t, OperatorComponentContract*, DataSemanticsError*);
+    int DescribeDatasetSource(const ChannelDatasetRequest&, ChannelDatasetSnapshot*, DataSemanticsError*);
+    int DescribeDataset(const ChannelDatasetRequest&, ChannelDatasetSnapshot*, DataSemanticsError*);
     IQuerier* querier_ = nullptr;
     std::string gateway_host_ = "127.0.0.1";
     int gateway_port_ = 18800;

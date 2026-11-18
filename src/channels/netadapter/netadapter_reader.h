@@ -16,11 +16,11 @@
 #include "netadapter_budget.h"
 #include "netadapter_config.h"
 namespace flowsql::channels::netadapter {
-class NetAdapterReader final : public ICaptureBlockStreamReaderV2, public IBlockStreamSchemaV1 {
+class NetAdapterReader final : public ICaptureBlockStreamReader, public IBlockStreamSchema {
  public:
     using MonotonicNow = std::function<std::chrono::steady_clock::time_point()>;
-    NetAdapterReader(std::string name, CaptureBackendConfigV1 config, uint64_t domain, uint64_t generation,
-                     std::shared_ptr<ICaptureBackendSessionV1> backend, IProtocol* protocol,
+    NetAdapterReader(std::string name, CaptureBackendConfig config, uint64_t domain, uint64_t generation,
+                     std::shared_ptr<ICaptureBackendSession> backend, IProtocol* protocol,
                      std::shared_ptr<void> channel_lease, std::shared_ptr<const packet::PcapFilterPlan> filter,
                      MonotonicNow monotonic_now = std::chrono::steady_clock::now);
     ~NetAdapterReader() override;
@@ -34,28 +34,28 @@ class NetAdapterReader final : public ICaptureBlockStreamReaderV2, public IBlock
     bool IsOpened() const override { return opened_ && !terminal_; }
     int Flush() override;
     BlockPollEvent PollBlock(int timeout_ms) override { return PollCapture(timeout_ms).block; }
-    CapturePollEventV2 PollCapture(int timeout_ms) override;
+    CapturePollEvent PollCapture(int timeout_ms) override;
     int ReleaseBlock(const std::shared_ptr<arrow::RecordBatch>& block) override;
     void Cancel() override;
     bool IsFinished() const override { return terminal_ != 0; }
-    int DescribeSources(CaptureSourceSetV2* sources) const override;
-    int ReadInputCounters(uint32_t source, CaptureCountersV1* counters) const override;
+    int DescribeSources(CaptureSourceSet* sources) const override;
+    int ReadInputCounters(uint32_t source, CaptureCounters* counters) const override;
     std::string Diagnostics() const;
 
  private:
     std::string name_;
-    CaptureBackendConfigV1 config_;
-    CaptureSourceSetV2 sources_;
+    CaptureBackendConfig config_;
+    CaptureSourceSet sources_;
     std::vector<std::string> source_names_;
-    std::shared_ptr<ICaptureBackendSessionV1> backend_;
+    std::shared_ptr<ICaptureBackendSession> backend_;
     IProtocol* protocol_;
     std::shared_ptr<void> channel_lease_;
     std::shared_ptr<const packet::PcapFilterPlan> filter_;
     MonotonicNow monotonic_now_;
     std::shared_ptr<CaptureMemoryPool> pool_;
-    std::vector<CaptureCountersV1> counters_;
+    std::vector<CaptureCounters> counters_;
     std::vector<uint64_t> fact_sequences_;
-    std::vector<CaptureBacklogV1> backlogs_;
+    std::vector<CaptureBacklog> backlogs_;
     std::vector<int64_t> candidates_;
     std::map<const arrow::RecordBatch*, std::weak_ptr<arrow::RecordBatch>> outstanding_;
     std::atomic<int> terminal_{0};

@@ -22,7 +22,7 @@ inline dataset::Value ObservedOutput(const std::string& port, const std::shared_
     }
     return output;
 }
-inline int ProducerOutputs(IOperatorOutputObservationV1* producer, dataset::Json* outputs, DataSemanticsErrorV1* e) {
+inline int ProducerOutputs(IOperatorOutputObservation* producer, dataset::Json* outputs, DataSemanticsError* e) {
     outputs->SetArray();
     if (!producer) return 0;
     std::string text;
@@ -40,7 +40,7 @@ inline int ProducerOutputs(IOperatorOutputObservationV1* producer, dataset::Json
     return 0;
 }
 inline int Observe(IQuerier* querier, Invocation* invocation, const dataset::Value& actual, const std::string& outcome,
-                   DataSemanticsErrorV1* e) {
+                   DataSemanticsError* e) {
     using namespace dataset;
     if (invocation->component.contract_state != "declared") return 0;
     auto& check = invocation->check;
@@ -55,8 +55,7 @@ inline int Observe(IQuerier* querier, Invocation* invocation, const dataset::Val
         if (e->code != "OUTPUT_SCHEMA_MISMATCH") e->code = "METADATA_PUBLICATION_FAILED";
         return -1;
     };
-    auto* service =
-        querier ? static_cast<IOperatorDataContractV1*>(querier->First(IID_OPERATOR_DATA_CONTRACT_V1)) : nullptr;
+    auto* service = querier ? static_cast<IOperatorDataContract*>(querier->First(IID_OPERATOR_DATA_CONTRACT)) : nullptr;
     if (!service) {
         Fail(e, "UNAVAILABLE", "output metadata service unavailable");
         return failure();
@@ -74,7 +73,7 @@ inline int Observe(IQuerier* querier, Invocation* invocation, const dataset::Val
     if (!ref.empty()) revision = std::stoull(ref.substr(ref.rfind('@') + 1));
     request.AddMember("expected_current_revision", revision, a);
     Value document(rapidjson::kObjectType), identity(rapidjson::kObjectType);
-    Set(document, "schema_id", "flowsql.operator-data-use.v1", a);
+    Set(document, "schema_id", "flowsql.operator-data-use", a);
     Set(document, "title", "Observed operator stage", a);
     Set(document, "run_id", run, a);
     document.AddMember("stage_index", stage, a);
@@ -113,7 +112,7 @@ inline int Observe(IQuerier* querier, Invocation* invocation, const dataset::Val
     document.AddMember("outputs", outputs, a);
     Set(document, "outcome", outcome, a);
     request.AddMember("document", document, a);
-    OperatorContractSnapshotV1 recorded;
+    OperatorContractSnapshot recorded;
     if (service->RecordUse(Encode(request).c_str(), &recorded, e)) return failure();
     Json used;
     used.Parse(recorded.document_json->c_str());
@@ -126,8 +125,8 @@ inline int Observe(IQuerier* querier, Invocation* invocation, const dataset::Val
     return 0;
 }
 inline int ObservePrimary(IQuerier* querier, Invocation* invocation, const std::shared_ptr<arrow::Schema>& schema,
-                          int64_t rows, IOperatorOutputObservationV1* producer, const std::string& outcome,
-                          DataSemanticsErrorV1* e) {
+                          int64_t rows, IOperatorOutputObservation* producer, const std::string& outcome,
+                          DataSemanticsError* e) {
     using namespace dataset;
     if (invocation->component.contract_state != "declared") return 0;
     auto& context = invocation->resolved["execution_context"];
@@ -147,8 +146,8 @@ inline int ObservePrimary(IQuerier* querier, Invocation* invocation, const std::
     return Observe(querier, invocation, actual, outcome, e);
 }
 // Called after a named result is registered. F2 supplies the new object's identity.
-inline int BindNamedOutput(IQuerier* querier, const std::string& name, std::string* checks_json,
-                           DataSemanticsErrorV1* e, const std::string& port = "") {
+inline int BindNamedOutput(IQuerier* querier, const std::string& name, std::string* checks_json, DataSemanticsError* e,
+                           const std::string& port = "") {
     using namespace dataset;
     Json checks;
     checks.Parse(checks_json->c_str());
@@ -166,14 +165,13 @@ inline int BindNamedOutput(IQuerier* querier, const std::string& name, std::stri
         return -1;
     };
     auto* registry =
-        querier ? static_cast<IDataSemanticsRegistryV1*>(querier->First(IID_DATA_SEMANTICS_REGISTRY_V1)) : nullptr;
-    auto* service =
-        querier ? static_cast<IOperatorDataContractV1*>(querier->First(IID_OPERATOR_DATA_CONTRACT_V1)) : nullptr;
+        querier ? static_cast<IDataSemanticsRegistry*>(querier->First(IID_DATA_SEMANTICS_REGISTRY)) : nullptr;
+    auto* service = querier ? static_cast<IOperatorDataContract*>(querier->First(IID_OPERATOR_DATA_CONTRACT)) : nullptr;
     if (!registry || !service) {
         Fail(e, "UNAVAILABLE", "named output metadata service unavailable");
         return failed();
     }
-    DataSemanticsSnapshotV1 previous;
+    DataSemanticsSnapshot previous;
     if (registry->Resolve(Get(check, "use_ref").c_str(), &previous, e)) return failed();
     Json document;
     document.Parse(previous.document_json->c_str());
@@ -198,7 +196,7 @@ inline int BindNamedOutput(IQuerier* querier, const std::string& name, std::stri
     Set(request, "name", exact.substr(dot + 1, at - dot - 1), ra);
     request.AddMember("expected_current_revision", static_cast<uint64_t>(std::stoull(exact.substr(at + 1))), ra)
         .AddMember("document", Copy(document, ra), ra);
-    OperatorContractSnapshotV1 recorded;
+    OperatorContractSnapshot recorded;
     if (service->RecordUse(Encode(request).c_str(), &recorded, e)) return failed();
     Json used;
     used.Parse(recorded.document_json->c_str());

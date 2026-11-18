@@ -43,14 +43,14 @@ inline bool ExplorationSelect(const char* sql, const std::string& dialect) {
     }
     return !quote && accept() && !first;
 }
-inline ExplorationValueV1 ExplorationText(const std::string& text, const std::string& type) {
+inline ExplorationValue ExplorationText(const std::string& text, const std::string& type) {
     if (type == "integer") {
         int64_t value = 0;
         auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
         if (parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size()) return value;
-        return ExplorationDecimalV1{text};
+        return ExplorationDecimal{text};
     }
-    if (type == "decimal") return ExplorationDecimalV1{text};
+    if (type == "decimal") return ExplorationDecimal{text};
     if (type == "number") {
         size_t end = 0;
         auto value = std::stod(text, &end);

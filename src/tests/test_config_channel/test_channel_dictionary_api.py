@@ -81,7 +81,7 @@ def bind(base, locator, name):
     assert preview['dictionary'] and preview['source_snapshot']['schema_state'] == 'known'
     document = preview['dictionary']
     standard = call(base, 'save', {'kind': 'standard', 'name': 'channel.field', 'expected_current_revision': 0,
-                   'document': {'schema_id': 'flowsql.data-standard.v1', 'title': '来源字段标准'}})
+                   'document': {'schema_id': 'flowsql.data-standard', 'title': '来源字段标准'}})
     document['fields'][0]['standard_refs'] = {'state': 'declared', 'value': [standard['exact_reference']], 'origin': 'manual'}
     document['fields'][0]['definition'] = {'state': 'declared', 'value': '人工说明', 'origin': 'manual'}
     saved = call(base, 'save', {'kind': 'dictionary', 'name': name, 'expected_current_revision': 0, 'document': document})
@@ -225,7 +225,12 @@ def main(host):
             assert request(base + '/api/channels/dataframe/preview', {'name': 'renamed'})[0] == 200
             assert channel(base, 'check', {'locator': renamed})['state'] == 'matched'
         with running(host, root / 'control', 'control') as (base, control, log, ports):
-            with running(host, root / 'remote', 'sources', ports[0]) as (_, source, source_log, _):
+            with running(host, root / 'remote', 'sources') as (_, source, source_log, source_ports):
+                # Each runtime owns its required local Config. Only providers are routed to the remote process.
+                for prefix in ('/channels/kafka', '/channels/dataframe', '/channels/database'):
+                    status, registered = request('http://127.0.0.1:' + str(ports[0]) + '/gateway/register',
+                                                 dict(prefix=prefix, address='127.0.0.1:' + str(source_ports[1])))
+                    assert status == 200, registered
                 until = time.monotonic() + 15
                 while True:
                     status, value = request(base + '/api/semantics/v1/channels/describe', {'locator': kafka})

@@ -11,7 +11,7 @@ constexpr size_t kNpmTypedEntityRowLimit = 512;
 constexpr uint64_t kNpmTypedStorageSoftLimit = kNpmMebibyte;
 
 struct NpmResultDeliveryEntity {
-    NpmEntityDescriptorV1 descriptor;
+    NpmEntityDescriptor descriptor;
     bool observing = false;
     bool consuming = false;
     bool RequiresEncoding() const noexcept { return observing || consuming; }

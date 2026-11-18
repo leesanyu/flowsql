@@ -35,8 +35,8 @@ rapidjson::Document Json(const std::string& text) {
     return document;
 }
 
-DataFrameResultV1 Run(const std::shared_ptr<arrow::RecordBatch>& batch, const std::string& workflow,
-                      const std::string& mode = "complete", uint32_t rows = 10000) {
+DataFrameResult Run(const std::shared_ptr<arrow::RecordBatch>& batch, const std::string& workflow,
+                    const std::string& mode = "complete", uint32_t rows = 10000) {
     const auto payload = Json("{\"workflow\":" + workflow + "}");
     return ExecuteDataFrameWorkflow(batch, DescribeArrowSchema(*batch->schema()), payload, mode, rows, 8 << 20,
                                     Deadline());
@@ -111,21 +111,21 @@ struct Fixture {
     }
 };
 
-int64_t Integer(const DataFrameResultV1& result, size_t row, size_t column) {
+int64_t Integer(const DataFrameResult& result, size_t row, size_t column) {
     if (auto value = std::get_if<int64_t>(&result.rows[row][column])) return *value;
     return INT64_MIN;
 }
-double Real(const DataFrameResultV1& result, size_t row, size_t column) {
+double Real(const DataFrameResult& result, size_t row, size_t column) {
     if (auto value = std::get_if<double>(&result.rows[row][column])) return *value;
     if (auto value = std::get_if<int64_t>(&result.rows[row][column])) return static_cast<double>(*value);
     return NAN;
 }
-std::string Text(const DataFrameResultV1& result, size_t row, size_t column) {
+std::string Text(const DataFrameResult& result, size_t row, size_t column) {
     if (auto value = std::get_if<std::string>(&result.rows[row][column])) return *value;
     return {};
 }
-std::string Decimal(const DataFrameResultV1& result, size_t row, size_t column) {
-    if (auto value = std::get_if<ExplorationDecimalV1>(&result.rows[row][column])) return value->text;
+std::string Decimal(const DataFrameResult& result, size_t row, size_t column) {
+    if (auto value = std::get_if<ExplorationDecimal>(&result.rows[row][column])) return value->text;
     return {};
 }
 

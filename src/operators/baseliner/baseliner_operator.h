@@ -12,17 +12,17 @@
 #include "evaluation.h"
 namespace flowsql::baseliner {
 class BaselinerOperator final : public IPlugin,
-                                public IBlockTransformOperatorV2,
-                                public IBlockTransformExecutionPolicyProviderV1,
-                                public IBlockTransformSourceConfigProviderV1,
-                                public IBlockTransformDataFrameInputProviderV1,
-                                public IBlockTransformResultOutputProviderV1,
-                                public IOperatorContractIdentityV1,
-                                public IOperatorConfigAdapterV1 {
+                                public IBlockTransformOperator,
+                                public IBlockTransformExecutionPolicyProvider,
+                                public IBlockTransformSourceConfigProvider,
+                                public IBlockTransformDataFrameInputProvider,
+                                public IBlockTransformResultOutputProvider,
+                                public IOperatorContractIdentity,
+                                public IOperatorConfigAdapter {
  public:
     void SetHostManagedContract() { host_managed_contract_ = true; }
-    OperatorComponentContractV1 ContractIdentity() const override { return contract_identity_; }
-    int ResolveInvocation(const char* request, std::string* result, DataSemanticsErrorV1* error) override;
+    OperatorComponentContract ContractIdentity() const override { return contract_identity_; }
+    int ResolveInvocation(const char* request, std::string* result, DataSemanticsError* error) override;
     int Load(IQuerier* querier) override;
     int Unload() override;
     int Start() override;
@@ -32,14 +32,14 @@ class BaselinerOperator final : public IPlugin,
     std::string Description() const override { return "Configured baseline evaluation and forecast"; }
     bool SupportsDataFrameInput() const override { return true; }
     bool SupportsResultOutput() const override { return true; }
-    int CreateTask(const BlockTransformTaskConfigV2& config, IBlockTransformTaskV2** task) override;
-    void ReleaseTask(IBlockTransformTaskV2* task) override;
+    int CreateTask(const BlockTransformTaskConfig& config, IBlockTransformTask** task) override;
+    void ReleaseTask(IBlockTransformTask* task) override;
     int RequiresAsyncExecution(const char* with_json, const char* exact_source, bool* output) const override;
     int NormalizeSourceConfig(const char* with_json, const char* exact_source, std::string* output,
                               std::string* error) const override;
 
  private:
-    OperatorComponentContractV1 contract_identity_;
+    OperatorComponentContract contract_identity_;
     IQuerier* querier_ = nullptr;
     bool started_ = false;
     bool host_managed_contract_ = false;

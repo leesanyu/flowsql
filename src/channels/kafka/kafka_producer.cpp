@@ -56,7 +56,7 @@ void Client::ConfigureProducer(rd_kafka_conf_t* config) {
         throw Failure(503, "PRODUCER_CAPABILITY_UNAVAILABLE", "sink_open");
     rd_kafka_conf_set_dr_msg_cb(config, Delivered);
 }
-int Client::Produce(const std::vector<KafkaProduceMessageV1>& messages, uint32_t timeout_ms, KafkaDeliveryV1* out) {
+int Client::Produce(const std::vector<KafkaProduceMessage>& messages, uint32_t timeout_ms, KafkaDelivery* out) {
     if (!out) return EINVAL;
     *out = {0, messages.size(), 0};
     std::lock_guard<std::mutex> operation(operation_mutex_);

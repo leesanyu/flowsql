@@ -62,31 +62,29 @@ struct Totals {
                     *item.second += std::stod(b.GetColumnByName(item.first)->GetScalar(r).ValueOrDie()->ToString());
     }
 };
-class DelaySession final : public IDatabaseAtomicSessionV1 {
+class DelaySession final : public IDatabaseAtomicSession {
  public:
-    DelaySession(std::shared_ptr<IDatabaseAtomicSessionV1> s, int delay, uint64_t* commits)
+    DelaySession(std::shared_ptr<IDatabaseAtomicSession> s, int delay, uint64_t* commits)
         : s_(std::move(s)), delay_(delay), commits_(commits) {}
-    DatabaseAtomicStatusV1 Begin() override { return s_->Begin(); }
-    DatabaseAtomicStatusV1 ExecutePrepared(const char* q, const DatabaseParameterV1* p, size_t n,
-                                           uint64_t* a) override {
+    DatabaseAtomicStatus Begin() override { return s_->Begin(); }
+    DatabaseAtomicStatus ExecutePrepared(const char* q, const DatabaseParameter* p, size_t n, uint64_t* a) override {
         return s_->ExecutePrepared(q, p, n, a);
     }
-    DatabaseAtomicStatusV1 CreateReader(const char* q, const DatabaseParameterV1* p, size_t n,
-                                        IBatchReader** r) override {
+    DatabaseAtomicStatus CreateReader(const char* q, const DatabaseParameter* p, size_t n, IBatchReader** r) override {
         return s_->CreateReader(q, p, n, r);
     }
-    DatabaseAtomicStatusV1 ReadDatabaseTime(int64_t* t) override { return s_->ReadDatabaseTime(t); }
-    DatabaseCommitResultV1 Commit() override {
+    DatabaseAtomicStatus ReadDatabaseTime(int64_t* t) override { return s_->ReadDatabaseTime(t); }
+    DatabaseCommitResult Commit() override {
         ++*commits_;
         if (delay_) std::this_thread::sleep_for(std::chrono::milliseconds(delay_));
         return s_->Commit();
     }
-    DatabaseAtomicStatusV1 Rollback() override { return s_->Rollback(); }
+    DatabaseAtomicStatus Rollback() override { return s_->Rollback(); }
     void Cancel() override { s_->Cancel(); }
     void Close() override { s_->Close(); }
 
  private:
-    std::shared_ptr<IDatabaseAtomicSessionV1> s_;
+    std::shared_ptr<IDatabaseAtomicSession> s_;
     int delay_;
     uint64_t* commits_;
 };
@@ -108,10 +106,10 @@ struct Querier : IQuerier {
     }
     void* First(const Guid& id) override {
         if (std::memcmp(&id, &IID_BASELINE_SERVICE, sizeof(id)) == 0) return static_cast<IBaselineService*>(&baseline);
-        if (std::memcmp(&id, &IID_BASELINE_STATE_CONTROL_SERVICE_V1, sizeof(id)) == 0)
-            return static_cast<IBaselineStateControlServiceV1*>(&baseline);
-        if (std::memcmp(&id, &IID_BASELINE_CHECKPOINT_SERVICE_V1, sizeof(id)) == 0)
-            return static_cast<IBaselineCheckpointServiceV1*>(&baseline);
+        if (std::memcmp(&id, &IID_BASELINE_STATE_CONTROL_SERVICE, sizeof(id)) == 0)
+            return static_cast<IBaselineStateControlService*>(&baseline);
+        if (std::memcmp(&id, &IID_BASELINE_CHECKPOINT_SERVICE, sizeof(id)) == 0)
+            return static_cast<IBaselineCheckpointService*>(&baseline);
         return nullptr;
     }
     int Traverse(const Guid& id, fntraverse f) override {
@@ -121,8 +119,8 @@ struct Querier : IQuerier {
 };
 struct Loaded {
     void* handle = nullptr;
-    IBlockTransformOperatorV2* provider = nullptr;
-    CppOperatorPluginDestroyCapabilityV2Fn destroy = nullptr;
+    IBlockTransformOperator* provider = nullptr;
+    CppOperatorPluginDestroyCapabilityFn destroy = nullptr;
     explicit Loaded(IQuerier& q) {
         handle = dlopen("./libflowsql_baseliner.so", RTLD_NOW | RTLD_LOCAL);
         if (!handle) std::cerr << dlerror() << '\n';
@@ -130,20 +128,19 @@ struct Loaded {
         auto version =
             reinterpret_cast<CppOperatorPluginAbiVersionFn>(dlsym(handle, kCppOperatorPluginAbiVersionSymbol));
         auto count = reinterpret_cast<CppOperatorPluginCountFn>(dlsym(handle, kCppOperatorPluginCountSymbol));
-        auto describe =
-            reinterpret_cast<CppOperatorPluginDescribeV2Fn>(dlsym(handle, kCppOperatorPluginDescribeV2Symbol));
-        auto create = reinterpret_cast<CppOperatorPluginCreateCapabilityV2Fn>(
-            dlsym(handle, kCppOperatorPluginCreateCapabilityV2Symbol));
-        destroy = reinterpret_cast<CppOperatorPluginDestroyCapabilityV2Fn>(
-            dlsym(handle, kCppOperatorPluginDestroyCapabilityV2Symbol));
+        auto describe = reinterpret_cast<CppOperatorPluginDescribeFn>(dlsym(handle, kCppOperatorPluginDescribeSymbol));
+        auto create = reinterpret_cast<CppOperatorPluginCreateCapabilityFn>(
+            dlsym(handle, kCppOperatorPluginCreateCapabilitySymbol));
+        destroy = reinterpret_cast<CppOperatorPluginDestroyCapabilityFn>(
+            dlsym(handle, kCppOperatorPluginDestroyCapabilitySymbol));
         assert(version && count && describe && create && destroy && version() == 2 && count() == 1);
-        CppOperatorDescriptorV2 descriptor{};
-        descriptor.struct_size = kCppOperatorDescriptorV2Size;
+        CppOperatorDescriptor descriptor{};
+        descriptor.struct_size = kCppOperatorDescriptorSize;
         assert(describe(0, &descriptor) == 0 && std::string(descriptor.category) == "explore" &&
                std::string(descriptor.name) == "baseliner");
-        assert(std::memcmp(&descriptor.contract_iid, &IID_BLOCK_TRANSFORM_OPERATOR_V2, sizeof(Guid)) == 0 &&
+        assert(std::memcmp(&descriptor.contract_iid, &IID_BLOCK_TRANSFORM_OPERATOR, sizeof(Guid)) == 0 &&
                describe(1, &descriptor) != 0);
-        provider = static_cast<IBlockTransformOperatorV2*>(create(0, &q));
+        provider = static_cast<IBlockTransformOperator*>(create(0, &q));
         assert(provider);
     }
     ~Loaded() {
@@ -152,11 +149,11 @@ struct Loaded {
     }
 };
 auto Task(const std::shared_ptr<Loaded>& owner, const std::string& with) {
-    BlockTransformTaskConfigV2 c{kBlockTransformTaskConfigV2Size, kBlockTransformContractVersionV2, "execution",
-                                 with.c_str(), ""};
-    IBlockTransformTaskV2* raw = nullptr;
+    BlockTransformTaskConfig c{kBlockTransformTaskConfigSize, kBlockTransformContractVersion, "execution", with.c_str(),
+                               ""};
+    IBlockTransformTask* raw = nullptr;
     assert(owner->provider->CreateTask(c, &raw) == 0 && raw);
-    return std::unique_ptr<IBlockTransformTaskV2, std::function<void(IBlockTransformTaskV2*)>>(
+    return std::unique_ptr<IBlockTransformTask, std::function<void(IBlockTransformTask*)>>(
         raw, [owner](auto* task) { owner->provider->ReleaseTask(task); });
 }
 std::string Configuration(const std::string& source, const std::string& table, bool poll, const std::string& key) {
@@ -182,7 +179,7 @@ std::string Configuration(const std::string& source, const std::string& table, b
     }
     return result;
 }
-class DelayTarget final : public IDatabaseChannel, public IDatabaseAtomicTargetV1 {
+class DelayTarget final : public IDatabaseChannel, public IDatabaseAtomicTarget {
  public:
     explicit DelayTarget(std::shared_ptr<IDatabaseChannel> target) : target_(std::move(target)) {}
     int delay_ms = 0;
@@ -204,10 +201,10 @@ class DelayTarget final : public IDatabaseChannel, public IDatabaseAtomicTargetV
     int ExecuteQueryArrow(const char*, std::vector<std::shared_ptr<arrow::RecordBatch>>*) override { return -1; }
     int WriteArrowBatches(const char*, const std::vector<std::shared_ptr<arrow::RecordBatch>>&) override { return -1; }
     int ExecuteSql(const char*) override { return -1; }
-    DatabaseAtomicStatusV1 AcquireAtomicSession(const DatabaseAtomicSessionOptionsV1& options,
-                                                std::shared_ptr<IDatabaseAtomicSessionV1>* output) override {
-        std::shared_ptr<IDatabaseAtomicSessionV1> session;
-        auto s = dynamic_cast<IDatabaseAtomicTargetV1*>(target_.get())->AcquireAtomicSession(options, &session);
+    DatabaseAtomicStatus AcquireAtomicSession(const DatabaseAtomicSessionOptions& options,
+                                              std::shared_ptr<IDatabaseAtomicSession>* output) override {
+        std::shared_ptr<IDatabaseAtomicSession> session;
+        auto s = dynamic_cast<IDatabaseAtomicTarget*>(target_.get())->AcquireAtomicSession(options, &session);
         if (s.ok()) *output = std::make_shared<DelaySession>(session, delay_ms, &commits);
         return s;
     }
@@ -272,14 +269,14 @@ void Scenario(int mode, const std::string& root) {
         if (mode == 0) {
             assert(engine.Open(c, &q.baseline, &q.baseline, &q.baseline) == 0);
         } else {
-            assert(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("sqlite.cost") == 0);
+            assert(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("sqlite.cost") == 0);
             if (mode >= 2) {
-                BlockTransformManagedSinkBindingV1 binding;
+                BlockTransformManagedSinkBinding binding;
                 binding.sink_channel = &target;
                 binding.target = "sqlite.cost";
                 binding.category = "sqlite";
                 binding.name = "cost";
-                Check(dynamic_cast<IBlockTransformManagedSinkTaskV1*>(task.get())->BindManagedSink(binding) == 0,
+                Check(dynamic_cast<IBlockTransformManagedSinkTask*>(task.get())->BindManagedSink(binding) == 0,
                       task->LastError());
             }
             std::shared_ptr<arrow::Schema> output;
@@ -303,7 +300,7 @@ void Scenario(int mode, const std::string& root) {
                     verification_cpu_ms += 1000. * (std::clock() - vcpu) / CLOCKS_PER_SEC;
                 }
             } else {
-                std::vector<BlockTransformOutputV1> outputs;
+                std::vector<BlockTransformOutput> outputs;
                 Check(task->ProcessBlock(batches[bucket], 0, &outputs) == 0, task->LastError());
                 auto vstart = Clock::now();
                 auto vcpu = std::clock();
@@ -319,7 +316,7 @@ void Scenario(int mode, const std::string& root) {
             std::vector<MaintenanceRow> rows;
             assert(engine.Maintain(&rows) == 0);
         } else {
-            BlockTransformTimeEventV1 event{};
+            BlockTransformTimeEvent event{};
             event.struct_size = sizeof(event);
             event.contract_version = 1;
             event.monotonic_now_ns =
@@ -329,14 +326,15 @@ void Scenario(int mode, const std::string& root) {
                                     std::chrono::system_clock::now().time_since_epoch())
                                     .count() +
                                 2000000000;
-            std::vector<BlockTransformOutputV1> outputs;
-            Check(task->OnTime(event, &outputs) == 0, task->LastError());
+            std::vector<BlockTransformOutput> outputs;
+            Check(dynamic_cast<IBlockTransformTimeDrivenTask*>(task.get())->OnTime(event, &outputs) == 0,
+                  task->LastError());
         }
         maintenance = Ms(Clock::now() - mstart);
         if (mode == 0)
             assert(engine.Finish() == 0);
         else {
-            std::vector<BlockTransformOutputV1> outputs;
+            std::vector<BlockTransformOutput> outputs;
             Check(task->Flush(&outputs) == 0, task->LastError());
         }
         elapsed = Ms(Clock::now() - start) - verification_ms;
@@ -346,12 +344,12 @@ void Scenario(int mode, const std::string& root) {
         owner.reset();
         commits = target.commits;
         if (mode >= 2) {
-            std::shared_ptr<IDatabaseAtomicSessionV1> session;
-            assert(dynamic_cast<IDatabaseAtomicTargetV1*>(channel.get())->AcquireAtomicSession({}, &session).ok());
+            std::shared_ptr<IDatabaseAtomicSession> session;
+            assert(dynamic_cast<IDatabaseAtomicTarget*>(channel.get())->AcquireAtomicSession({}, &session).ok());
             std::shared_ptr<arrow::RecordBatch> b;
             assert(ReadAtomicBatch(*session,
                                    "SELECT COUNT(*),SUM(observed),SUM(expected),SUM(lower),SUM(upper) FROM "
-                                   "baseline_results_v1 WHERE task_key='cost'",
+                                   "baseline_results WHERE task_key='cost'",
                                    {}, &b)
                        .ok());
             totals.count = std::stoll(b->column(0)->GetScalar(0).ValueOrDie()->ToString());
@@ -436,7 +434,7 @@ void InputScenario(int mode, const std::string& root) {
     DataFrame original;
     original.FromArrow(raw);
     Check(source->Write(&original) == 0, "raw source write");
-    BlockDataFrameInputBindingV1 binding;
+    BlockDataFrameInputBinding binding;
     binding.source = source;
     binding.exact_source = "dataframe.costinput";
     database::DatabasePlugin db;
@@ -528,8 +526,8 @@ void InputScenario(int mode, const std::string& root) {
                   "specified dual table row counts");
             results.Close();
             models.Close();
-            std::shared_ptr<IDatabaseAtomicSessionV1> session;
-            Check(dynamic_cast<IDatabaseAtomicTargetV1*>(channel.get())->AcquireAtomicSession({}, &session).ok(),
+            std::shared_ptr<IDatabaseAtomicSession> session;
+            Check(dynamic_cast<IDatabaseAtomicTarget*>(channel.get())->AcquireAtomicSession({}, &session).ok(),
                   "published result inspection");
             std::shared_ptr<arrow::RecordBatch> values;
             Check(ReadAtomicBatch(*session,

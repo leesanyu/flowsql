@@ -87,7 +87,7 @@ class Broker {
         Check(ok, "fixture_create_topic");
         topics_.push_back(name);
     }
-    void Produce(const std::string& topic, const KafkaMessageV1& message) {
+    void Produce(const std::string& topic, const KafkaMessage& message) {
         delivery_ = RD_KAFKA_RESP_ERR__IN_PROGRESS;
         Check(rd_kafka_producev(
                   producer_, RD_KAFKA_V_TOPIC(topic.c_str()), RD_KAFKA_V_PARTITION(0),
@@ -191,7 +191,7 @@ class Broker {
 };
 PacketSourceConfig Config() {
     return ParsePacketSourceConfig(Parse(
-        R"({"encoding":"flowsql_packet_v1","stream_id":"probe","observation_domain_id":"7","inputs":[{"source_id":0,"queue_id":0,"source_name":"eth0"}]})"));
+        R"({"encoding":"flowsql_packet","stream_id":"probe","observation_domain_id":"7","inputs":[{"source_id":0,"queue_id":0,"source_name":"eth0"}]})"));
 }
 PacketEnvelope Envelope(uint64_t poll, size_t packets = 1, uint8_t epoch = 1, int64_t timestamp = 100000000000LL) {
     PacketEnvelope e;
@@ -217,16 +217,16 @@ PacketEnvelope Envelope(uint64_t poll, size_t packets = 1, uint8_t epoch = 1, in
     raw[39] = 62;
     for (size_t i = 0; i < packets; ++i)
         e.packets.push_back({{timestamp, 96, 96, 1, 0, (poll - 1) * 256 + i + 1}, raw});
-    CaptureProgressV1 f;
+    CaptureProgress f;
     f.fact_sequence = poll;
     f.capture_time_ns = timestamp;
     f.packet_observed = packets != 0;
     f.source_idle_confirmed = packets == 0;
-    f.backlog = CaptureBacklogV1::kEmpty;
+    f.backlog = CaptureBacklog::kEmpty;
     e.progress.push_back(f);
     return e;
 }
-KafkaMessageV1 Message(uint64_t poll, size_t packets = 1, uint8_t epoch = 1, int64_t timestamp = 100000000000LL) {
+KafkaMessage Message(uint64_t poll, size_t packets = 1, uint8_t epoch = 1, int64_t timestamp = 100000000000LL) {
     return EncodePacket(Config(), Envelope(poll, packets, epoch, timestamp)).ValueOrDie();
 }
 std::string KafkaOptions(const rapidjson::Value& profile, const std::filesystem::path& root) {
@@ -257,7 +257,7 @@ void Connection(Runtime& runtime, const rapidjson::Value& profile) {
 void Add(Runtime& runtime, const std::string& name, const std::string& topic, const std::string& group,
          const char* policy = "after_success", uint32_t limit = 2097152) {
     auto request = Parse(
-        R"({"name":"packets","connection_name":"real","role":"source","topic":"packets","consumer_group":"npm","payload_kind":"packet","payload_options":{"source":{"encoding":"flowsql_packet_v1","stream_id":"probe","observation_domain_id":"7","inputs":[{"source_id":0,"queue_id":0,"source_name":"eth0"}]}}})");
+        R"({"name":"packets","connection_name":"real","role":"source","topic":"packets","consumer_group":"npm","payload_kind":"packet","payload_options":{"source":{"encoding":"flowsql_packet","stream_id":"probe","observation_domain_id":"7","inputs":[{"source_id":0,"queue_id":0,"source_name":"eth0"}]}}})");
     auto& a = request.GetAllocator();
     String(request, "name", name, a);
     String(request, "topic", topic, a);
@@ -269,9 +269,9 @@ void Add(Runtime& runtime, const std::string& name, const std::string& topic, co
 class Reader {
  public:
     explicit Reader(Runtime& runtime, const char* name, bool require = true) {
-        factory_ = static_cast<IBlockStreamReaderFactoryV1*>(runtime.loader->First(IID_BLOCK_STREAM_READER_FACTORY_V1));
+        factory_ = static_cast<IBlockStreamReaderFactory*>(runtime.loader->First(IID_BLOCK_STREAM_READER_FACTORY));
         Check(factory_, "reader_factory");
-        BlockStreamReaderConfigV1 c;
+        BlockStreamReaderConfig c;
         c.source_category = "kafka";
         c.source_name = name;
         c.task_id = "packet-real";
@@ -293,14 +293,14 @@ class Reader {
         return e;
     }
     void Ack(const BlockPollEvent& e) {
-        auto* a = dynamic_cast<IBlockStreamAcknowledgementV1*>(reader_);
+        auto* a = dynamic_cast<IBlockStreamAcknowledgement*>(reader_);
         Check(a && !a->AcknowledgeBlock(e.batch), "packet_ack");
         Check(!reader_->ReleaseBlock(e.batch), "packet_release");
     }
     int opened = 0;
 
  private:
-    IBlockStreamReaderFactoryV1* factory_ = nullptr;
+    IBlockStreamReaderFactory* factory_ = nullptr;
     IBlockStreamChannel* reader_ = nullptr;
 };
 void Data(const BlockPollEvent& e, int rows = 1) {
@@ -340,7 +340,7 @@ void RestartChild(const Json& plan, int generation) {
     const auto result = runtime.Terminal(id);
     Check(Text(result, "status") == "stopped", "npm_restart_terminal");
     const auto run = Text(result["managed_result"], "run_id");
-    auto total = runtime.Query("SELECT MAX(packets_ab+packets_ba) FROM npm_basic_ipv4_final_v1");
+    auto total = runtime.Query("SELECT MAX(packets_ab+packets_ba) FROM npm_basic_ipv4_final");
     Check(std::stoll(total.front()->column(0)->GetScalar(0).ValueOrDie()->ToString()) == 1, "old_session_state_reused");
     std::ofstream(root / ("run-" + std::to_string(generation))) << run;
 }
@@ -506,7 +506,7 @@ void Run(const Json& plan, const std::string& executable, const std::string& pla
                 const auto block = failed.Next();
                 Data(block);
                 broker.DenyRead(commit_group, username, RD_KAFKA_RESOURCE_GROUP);
-                auto* acknowledgement = dynamic_cast<IBlockStreamAcknowledgementV1*>(failed.operator->());
+                auto* acknowledgement = dynamic_cast<IBlockStreamAcknowledgement*>(failed.operator->());
                 Check(acknowledgement && acknowledgement->AcknowledgeBlock(block.batch) != 0, "commit_acl_accepted");
                 auto* packet_reader = dynamic_cast<PacketReader*>(failed.operator->());
                 Check(packet_reader && packet_reader->Diagnostics().find("commit_uncertain=1") != std::string::npos,

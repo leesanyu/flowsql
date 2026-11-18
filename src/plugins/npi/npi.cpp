@@ -14,11 +14,11 @@
 BEGIN_PLUGIN_REGIST(flowsql::NetworkProtocolIdentify)
 ____INTERFACE(flowsql::IID_PLUGIN, flowsql::IPlugin)
 ____INTERFACE(flowsql::IID_PROTOCOL, flowsql::IProtocol)
-____INTERFACE(flowsql::IID_PROTOCOL_PIPELINE_POOL_V1, flowsql::IProtocolPipelinePoolV1)
+____INTERFACE(flowsql::IID_PROTOCOL_PIPELINE_POOL, flowsql::IProtocolPipelinePool)
 END_PLUGIN_REGIST()
 
 namespace flowsql {
-static_assert(kProtocolPipelineMaxCapacityV1 == protocol::MAX_REGEX_CONCURRENCY,
+static_assert(kProtocolPipelineMaxCapacity == protocol::MAX_REGEX_CONCURRENCY,
               "pipeline pool capacity must match the Hyperscan scratch array");
 
 NetworkProtocolIdentify::NetworkProtocolIdentify() {
@@ -55,7 +55,7 @@ int NetworkProtocolIdentify::Option(const char* option) {
             } else if (key == "concurrency") {
                 if (!iter->value.IsInt()) return -1;
                 capacity = iter->value.GetInt();
-                if (capacity < 1 || capacity > kProtocolPipelineMaxCapacityV1) return -1;
+                if (capacity < 1 || capacity > kProtocolPipelineMaxCapacity) return -1;
             }
         }
 
@@ -109,7 +109,7 @@ int NetworkProtocolIdentify::Unload() {
 }
 
 void NetworkProtocolIdentify::Concurrency(int32_t number) {
-    if (number < 1 || number > kProtocolPipelineMaxCapacityV1) return;
+    if (number < 1 || number > kProtocolPipelineMaxCapacity) return;
 
     std::lock_guard<std::mutex> lock(pipeline_mutex_);
     if (pipeline_available_) return;

@@ -19,6 +19,8 @@ def request(url, payload=None, raw=None):
     if LOCAL_PROCESS is None:
         return http_request(url, payload, raw)
     path = url.removeprefix("http://local/api")
+    if path.startswith("/semantics/v1/"):
+        path = "/semantics/" + path.removeprefix("/semantics/v1/")
     if path == "/tasks/batch/execute":
         path = "/scheduler/batch/execute"
         payload = dict(sql=payload["sql_text"])
@@ -299,10 +301,15 @@ def main():
             (evidence / 'host.log').write_text(log.read_text())
             (evidence / 'http-results.json').write_text(json.dumps(dict(preflight=checked, use=use, input_ref=input_ref),ensure_ascii=False,indent=2))
     with tempfile.TemporaryDirectory(prefix='flowsql-contract-unavailable-') as temporary:
-        with running_contract_host(host,Path(temporary),provider=False) as (base,_,_):
-            payload=dict(operator=dict(category='builtin',name='passthrough'),parameters={},
-                         inputs=[dict(input_index=0,locator=dict(kind='dataframe',name='input'))])
-            assert call(base,'operators/check',payload,503)['code']=='UNAVAILABLE'
+        used = set()
+        ports = [port(used) for _ in range(4)]
+        rejected = subprocess.run([str(host), temporary, *map(str, ports), 'without-provider'],
+                                  cwd=host.parent, env=dict(os.environ, FLOWSQL_GATEWAY_ADDR=''),
+                                  input='quit\n', text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  timeout=25)
+        assert rejected.returncode != 0, rejected.stdout
+        assert 'semantics control provider unavailable' in rejected.stdout, rejected.stdout
+        assert 'CONTRACT_HOST_READY' not in rejected.stdout, rejected.stdout
     print('ordinary HTTP + Python Worker contract closure passed')
 
 

@@ -68,4 +68,4 @@ target_compile_definitions(netadapter_real_validation PRIVATE
     FLOWSQL_NPM_BASIC_PLUGIN_PATH="$<TARGET_FILE:flowsql_npm_basic>"
     FLOWSQL_VALIDATION_PROBE_PATH="$<TARGET_FILE:netadapter_validation_probe>")
 add_dependencies(netadapter_real_validation flowsql_netadapter flowsql_capture_af_packet flowsql_capture_pfring
-    flowsql_capture_af_xdp flowsql_database flowsql_builtin flowsql_catalog flowsql_npi flowsql_scheduler flowsql_binaddon flowsql_npm_basic netadapter_validation_probe)
+    flowsql_capture_af_xdp flowsql_database flowsql_builtin flowsql_catalog flowsql_npi flowsql_scheduler flowsql_binaddon flowsql_npm_basic netadapter_validation_probe flowsql_config_channel)

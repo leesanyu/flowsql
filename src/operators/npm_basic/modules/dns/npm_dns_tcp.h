@@ -15,14 +15,14 @@
 namespace flowsql::npm {
 
 /** Task-private DNS/TCP framer over borrowed shared-stream events. */
-class NpmDnsTcpFramerV1 final {
+class NpmDnsTcpFramer final {
  public:
-    explicit NpmDnsTcpFramerV1(NpmDnsUdpTrackerV1* transactions, std::shared_ptr<INpmTaskBudget> budget = {})
+    explicit NpmDnsTcpFramer(NpmDnsUdpTracker* transactions, std::shared_ptr<INpmTaskBudget> budget = {})
         : transactions_(transactions), budget_(std::move(budget)) {}
-    ~NpmDnsTcpFramerV1() { Abort(); }
-    int OnReadable(const NpmTcpStreamContextV1& context, INpmTcpStreamCursorV1& cursor,
-                   std::vector<NpmDnsUdpResultV1>* results);
-    int OnSessionEnd(uint64_t session_id, int64_t observed_at_ns, std::vector<NpmDnsUdpResultV1>* results);
+    ~NpmDnsTcpFramer() { Abort(); }
+    int OnReadable(const NpmTcpStreamContext& context, INpmTcpStreamCursor& cursor,
+                   std::vector<NpmDnsUdpResult>* results);
+    int OnSessionEnd(uint64_t session_id, int64_t observed_at_ns, std::vector<NpmDnsUdpResult>* results);
     void Abort() noexcept;
     size_t ActiveDirections() const noexcept { return directions_.size(); }
 
@@ -38,12 +38,12 @@ class NpmDnsTcpFramerV1 final {
         std::optional<int64_t> max_time_ns;
     };
     using DirectionKey = std::pair<uint64_t, NpmPacketDirection>;
-    int ConsumeData(DirectionState* state, const NpmTcpStreamContextV1& context, const NpmTcpStreamEventV1& event,
-                    std::vector<NpmDnsUdpResultV1>* results);
+    int ConsumeData(DirectionState* state, const NpmTcpStreamContext& context, const NpmTcpStreamEvent& event,
+                    std::vector<NpmDnsUdpResult>* results);
     void ForgetFrame(DirectionState* state) noexcept;
     void EraseDirection(const DirectionKey& key) noexcept;
 
-    NpmDnsUdpTrackerV1* transactions_ = nullptr;  // Owned by the enclosing DNS module.
+    NpmDnsUdpTracker* transactions_ = nullptr;  // Owned by the enclosing DNS module.
     std::shared_ptr<INpmTaskBudget> budget_;
     std::map<DirectionKey, DirectionState> directions_;
 };

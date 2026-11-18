@@ -25,9 +25,12 @@ channels:
   database_channels:
     - type: sqlite
       name: analysis
+      dataset_instance_id: analysis-dataset
       path: /srv/flowsql/data/analysis.db
       readonly: "true"
 ```
+
+持久通道必须填写非空且稳定的 `dataset_instance_id`，重新启动沿用原身份；新建通道可由管理接口生成并保存。缺失身份时启动失败，产品不会补写配置。
 
 探索进程只读取通道配置，不注册数据库管理 HTTP 路由，也不修改通道文件。SQLite 文件及所在目录必须对运行用户可读。
 只读挂载中的 WAL 数据库应由源库管理者提供可读取的一致快照，或正确提供现有 WAL/SHM 文件及相应权限；不要仅复制正在写入的主文件。
@@ -39,6 +42,7 @@ channels:
   database_channels:
     - type: mysql
       name: sales_mysql
+      dataset_instance_id: sales-mysql-dataset
       host: mysql-service
       port: "3306"
       database: analytics
@@ -46,6 +50,7 @@ channels:
       password: <部署私有凭证>
     - type: postgres
       name: sales_pg
+      dataset_instance_id: sales-pg-dataset
       host: postgres-service
       port: "5432"
       database: analytics
@@ -53,6 +58,7 @@ channels:
       password: <部署私有凭证>
     - type: clickhouse
       name: sales_ch
+      dataset_instance_id: sales-ch-dataset
       host: clickhouse-service
       port: "8123"
       database: analytics
@@ -77,7 +83,7 @@ cd build/output
 ```
 
 默认监听 `127.0.0.1:18910`。直接打开 `http://127.0.0.1:18910/exploration/`，或检查
-`http://127.0.0.1:18910/api/visualization/v1/capabilities`。修改部署文件中 visualization 服务级 `option` 的 JSON 可配置：
+`http://127.0.0.1:18910/api/visualization/capabilities`。修改部署文件中 visualization 服务级 `option` 的 JSON 可配置：
 
 ```json
 {"host":"127.0.0.1","port":18910,"static_dir":"exploration","limits":{"max_rows":10000,"max_bytes":8388608,"timeout_ms":30000,"max_active":2}}
@@ -100,7 +106,7 @@ visualization_upstream=http://127.0.0.1:18910
 ```
 
 若两服务位于不同容器，使用容器服务名并让探索服务监听 `0.0.0.0`。Web 直接代理
-`/exploration/` 与 `/api/visualization/v1/`，无需 Gateway 注册。浏览器从 Web 顶栏“数据探索”进入 `/explore`，
+`/exploration/` 与 `/api/visualization/`，无需 Gateway 注册。浏览器从 Web 顶栏“数据探索”进入 `/explore`，
 内容区显示同源 iframe。首次进入创建工作区，切换菜单保留各表的图表状态；离开时取消活动查询并暂停计算，返回后可继续编辑。
 整页刷新、主动重新加载工作区或服务重启后重新打开页面，会清空浏览器会话中的图表；不提供跨会话持久化。
 

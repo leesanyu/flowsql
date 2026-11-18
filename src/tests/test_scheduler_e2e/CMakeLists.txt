@@ -134,7 +134,7 @@ add_dependencies(test_pcap_web_e2e
     flowsql_pcapfile
     flowsql_scheduler
     flowsql_web
-)
+ flowsql_config_channel)
 target_link_libraries(test_pcap_web_e2e flowsql_common)
 target_compile_definitions(test_pcap_web_e2e PRIVATE
     FLOWSQL_NPI_PROTOCOLS_PATH="${CMAKE_SOURCE_DIR}/plugins/npi/conf/protocols.yml"
@@ -150,7 +150,7 @@ add_test(NAME test_pcap_web_e2e COMMAND ${CMAKE_BINARY_DIR}/output/test_pcap_web
 add_executable(test_netadapter_web_e2e test_netadapter_web_e2e.cpp)
 target_include_directories(test_netadapter_web_e2e PRIVATE ${CMAKE_SOURCE_DIR})
 add_thirddepen(test_netadapter_web_e2e arrow httplib rapidjson)
-add_dependencies(test_netadapter_web_e2e flowsql_common flowsql_netadapter flowsql_builtin flowsql_scheduler flowsql_web)
+add_dependencies(test_netadapter_web_e2e flowsql_common flowsql_netadapter flowsql_builtin flowsql_scheduler flowsql_web flowsql_config_channel flowsql_catalog)
 target_link_libraries(test_netadapter_web_e2e flowsql_common)
 target_compile_options(test_netadapter_web_e2e PRIVATE -UNDEBUG)
 set_target_properties(test_netadapter_web_e2e PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)

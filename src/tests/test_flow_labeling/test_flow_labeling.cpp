@@ -29,7 +29,7 @@
 
 namespace {
 
-constexpr const char* kSchemaId = "flowsql.io/flow-labeling/v1alpha1";
+constexpr const char* kSchemaId = "flowsql.io/flow-labeling";
 
 std::string ReadTemplate() {
     const std::filesystem::path repository =
@@ -51,8 +51,8 @@ flowsql::ConfigChannelSnapshot MakeSnapshot(const std::string& schema_id, const 
     return snapshot;
 }
 
-flowsql::FlowLabelingCompileRequestV1 MakeRequest(const flowsql::ConfigChannelSnapshot* snapshot) {
-    flowsql::FlowLabelingCompileRequestV1 request;
+flowsql::FlowLabelingCompileRequest MakeRequest(const flowsql::ConfigChannelSnapshot* snapshot) {
+    flowsql::FlowLabelingCompileRequest request;
     request.snapshot = snapshot;
     request.reserved_module_state_bytes = 64ULL * 1024ULL * 1024ULL;
     request.max_labels = 10000;
@@ -171,10 +171,10 @@ void TestIsolatedEalStartup(const char* library) {
             const char* options[] = {option.empty() ? nullptr : option.c_str()};
             if (loader->Load(flowsql::get_absolute_process_path(), plugins, options, 1) != 0) _exit(1);
             auto* provider =
-                static_cast<flowsql::IFlowLabelingProviderV1*>(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER_V1));
+                static_cast<flowsql::IFlowLabelingProvider*>(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER));
             if (provider == nullptr || loader->StartAll() != 0) _exit(2);
-            flowsql::FlowLabelingDiagnosticV1 diagnostic;
-            if (provider->RuntimeStatus(&diagnostic) != flowsql::FlowLabelingErrorV1::kNone) _exit(3);
+            flowsql::FlowLabelingDiagnostic diagnostic;
+            if (provider->RuntimeStatus(&diagnostic) != flowsql::FlowLabelingError::kNone) _exit(3);
             loader->StopAll();
             if (loader->Unload() != 0) _exit(4);
             _exit(0);
@@ -200,9 +200,9 @@ void TestIsolatedEalStartup(const char* library) {
         if (loader->Load(flowsql::get_absolute_process_path(), plugins, options, 2) != 0) _exit(6);
         if (loader->StartAll() == 0) _exit(7);
         auto* provider =
-            static_cast<flowsql::IFlowLabelingProviderV1*>(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER_V1));
-        flowsql::FlowLabelingDiagnosticV1 diagnostic;
-        if (provider == nullptr || provider->RuntimeStatus(&diagnostic) != flowsql::FlowLabelingErrorV1::kUnavailable) {
+            static_cast<flowsql::IFlowLabelingProvider*>(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER));
+        flowsql::FlowLabelingDiagnostic diagnostic;
+        if (provider == nullptr || provider->RuntimeStatus(&diagnostic) != flowsql::FlowLabelingError::kUnavailable) {
             _exit(8);
         }
         loader->StopAll();
@@ -217,7 +217,7 @@ void TestIsolatedEalStartup(const char* library) {
 }
 
 std::string EmptyConfig(const std::string& algorithm = "scalar", uint64_t runtime_bytes = 4 * 1024 * 1024) {
-    return "api_version: flowsql.io/flow-labeling/v1alpha1\n"
+    return "api_version: flowsql.io/flow-labeling\n"
            "kind: FlowLabelingSet\n"
            "spec:\n"
            "  engine:\n"
@@ -241,7 +241,7 @@ std::string EmptyConfig(const std::string& algorithm = "scalar", uint64_t runtim
 }
 
 std::string FullConfig() {
-    return R"(api_version: flowsql.io/flow-labeling/v1alpha1
+    return R"(api_version: flowsql.io/flow-labeling
 kind: FlowLabelingSet
 metadata:
   name: corp-primary-labels
@@ -415,7 +415,7 @@ std::string SingleRuleConfig(bool match_all) {
 }
 
 std::string CompressionEquivalenceConfig(bool conflicting_masks = false) {
-    return R"(api_version: flowsql.io/flow-labeling/v1alpha1
+    return R"(api_version: flowsql.io/flow-labeling
 kind: FlowLabelingSet
 spec:
   engine:
@@ -447,7 +447,7 @@ spec:
 }
 
 std::string PresenceBitmapConfig() {
-    return R"(api_version: flowsql.io/flow-labeling/v1alpha1
+    return R"(api_version: flowsql.io/flow-labeling
 kind: FlowLabelingSet
 spec:
   engine:
@@ -503,7 +503,7 @@ std::string SamePredicateDifferentLabelsConfig() {
 }
 
 std::string BudgetConfig(uint32_t rule_count) {
-    std::string yaml = R"(api_version: flowsql.io/flow-labeling/v1alpha1
+    std::string yaml = R"(api_version: flowsql.io/flow-labeling
 kind: FlowLabelingSet
 spec:
   engine:
@@ -531,7 +531,7 @@ spec:
     return yaml;
 }
 
-void SetIpv4(const char* value, flowsql::FlowLabelEndpointFactsV1* endpoint) {
+void SetIpv4(const char* value, flowsql::FlowLabelEndpointFacts* endpoint) {
     static std::deque<flowsql::network::IPv4Address> owners;
     owners.emplace_back();
     assert(inet_pton(AF_INET, value, owners.back().bytes) == 1);
@@ -539,7 +539,7 @@ void SetIpv4(const char* value, flowsql::FlowLabelEndpointFactsV1* endpoint) {
     endpoint->ip_valid = 1;
 }
 
-void SetIpv6(const char* value, flowsql::FlowLabelEndpointFactsV1* endpoint) {
+void SetIpv6(const char* value, flowsql::FlowLabelEndpointFacts* endpoint) {
     static std::deque<flowsql::network::IPv6Address> owners;
     owners.emplace_back();
     assert(inet_pton(AF_INET6, value, owners.back().bytes) == 1);
@@ -547,13 +547,13 @@ void SetIpv6(const char* value, flowsql::FlowLabelEndpointFactsV1* endpoint) {
     endpoint->ip_valid = 1;
 }
 
-void SetMac(const uint8_t (&value)[6], flowsql::FlowLabelEndpointFactsV1* endpoint) {
+void SetMac(const uint8_t (&value)[6], flowsql::FlowLabelEndpointFacts* endpoint) {
     std::memcpy(endpoint->mac, value, sizeof(value));
     endpoint->mac_valid = 1;
 }
 
-flowsql::FlowLabelFactsV1 WebFacts() {
-    flowsql::FlowLabelFactsV1 facts;
+flowsql::FlowLabelFacts WebFacts() {
+    flowsql::FlowLabelFacts facts;
     facts.observation_domain_id = 7;
     facts.ip_family = 4;
     facts.transport_protocol = 6;
@@ -570,20 +570,20 @@ flowsql::FlowLabelFactsV1 WebFacts() {
     return facts;
 }
 
-flowsql::FlowLabelFactsV1 Reverse(flowsql::FlowLabelFactsV1 facts) {
+flowsql::FlowLabelFacts Reverse(flowsql::FlowLabelFacts facts) {
     std::swap(facts.source, facts.destination);
     return facts;
 }
 
-flowsql::FlowLabelFactsV1 MacFacts() {
-    flowsql::FlowLabelFactsV1 facts;
+flowsql::FlowLabelFacts MacFacts() {
+    flowsql::FlowLabelFacts facts;
     const uint8_t gateway[6] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55};
     SetMac(gateway, &facts.source);
     return facts;
 }
 
-flowsql::FlowLabelFactsV1 Ipv6Facts() {
-    flowsql::FlowLabelFactsV1 facts;
+flowsql::FlowLabelFacts Ipv6Facts() {
+    flowsql::FlowLabelFacts facts;
     facts.ip_family = 6;
     facts.transport_protocol = 17;
     facts.transport_valid = 1;
@@ -599,8 +599,8 @@ flowsql::FlowLabelFactsV1 Ipv6Facts() {
     return facts;
 }
 
-flowsql::FlowLabelFactsV1 NativeMatrixFacts() {
-    flowsql::FlowLabelFactsV1 facts;
+flowsql::FlowLabelFacts NativeMatrixFacts() {
+    flowsql::FlowLabelFacts facts;
     facts.observation_domain_id = 99;
     facts.ip_family = 4;
     facts.transport_protocol = 17;
@@ -617,17 +617,17 @@ flowsql::FlowLabelFactsV1 NativeMatrixFacts() {
     return facts;
 }
 
-void ExpectFailure(flowsql::IFlowLabelingProviderV1* provider, const std::string& yaml,
-                   flowsql::FlowLabelingErrorV1 expected, const char* expected_path = nullptr,
-                   flowsql::FlowLabelingCompileRequestV1 request = {}) {
+void ExpectFailure(flowsql::IFlowLabelingProvider* provider, const std::string& yaml,
+                   flowsql::FlowLabelingError expected, const char* expected_path = nullptr,
+                   flowsql::FlowLabelingCompileRequest request = {}) {
     const auto snapshot = MakeSnapshot(kSchemaId, yaml);
     if (request.snapshot == nullptr && request.reserved_module_state_bytes == 0 && request.max_labels == 0 &&
         request.max_logical_rules == 0 && request.max_compiled_rules == 0) {
         request = MakeRequest(&snapshot);
     }
     request.snapshot = &snapshot;
-    auto* sentinel = reinterpret_cast<flowsql::IFlowLabelMatcherV1*>(static_cast<uintptr_t>(0x1));
-    flowsql::FlowLabelingDiagnosticV1 diagnostic;
+    auto* sentinel = reinterpret_cast<flowsql::IFlowLabelMatcher*>(static_cast<uintptr_t>(0x1));
+    flowsql::FlowLabelingDiagnostic diagnostic;
     const auto actual = provider->CreateMatcher(request, &sentinel, &diagnostic);
     if (actual != expected) {
         std::cerr << "expected error " << static_cast<int>(expected) << ", got " << static_cast<int>(actual) << " at "
@@ -636,7 +636,7 @@ void ExpectFailure(flowsql::IFlowLabelingProviderV1* provider, const std::string
     }
     assert(actual == expected);
     assert(diagnostic.error == expected);
-    assert(sentinel == reinterpret_cast<flowsql::IFlowLabelMatcherV1*>(static_cast<uintptr_t>(0x1)));
+    assert(sentinel == reinterpret_cast<flowsql::IFlowLabelMatcher*>(static_cast<uintptr_t>(0x1)));
     if (expected_path != nullptr && (diagnostic.path == nullptr || std::string(diagnostic.path) != expected_path)) {
         std::cerr << "expected path " << expected_path << ", got " << (diagnostic.path ? diagnostic.path : "<none>")
                   << '\n';
@@ -644,20 +644,20 @@ void ExpectFailure(flowsql::IFlowLabelingProviderV1* provider, const std::string
     }
 }
 
-void TestStrictFailures(flowsql::IFlowLabelingProviderV1* provider) {
-    ExpectFailure(provider, R"(api_version: flowsql.io/flow-labeling/v1alpha1
+void TestStrictFailures(flowsql::IFlowLabelingProvider* provider) {
+    ExpectFailure(provider, R"(api_version: flowsql.io/flow-labeling
 kind: FlowLabelingSet
 unknown: true
 spec: {}
 )",
-                  flowsql::FlowLabelingErrorV1::kInvalidConfig, "/unknown");
+                  flowsql::FlowLabelingError::kInvalidConfig, "/unknown");
 
-    ExpectFailure(provider, R"(api_version: flowsql.io/flow-labeling/v1alpha1
-api_version: flowsql.io/flow-labeling/v1alpha1
+    ExpectFailure(provider, R"(api_version: flowsql.io/flow-labeling
+api_version: flowsql.io/flow-labeling
 kind: FlowLabelingSet
 spec: {}
 )",
-                  flowsql::FlowLabelingErrorV1::kInvalidConfig, "/api_version");
+                  flowsql::FlowLabelingError::kInvalidConfig, "/api_version");
 
     std::string duplicate_priority = EmptyConfig();
     const size_t empty_labels = duplicate_priority.find("  labels: []");
@@ -669,9 +669,9 @@ spec: {}
     - id: 2
       priority: 100
       name: second)");
-    ExpectFailure(provider, duplicate_priority, flowsql::FlowLabelingErrorV1::kInvalidConfig);
+    ExpectFailure(provider, duplicate_priority, flowsql::FlowLabelingError::kInvalidConfig);
 
-    ExpectFailure(provider, EmptyConfig("rvv"), flowsql::FlowLabelingErrorV1::kUnsupportedAlgorithm,
+    ExpectFailure(provider, EmptyConfig("rvv"), flowsql::FlowLabelingError::kUnsupportedAlgorithm,
                   "/spec/engine/algorithm");
 
     std::string over_budget = EmptyConfig("scalar", 64ULL * 1024ULL * 1024ULL);
@@ -681,28 +681,27 @@ spec: {}
     - id: 1
       priority: 1
       name: one)");
-    ExpectFailure(provider, over_budget, flowsql::FlowLabelingErrorV1::kBudgetExceeded,
-                  "/spec/engine/max_runtime_bytes");
+    ExpectFailure(provider, over_budget, flowsql::FlowLabelingError::kBudgetExceeded, "/spec/engine/max_runtime_bytes");
 
     auto limited = MakeRequest(nullptr);
     limited.max_labels = 1;
-    ExpectFailure(provider, FullConfig(), flowsql::FlowLabelingErrorV1::kLimitExceeded,
-                  "/spec/engine/limits/max_labels", limited);
+    ExpectFailure(provider, FullConfig(), flowsql::FlowLabelingError::kLimitExceeded, "/spec/engine/limits/max_labels",
+                  limited);
 
     limited = MakeRequest(nullptr);
     limited.max_compiled_rules = 1;
-    ExpectFailure(provider, FullConfig(), flowsql::FlowLabelingErrorV1::kLimitExceeded,
+    ExpectFailure(provider, FullConfig(), flowsql::FlowLabelingError::kLimitExceeded,
                   "/spec/engine/limits/max_compiled_rules", limited);
 
-    ExpectFailure(provider, SingleRuleConfig(false), flowsql::FlowLabelingErrorV1::kLimitExceeded, "/spec/rules");
-    ExpectFailure(provider, SamePredicateDifferentLabelsConfig(), flowsql::FlowLabelingErrorV1::kLimitExceeded,
+    ExpectFailure(provider, SingleRuleConfig(false), flowsql::FlowLabelingError::kLimitExceeded, "/spec/rules");
+    ExpectFailure(provider, SamePredicateDifferentLabelsConfig(), flowsql::FlowLabelingError::kLimitExceeded,
                   "/spec/rules");
     const auto deduplicated_snapshot = MakeSnapshot(kSchemaId, SingleRuleConfig(true));
     auto deduplicated_request = MakeRequest(&deduplicated_snapshot);
-    flowsql::IFlowLabelMatcherV1* deduplicated = nullptr;
-    flowsql::FlowLabelingDiagnosticV1 diagnostic;
+    flowsql::IFlowLabelMatcher* deduplicated = nullptr;
+    flowsql::FlowLabelingDiagnostic diagnostic;
     assert(provider->CreateMatcher(deduplicated_request, &deduplicated, &diagnostic) ==
-           flowsql::FlowLabelingErrorV1::kNone);
+           flowsql::FlowLabelingError::kNone);
     assert(deduplicated != nullptr);
     deduplicated->Release();
 
@@ -723,37 +722,36 @@ spec: {}
         - field: arbitrary_offset
           value: 1
           mask: 1)");
-    ExpectFailure(provider, unknown_match, flowsql::FlowLabelingErrorV1::kInvalidConfig);
+    ExpectFailure(provider, unknown_match, flowsql::FlowLabelingError::kInvalidConfig);
 
     auto budget_request = MakeRequest(nullptr);
     budget_request.reserved_module_state_bytes = 1200000;
-    ExpectFailure(provider, BudgetConfig(256), flowsql::FlowLabelingErrorV1::kBudgetExceeded,
+    ExpectFailure(provider, BudgetConfig(256), flowsql::FlowLabelingError::kBudgetExceeded,
                   "/spec/engine/max_runtime_bytes", budget_request);
 
     const auto budget_snapshot = MakeSnapshot(kSchemaId, BudgetConfig(256));
     budget_request = MakeRequest(&budget_snapshot);
     budget_request.reserved_module_state_bytes = 1300000;
-    flowsql::IFlowLabelMatcherV1* budget_matcher = nullptr;
-    assert(provider->CreateMatcher(budget_request, &budget_matcher, &diagnostic) ==
-           flowsql::FlowLabelingErrorV1::kNone);
+    flowsql::IFlowLabelMatcher* budget_matcher = nullptr;
+    assert(provider->CreateMatcher(budget_request, &budget_matcher, &diagnostic) == flowsql::FlowLabelingError::kNone);
     assert(budget_matcher != nullptr);
     budget_matcher->Release();
 }
 
-void TestCompressionEquivalence(flowsql::IFlowLabelingProviderV1* provider) {
-    flowsql::FlowLabelingDiagnosticV1 diagnostic;
+void TestCompressionEquivalence(flowsql::IFlowLabelingProvider* provider) {
+    flowsql::FlowLabelingDiagnostic diagnostic;
     const auto snapshot = MakeSnapshot(kSchemaId, CompressionEquivalenceConfig());
     auto request = MakeRequest(&snapshot);
-    flowsql::IFlowLabelMatcherV1* matcher = nullptr;
-    assert(provider->CreateMatcher(request, &matcher, &diagnostic) == flowsql::FlowLabelingErrorV1::kNone);
+    flowsql::IFlowLabelMatcher* matcher = nullptr;
+    assert(provider->CreateMatcher(request, &matcher, &diagnostic) == flowsql::FlowLabelingError::kNone);
 
-    flowsql::FlowLabelFactsV1 matching;
+    flowsql::FlowLabelFacts matching;
     matching.observation_domain_id = 297;
     matching.ip_family = 4;
     SetIpv4("192.0.2.1", &matching.source);
     matching.source.port = 1500;
     matching.source.port_valid = 1;
-    std::vector<flowsql::FlowLabelFactsV1> facts = {matching, Reverse(matching)};
+    std::vector<flowsql::FlowLabelFacts> facts = {matching, Reverse(matching)};
     auto range_miss = matching;
     range_miss.observation_domain_id = 289;
     facts.push_back(range_miss);
@@ -777,21 +775,21 @@ void TestCompressionEquivalence(flowsql::IFlowLabelingProviderV1* provider) {
 
     const auto conflict_snapshot = MakeSnapshot(kSchemaId, CompressionEquivalenceConfig(true));
     request = MakeRequest(&conflict_snapshot);
-    flowsql::IFlowLabelMatcherV1* conflict_matcher = nullptr;
-    assert(provider->CreateMatcher(request, &conflict_matcher, &diagnostic) == flowsql::FlowLabelingErrorV1::kNone);
+    flowsql::IFlowLabelMatcher* conflict_matcher = nullptr;
+    assert(provider->CreateMatcher(request, &conflict_matcher, &diagnostic) == flowsql::FlowLabelingError::kNone);
     uint32_t conflict_label = 99;
     assert(conflict_matcher->ClassifyBatch(&matching, 1, &conflict_label) == 0 && conflict_label == 0);
     conflict_matcher->Release();
 }
 
-void TestPresenceBitmap(flowsql::IFlowLabelingProviderV1* provider) {
+void TestPresenceBitmap(flowsql::IFlowLabelingProvider* provider) {
     const auto snapshot = MakeSnapshot(kSchemaId, PresenceBitmapConfig());
     auto request = MakeRequest(&snapshot);
-    flowsql::FlowLabelingDiagnosticV1 diagnostic;
-    flowsql::IFlowLabelMatcherV1* matcher = nullptr;
-    assert(provider->CreateMatcher(request, &matcher, &diagnostic) == flowsql::FlowLabelingErrorV1::kNone);
+    flowsql::FlowLabelingDiagnostic diagnostic;
+    flowsql::IFlowLabelMatcher* matcher = nullptr;
+    assert(provider->CreateMatcher(request, &matcher, &diagnostic) == flowsql::FlowLabelingError::kNone);
 
-    flowsql::FlowLabelFactsV1 all_present;
+    flowsql::FlowLabelFacts all_present;
     all_present.ip_family = 4;
     all_present.transport_valid = 1;
     all_present.source.mac_valid = 1;
@@ -803,7 +801,7 @@ void TestPresenceBitmap(flowsql::IFlowLabelingProviderV1* provider) {
     all_present.vlan[0].valid = 1;
     all_present.vlan[1].valid = 1;
 
-    std::vector<flowsql::FlowLabelFactsV1> facts = {all_present};
+    std::vector<flowsql::FlowLabelFacts> facts = {all_present};
     for (size_t missing = 0; missing < 9; ++missing) {
         auto candidate = all_present;
         switch (missing) {
@@ -847,12 +845,12 @@ void TestPresenceBitmap(flowsql::IFlowLabelingProviderV1* provider) {
     matcher->Release();
 }
 
-void ClassifyConcurrently(flowsql::IFlowLabelMatcherV1* matcher) {
+void ClassifyConcurrently(flowsql::IFlowLabelMatcher* matcher) {
     constexpr uint32_t kBatchSize = 16;
     constexpr int kIterations = 200;
     std::atomic<bool> succeeded{true};
     const auto classify = [&]() {
-        std::vector<flowsql::FlowLabelFactsV1> facts(kBatchSize, WebFacts());
+        std::vector<flowsql::FlowLabelFacts> facts(kBatchSize, WebFacts());
         std::vector<uint32_t> labels(kBatchSize, 99);
         for (int iteration = 0; iteration < kIterations; ++iteration) {
             std::fill(labels.begin(), labels.end(), 99);
@@ -860,7 +858,7 @@ void ClassifyConcurrently(flowsql::IFlowLabelMatcherV1* matcher) {
             for (uint32_t label : labels) {
                 if (label != 1001) succeeded = false;
             }
-            flowsql::FlowPrimaryLabelViewV1 view;
+            flowsql::FlowPrimaryLabelView view;
             if (!matcher->FindLabel(1001, &view) || view.label_id != 1001 || view.priority != 3000) {
                 succeeded = false;
             }
@@ -877,8 +875,8 @@ void ClassifyConcurrently(flowsql::IFlowLabelMatcherV1* matcher) {
     assert(succeeded.load());
 }
 
-void TestClassification(flowsql::IFlowLabelMatcherV1* matcher) {
-    std::vector<flowsql::FlowLabelFactsV1> facts;
+void TestClassification(flowsql::IFlowLabelMatcher* matcher) {
+    std::vector<flowsql::FlowLabelFacts> facts;
     facts.push_back(WebFacts());
     facts.push_back(Reverse(WebFacts()));
     auto missing_ip = WebFacts();
@@ -912,7 +910,7 @@ void TestClassification(flowsql::IFlowLabelMatcherV1* matcher) {
     };
     assert(labels == expected);
 
-    flowsql::FlowPrimaryLabelViewV1 view;
+    flowsql::FlowPrimaryLabelView view;
     assert(matcher->FindLabel(1001, &view));
     assert(view.label_id == 1001 && view.priority == 3000);
     assert(std::string(view.name) == "corp-web");
@@ -921,7 +919,7 @@ void TestClassification(flowsql::IFlowLabelMatcherV1* matcher) {
     assert(!matcher->FindLabel(0, &view));
     assert(!matcher->FindLabel(9999, &view));
 
-    flowsql::FlowLabelFactsV1 invalid;
+    flowsql::FlowLabelFacts invalid;
     invalid.struct_size = 0;
     uint32_t invalid_output = 77;
     assert(matcher->ClassifyBatch(&invalid, 1, &invalid_output) != 0);
@@ -945,40 +943,38 @@ int main(int argc, char** argv) {
     const char* invalid_options[] = {"eal_memory_mib=511"};
     assert(loader->Load(flowsql::get_absolute_process_path(), plugins, invalid_options, 1) != 0);
     assert(loader->First(flowsql::IID_PLUGIN) == nullptr);
-    assert(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER_V1) == nullptr);
+    assert(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER) == nullptr);
 
     const std::string option = "eal_memory_mib=512;eal_lcore_cpu=" + std::to_string(FirstAvailableCpu());
     const char* options[] = {option.c_str()};
     assert(loader->Load(flowsql::get_absolute_process_path(), plugins, options, 1) == 0);
 
     auto* plugin = static_cast<flowsql::IPlugin*>(loader->First(flowsql::IID_PLUGIN));
-    auto* provider =
-        static_cast<flowsql::IFlowLabelingProviderV1*>(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER_V1));
+    auto* provider = static_cast<flowsql::IFlowLabelingProvider*>(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER));
     assert(plugin != nullptr && provider != nullptr);
     assert(plugin->Option(nullptr) != 0);
 
-    flowsql::FlowLabelingDiagnosticV1 diagnostic;
-    assert(provider->RuntimeStatus(&diagnostic) == flowsql::FlowLabelingErrorV1::kUnavailable);
+    flowsql::FlowLabelingDiagnostic diagnostic;
+    assert(provider->RuntimeStatus(&diagnostic) == flowsql::FlowLabelingError::kUnavailable);
 
     const auto empty_snapshot = MakeSnapshot(kSchemaId, EmptyConfig());
     auto request = MakeRequest(&empty_snapshot);
-    auto* sentinel = reinterpret_cast<flowsql::IFlowLabelMatcherV1*>(static_cast<uintptr_t>(0x1));
-    assert(provider->CreateMatcher(request, &sentinel, &diagnostic) == flowsql::FlowLabelingErrorV1::kUnavailable);
-    assert(sentinel == reinterpret_cast<flowsql::IFlowLabelMatcherV1*>(static_cast<uintptr_t>(0x1)));
+    auto* sentinel = reinterpret_cast<flowsql::IFlowLabelMatcher*>(static_cast<uintptr_t>(0x1));
+    assert(provider->CreateMatcher(request, &sentinel, &diagnostic) == flowsql::FlowLabelingError::kUnavailable);
+    assert(sentinel == reinterpret_cast<flowsql::IFlowLabelMatcher*>(static_cast<uintptr_t>(0x1)));
 
     assert(loader->StartAll() == 0);
     assert(loader->StartAll() == 0);
-    assert(provider->RuntimeStatus(&diagnostic) == flowsql::FlowLabelingErrorV1::kNone);
+    assert(provider->RuntimeStatus(&diagnostic) == flowsql::FlowLabelingError::kNone);
 
     auto invalid_request = request;
     invalid_request.struct_size = 0;
-    ExpectFailure(provider, EmptyConfig(), flowsql::FlowLabelingErrorV1::kInvalidSnapshot, "/snapshot",
-                  invalid_request);
+    ExpectFailure(provider, EmptyConfig(), flowsql::FlowLabelingError::kInvalidSnapshot, "/snapshot", invalid_request);
     const auto wrong_schema = MakeSnapshot("flowsql.io/other/v1", EmptyConfig());
     invalid_request = MakeRequest(&wrong_schema);
     assert(provider->CreateMatcher(invalid_request, &sentinel, &diagnostic) ==
-           flowsql::FlowLabelingErrorV1::kInvalidSnapshot);
-    assert(sentinel == reinterpret_cast<flowsql::IFlowLabelMatcherV1*>(static_cast<uintptr_t>(0x1)));
+           flowsql::FlowLabelingError::kInvalidSnapshot);
+    assert(sentinel == reinterpret_cast<flowsql::IFlowLabelMatcher*>(static_cast<uintptr_t>(0x1)));
 
     TestStrictFailures(provider);
     TestCompressionEquivalence(provider);
@@ -986,14 +982,14 @@ int main(int argc, char** argv) {
 
     const auto template_snapshot = MakeSnapshot(kSchemaId, ReadTemplate());
     request = MakeRequest(&template_snapshot);
-    flowsql::IFlowLabelMatcherV1* template_matcher = nullptr;
-    assert(provider->CreateMatcher(request, &template_matcher, &diagnostic) == flowsql::FlowLabelingErrorV1::kNone);
+    flowsql::IFlowLabelMatcher* template_matcher = nullptr;
+    assert(provider->CreateMatcher(request, &template_matcher, &diagnostic) == flowsql::FlowLabelingError::kNone);
     assert(template_matcher != nullptr);
 
     const auto full_snapshot = MakeSnapshot(kSchemaId, FullConfig());
     request = MakeRequest(&full_snapshot);
-    flowsql::IFlowLabelMatcherV1* matcher = nullptr;
-    assert(provider->CreateMatcher(request, &matcher, &diagnostic) == flowsql::FlowLabelingErrorV1::kNone);
+    flowsql::IFlowLabelMatcher* matcher = nullptr;
+    assert(provider->CreateMatcher(request, &matcher, &diagnostic) == flowsql::FlowLabelingError::kNone);
     assert(matcher != nullptr);
     TestClassification(matcher);
     ClassifyConcurrently(matcher);
@@ -1004,16 +1000,16 @@ int main(int argc, char** argv) {
     default_yaml.replace(scalar, std::strlen("    algorithm: scalar"), "    algorithm: default");
     const auto default_snapshot = MakeSnapshot(kSchemaId, default_yaml);
     request = MakeRequest(&default_snapshot);
-    flowsql::IFlowLabelMatcherV1* default_matcher = nullptr;
-    assert(provider->CreateMatcher(request, &default_matcher, &diagnostic) == flowsql::FlowLabelingErrorV1::kNone);
+    flowsql::IFlowLabelMatcher* default_matcher = nullptr;
+    assert(provider->CreateMatcher(request, &default_matcher, &diagnostic) == flowsql::FlowLabelingError::kNone);
     auto default_facts = WebFacts();
     uint32_t default_label = 0;
     assert(default_matcher->ClassifyBatch(&default_facts, 1, &default_label) == 0 && default_label == 1001);
 
-    flowsql::IFlowLabelMatcherV1* empty_matcher = nullptr;
+    flowsql::IFlowLabelMatcher* empty_matcher = nullptr;
     request = MakeRequest(&empty_snapshot);
-    assert(provider->CreateMatcher(request, &empty_matcher, &diagnostic) == flowsql::FlowLabelingErrorV1::kNone);
-    flowsql::FlowLabelFactsV1 unmatched;
+    assert(provider->CreateMatcher(request, &empty_matcher, &diagnostic) == flowsql::FlowLabelingError::kNone);
+    flowsql::FlowLabelFacts unmatched;
     uint32_t unmatched_label = 99;
     assert(empty_matcher->ClassifyBatch(&unmatched, 1, &unmatched_label) == 0 && unmatched_label == 0);
 
@@ -1025,7 +1021,7 @@ int main(int argc, char** argv) {
     empty_matcher->Release();
 
     loader->StopAll();
-    assert(provider->RuntimeStatus(&diagnostic) == flowsql::FlowLabelingErrorV1::kUnavailable);
+    assert(provider->RuntimeStatus(&diagnostic) == flowsql::FlowLabelingError::kUnavailable);
     assert(loader->Unload() == 0);
 
     std::cout << "Flow Labeling strict schema and DPDK ACL tests passed\n";

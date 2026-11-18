@@ -19,12 +19,12 @@
 
 namespace flowsql::visualization {
 
-struct DataFrameSourceInfoV1 {
+struct DataFrameSourceInfo {
     std::string source_id;
     std::string label;
 };
 
-struct DataFrameSnapshotInfoV1 {
+struct DataFrameSnapshotInfo {
     std::string source_id;
     std::string snapshot_id;
     std::string schema_revision;
@@ -42,19 +42,19 @@ class DataFrameTransferClient {
     ~DataFrameTransferClient() { Stop(); }
     bool Init(std::string upstream, std::string shared_dir, uint32_t timeout_ms);
     bool Available() const;
-    std::vector<DataFrameSourceInfoV1> Sources(std::string* error) const;
+    std::vector<DataFrameSourceInfo> Sources(std::string* error) const;
     bool Acquire(const std::string& request_id, const std::string& source_id, uint64_t max_bytes,
-                 const std::shared_ptr<std::atomic_bool>& cancelled, uint32_t timeout_ms,
-                 DataFrameSnapshotInfoV1* output, std::string* error);
+                 const std::shared_ptr<std::atomic_bool>& cancelled, uint32_t timeout_ms, DataFrameSnapshotInfo* output,
+                 std::string* error);
     bool Lookup(const std::string& snapshot_id, std::shared_ptr<arrow::RecordBatch>* batch,
-                DataFrameSnapshotInfoV1* meta);
+                DataFrameSnapshotInfo* meta);
     bool Release(const std::string& snapshot_id);
     bool Renew(const std::string& snapshot_id, int64_t* expires_at_unix);
     void Stop();
 
  private:
     struct Snapshot {
-        DataFrameSnapshotInfoV1 info;
+        DataFrameSnapshotInfo info;
         std::string transfer_id;
         std::chrono::steady_clock::time_point expires_at;
     };

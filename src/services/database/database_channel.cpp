@@ -23,15 +23,15 @@ DatabaseChannel::~DatabaseChannel() {
     if (opened_) Close();
 }
 
-int DatabaseChannel::CreateExplorationSession(const DatabaseSnapshotOptionsV1& options,
-                                              std::shared_ptr<IDatabaseExplorationSessionV1>* output) {
+int DatabaseChannel::CreateExplorationSession(const DatabaseSnapshotOptions& options,
+                                              std::shared_ptr<IDatabaseExplorationSession>* output) {
     output->reset();
     if ((type_ != "sqlite" && type_ != "mysql" && type_ != "postgres" && type_ != "clickhouse") || !opened_ ||
         !session_factory_ || options.struct_size != sizeof(options) || options.contract_version != 1 ||
         !options.operation_timeout_ms)
         return -1;
     auto session = session_factory_();
-    auto query = std::dynamic_pointer_cast<IDatabaseExplorationSessionV1>(session);
+    auto query = std::dynamic_pointer_cast<IDatabaseExplorationSession>(session);
     auto* snapshot = dynamic_cast<IDbSnapshotSession*>(session.get());
     auto read_options = options;
     if (type_ == "clickhouse") read_options.consistent_transaction = false;
@@ -117,11 +117,11 @@ bool DatabaseChannel::IsConnected() {
 }
 
 namespace {
-class SnapshotLease final : public IDatabaseSnapshotSessionV1 {
+class SnapshotLease final : public IDatabaseSnapshotSession {
  public:
     explicit SnapshotLease(std::shared_ptr<IDbSession> session)
         : session_(std::move(session)), reader_(dynamic_cast<IDbSnapshotSession*>(session_.get())) {}
-    int ReadPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+    int ReadPage(const char* sql, const DatabaseParameter* parameters, size_t count,
                  std::shared_ptr<arrow::Schema> expected, uint32_t rows, uint64_t bytes,
                  std::shared_ptr<arrow::RecordBatch>* output) override {
         if (!output) return -1;
@@ -139,8 +139,8 @@ class SnapshotLease final : public IDatabaseSnapshotSessionV1 {
     IDbSnapshotSession* reader_;
 };
 }  // namespace
-int DatabaseChannel::CreateSnapshotSession(const DatabaseSnapshotOptionsV1& options,
-                                           std::shared_ptr<IDatabaseSnapshotSessionV1>* output) {
+int DatabaseChannel::CreateSnapshotSession(const DatabaseSnapshotOptions& options,
+                                           std::shared_ptr<IDatabaseSnapshotSession>* output) {
     if (!output) return -1;
     output->reset();
     if (!opened_ || !session_factory_ || options.struct_size != sizeof(options) || options.contract_version != 1 ||
@@ -156,8 +156,8 @@ int DatabaseChannel::CreateSnapshotSession(const DatabaseSnapshotOptionsV1& opti
     return 0;
 }
 
-int DatabaseChannel::CreatePublishedProgressReader(const DatabaseSnapshotOptionsV1& options,
-                                                   std::shared_ptr<IDatabasePublishedProgressReaderV1>* output) {
+int DatabaseChannel::CreatePublishedProgressReader(const DatabaseSnapshotOptions& options,
+                                                   std::shared_ptr<IDatabasePublishedProgressReader>* output) {
     if (!output) return -1;
     output->reset();
     if (!opened_ || options.struct_size != sizeof(options) || options.contract_version != 1 ||
@@ -167,11 +167,11 @@ int DatabaseChannel::CreatePublishedProgressReader(const DatabaseSnapshotOptions
     return 0;
 }
 
-DatabaseAtomicStatusV1 DatabaseChannel::AcquireAtomicSession(const DatabaseAtomicSessionOptionsV1& options,
-                                                             std::shared_ptr<IDatabaseAtomicSessionV1>* output) {
+DatabaseAtomicStatus DatabaseChannel::AcquireAtomicSession(const DatabaseAtomicSessionOptions& options,
+                                                           std::shared_ptr<IDatabaseAtomicSession>* output) {
     if (output) output->reset();
     auto* provider = dynamic_cast<AtomicTargetConfiguration*>(driver_);
-    if (!opened_ || !provider) return {DatabaseAtomicCodeV1::kUnsupported, "atomic target unavailable"};
+    if (!opened_ || !provider) return {DatabaseAtomicCode::kUnsupported, "atomic target unavailable"};
     return MakeAtomicSession(type_, provider->atomic_parameters, options, output);
 }
 
@@ -259,7 +259,7 @@ int DatabaseChannel::WriteArrowBatchesWithPool(const char* table,
         return -1;
     }
     auto session = session_factory_();
-    auto* writer = session ? dynamic_cast<IDatabaseArrowWriteV1*>(session.get()) : nullptr;
+    auto* writer = session ? dynamic_cast<IDatabaseArrowWrite*>(session.get()) : nullptr;
     if (!writer) {
         last_error_ = "session has no budgeted Arrow write capability";
         return -1;
@@ -285,7 +285,7 @@ int DatabaseChannel::ExecuteSql(const char* sql) {
     return ret;
 }
 
-int DatabaseChannel::ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) {
+int DatabaseChannel::ExecutePrepared(const char* sql, const DatabaseParameter* parameters, size_t parameter_count) {
     last_error_.clear();
     if (!opened_ || !session_factory_) {
         last_error_ = "channel not opened or session factory not set";
@@ -301,7 +301,7 @@ int DatabaseChannel::ExecutePrepared(const char* sql, const DatabaseParameterV1*
     return ret;
 }
 
-int DatabaseChannel::ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters,
+int DatabaseChannel::ExecutePreparedBatch(const char* sql, const DatabaseParameter* parameters,
                                           size_t parameters_per_execution, size_t execution_count) {
     last_error_.clear();
     if (!opened_ || !session_factory_) {

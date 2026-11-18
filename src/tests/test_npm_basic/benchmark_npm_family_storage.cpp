@@ -59,7 +59,7 @@ uint64_t Scalar(IDatabaseChannel* channel, const std::string& category, const st
     Require(!batches.empty() && batches[0]->num_rows() == 1, "scalar query missing row");
     return std::stoull(batches[0]->column(0)->GetScalar(0).ValueOrDie()->ToString());
 }
-std::shared_ptr<arrow::RecordBatch> Rows(const NpmEntityDescriptorV1& entity, int begin, int count,
+std::shared_ptr<arrow::RecordBatch> Rows(const NpmEntityDescriptor& entity, int begin, int count,
                                          const std::string& family) {
     std::vector<std::shared_ptr<arrow::Array>> columns;
     for (const auto& field : entity.schema->fields()) {
@@ -179,24 +179,24 @@ int main(int argc, char** argv) {
         Require(rc == 0 && plugin.Load(nullptr) == 0 && plugin.Start() == 0, "database plugin initialization");
         auto channel = plugin.AcquireChannel(category.c_str(), ("t2" + category).c_str());
         Require(channel && channel->IsConnected(), "measurement backend unavailable");
-        std::vector<NpmEntityDescriptorV1> entities;
+        std::vector<NpmEntityDescriptor> entities;
         for (auto kind : {NpmFamilyEntityKind::kBasic, NpmFamilyEntityKind::kSession, NpmFamilyEntityKind::kDns,
                           NpmFamilyEntityKind::kHttp1, NpmFamilyEntityKind::kTls, NpmFamilyEntityKind::kIcmp})
             for (auto af : {flowsql::packet::AddressFamily::kIPv4, flowsql::packet::AddressFamily::kIPv6})
                 entities.push_back(NpmFamilyEntityDescriptor(kind, af));
         auto budget = std::make_shared<NpmTaskBudget>(DefaultNpmAnalysisConfig(NpmRunMode::kOffline));
         auto factory = MakeNpmDatabaseResultConsumerFactory(channel.get(), "cost.packet");
-        const NpmResultContextV1 context{
+        const NpmResultContext context{
             "cost-" + family,
             "t5-cost-" + family + '-' + std::to_string(std::chrono::system_clock::now().time_since_epoch().count())};
-        std::unique_ptr<INpmManagedResultConsumerV1> consumer;
+        std::unique_ptr<INpmManagedResultConsumer> consumer;
         Require(factory->Create(context, entities, budget, &consumer) == 0, "consumer Create failed");
         constexpr int total = 4096, batch_rows = 512;
         for (const auto& entity : entities) {
             const bool six = entity.entity_id.find("ipv6") != std::string::npos;
             if ((family == "ipv4" && six) || (family == "ipv6" && !six)) continue;
             const int rows = family == "mixed" ? total / 2 : total;
-            const std::string table = "npm_" + entity.entity_id + "_v1_data";
+            const std::string table = "npm_" + entity.entity_id + "_data";
             const auto data_before = Size(channel.get(), category, table, false),
                        index_before = Size(channel.get(), category, table, true);
             double elapsed = 0;

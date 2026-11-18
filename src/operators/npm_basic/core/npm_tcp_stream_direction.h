@@ -29,31 +29,29 @@ enum class NpmTcpStreamError {
 /** The event and its bytes are borrowed until Emit returns. Nonzero stops the direction; no prefix rollback. */
 interface INpmTcpStreamEventSink {
     virtual ~INpmTcpStreamEventSink() = default;
-    virtual int Emit(const NpmTcpStreamEventV1& event) = 0;
+    virtual int Emit(const NpmTcpStreamEvent& event) = 0;
     /** Optional internal transfer: move data only on success and assume its existing budget charge. */
-    virtual int EmitOwned(const NpmTcpStreamEventV1& event, std::unique_ptr<uint8_t[]>&, uint64_t) {
-        return Emit(event);
-    }
+    virtual int EmitOwned(const NpmTcpStreamEvent& event, std::unique_ptr<uint8_t[]>&, uint64_t) { return Emit(event); }
 };
 
 /** Single-direction capture-view core. Its caller owns session identity, direction routing and serialization. */
 class NpmTcpStreamDirection final {
  public:
-    NpmTcpStreamDirection(NpmTcpStreamConfigV1 config, std::shared_ptr<INpmTaskBudget> budget);
+    NpmTcpStreamDirection(NpmTcpStreamConfig config, std::shared_ptr<INpmTaskBudget> budget);
     /** Embedded core: caller accounts for this object's storage and outlives it with the borrowed budget. */
-    NpmTcpStreamDirection(NpmTcpStreamConfigV1 config, INpmTaskBudget& budget);
+    NpmTcpStreamDirection(NpmTcpStreamConfig config, INpmTaskBudget& budget);
     ~NpmTcpStreamDirection();
     NpmTcpStreamDirection(const NpmTcpStreamDirection&) = delete;
     NpmTcpStreamDirection& operator=(const NpmTcpStreamDirection&) = delete;
 
     NpmTcpStreamError Push(const NpmPacketView& packet, INpmTcpStreamEventSink& sink);
     NpmTcpStreamError AdvanceWatermark(int64_t watermark_ns, INpmTcpStreamEventSink& sink);
-    NpmTcpStreamError End(NpmTcpStreamEndReasonV1 reason, std::optional<NpmSessionEndReason> session_reason,
+    NpmTcpStreamError End(NpmTcpStreamEndReason reason, std::optional<NpmSessionEndReason> session_reason,
                           INpmTcpStreamEventSink& sink);
     void Abort() noexcept;
 
     NpmTcpStreamError Status() const { return error_; }
-    NpmTcpStreamOriginV1 Origin() const { return origin_; }
+    NpmTcpStreamOrigin Origin() const { return origin_; }
     bool CaptureTruncationSeen() const { return truncated_; }
     bool Ended() const { return ended_; }
     uint64_t PublishedEnd() const { return published_; }
@@ -86,12 +84,12 @@ class NpmTcpStreamDirection final {
     void TrimAtFin(uint64_t position);
     bool MapSequence(uint32_t sequence, uint64_t* begin, uint64_t* prefix) const;
     void Ingest(const NpmPacketView& packet, INpmTcpStreamEventSink& sink);
-    void Emit(const NpmTcpStreamEventV1& event, INpmTcpStreamEventSink& sink);
+    void Emit(const NpmTcpStreamEvent& event, INpmTcpStreamEventSink& sink);
     void Drain(bool forced, INpmTcpStreamEventSink& sink);
-    void Finish(NpmTcpStreamEndReasonV1 reason, std::optional<NpmSessionEndReason> session_reason,
+    void Finish(NpmTcpStreamEndReason reason, std::optional<NpmSessionEndReason> session_reason,
                 INpmTcpStreamEventSink& sink);
 
-    NpmTcpStreamConfigV1 config_;
+    NpmTcpStreamConfig config_;
     std::shared_ptr<INpmTaskBudget> budget_owner_;
     INpmTaskBudget* budget_ = nullptr;
     Ranges ranges_;
@@ -102,7 +100,7 @@ class NpmTcpStreamDirection final {
     uint32_t base_sequence_ = 0;
     std::optional<uint64_t> fin_;
     std::optional<int64_t> watermark_;
-    NpmTcpStreamOriginV1 origin_ = NpmTcpStreamOriginV1::kUnknown;
+    NpmTcpStreamOrigin origin_ = NpmTcpStreamOrigin::kUnknown;
     NpmTcpStreamError error_ = NpmTcpStreamError::kNone;
     bool truncated_ = false;
     bool ended_ = false;

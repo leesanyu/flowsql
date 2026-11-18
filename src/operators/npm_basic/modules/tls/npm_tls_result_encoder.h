@@ -17,9 +17,8 @@ namespace flowsql::npm {
 
 /** Encodes one final event and synchronously hands it to the task result router. */
 template <typename Address>
-int EmitNpmTlsHandshakeV1(const NpmTlsFamilyResult<Address>& family_result,
-                          const std::shared_ptr<INpmTaskBudget>& budget, INpmResultEmitterV1& emitter,
-                          arrow::MemoryPool* pool = nullptr);
+int EmitNpmTlsHandshake(const NpmTlsFamilyResult<Address>& family_result, const std::shared_ptr<INpmTaskBudget>& budget,
+                        INpmResultEmitter& emitter, arrow::MemoryPool* pool = nullptr);
 
 }  // namespace flowsql::npm
 

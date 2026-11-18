@@ -207,6 +207,32 @@ void RecoveryAge() {
         Ok(first.ExportCheckpoint(&checkpoint), first);
         Ok(second.Open(c, &target.plugin, &target.plugin, &target.plugin), second);
         second.SetTime(5000000000, mode == 0 ? 10100000000 : mode == 1 ? 10060000000 : 9000000000);
+        for (int invalid = 0; invalid < 5; ++invalid) {
+            rapidjson::Document missing;
+            missing.Parse(checkpoint.c_str());
+            assert(!missing.HasParseError());
+            if (invalid == 0) missing["version"].SetUint(1);
+            if (invalid == 1) assert(missing.RemoveMember("activity_wall_ns"));
+            if (invalid == 2) assert(missing["modules"][0].RemoveMember("parents"));
+            if (invalid == 3) assert(missing["modules"][0].RemoveMember("released_epoch"));
+            if (invalid == 4) {
+                size_t removed = 0;
+                for (auto& module : missing["modules"].GetArray()) {
+                    for (auto& series : module["series"].GetArray()) {
+                        assert(series.RemoveMember("activity_age_ns"));
+                        ++removed;
+                    }
+                }
+                assert(removed == 1);
+            }
+            rapidjson::StringBuffer bytes;
+            rapidjson::Writer<rapidjson::StringBuffer> writer(bytes);
+            missing.Accept(writer);
+            const auto before = second.QueryUsage().second;
+            assert(second.RestoreCheckpoint(bytes.GetString()) != 0);
+            assert(second.QueryUsage().second.runtime_identities == before.runtime_identities);
+            assert(second.QueryUsage().second.model_identities == before.model_identities);
+        }
         Ok(second.RestoreCheckpoint(checkpoint), second);
         std::vector<MaintenanceRow> rows;
         Ok(second.Maintain(&rows), second);
@@ -236,7 +262,7 @@ void RecoveryAge() {
 }
 void HistoryAndFanout() {
     for (auto kind : {BaselineTaskKind::kValue, BaselineTaskKind::kRatio, BaselineTaskKind::kRelation}) {
-        for (auto scope : {BaselineStateReleaseScopeV1::kRuntimeOnly, BaselineStateReleaseScopeV1::kAllState}) {
+        for (auto scope : {BaselineStateReleaseScope::kRuntimeOnly, BaselineStateReleaseScope::kAllState}) {
             Environment source, target;
             auto c = Online(kind == BaselineTaskKind::kRelation);
             c.config.state.release_scope = scope;
@@ -254,7 +280,7 @@ void HistoryAndFanout() {
             Ok(e.Maintain(&rows), e);
             assert(rows.size() == 1 && rows[0].usage.runtime_identities == 0 && rows[0].usage.routed_states == 0 &&
                    rows[0].usage.retained_basis_versions == 0);
-            assert(rows[0].usage.model_identities == (scope == BaselineStateReleaseScopeV1::kRuntimeOnly ? 1u : 0u));
+            assert(rows[0].usage.model_identities == (scope == BaselineStateReleaseScope::kRuntimeOnly ? 1u : 0u));
             std::string checkpoint;
             Ok(e.ExportCheckpoint(&checkpoint), e);
             EvaluationEngine resumed;
@@ -270,7 +296,7 @@ void HistoryAndFanout() {
             auto next = Input(kind, 41);
             Ok(resumed.Submit(next, &out), resumed);
             if (kind != BaselineTaskKind::kRelation)
-                assert(out.results[0].values.status == (scope == BaselineStateReleaseScopeV1::kRuntimeOnly
+                assert(out.results[0].values.status == (scope == BaselineStateReleaseScope::kRuntimeOnly
                                                             ? BaselineStatus::kOk
                                                             : BaselineStatus::kNotTrained));
         }
@@ -334,18 +360,18 @@ void FanoutMaintenanceLatency() {
     std::cout << "MEASURE relation_sources=64 routed_states=" << usage.routed_states
               << " release_budget=4 worst_maintenance_ns=" << worst << '\n';
 }
-struct FailingControl : IBaselineStateControlServiceV1 {
-    IBaselineStateControlServiceV1* service;
-    struct Handle : IBaselineTaskStateControlV1 {
-        std::shared_ptr<IBaselineTaskStateControlV1> original;
-        BaselineStatus ReleaseIdentity(std::string_view, BaselineStateReleaseScopeV1) override {
+struct FailingControl : IBaselineStateControlService {
+    IBaselineStateControlService* service;
+    struct Handle : IBaselineTaskStateControl {
+        std::shared_ptr<IBaselineTaskStateControl> original;
+        BaselineStatus ReleaseIdentity(std::string_view, BaselineStateReleaseScope) override {
             return BaselineStatus::kInvalidArgument;
         }
-        std::pair<BaselineStatus, BaselineStateUsageV1> QueryUsage() const override { return original->QueryUsage(); }
+        std::pair<BaselineStatus, BaselineStateUsage> QueryUsage() const override { return original->QueryUsage(); }
     };
-    explicit FailingControl(IBaselineStateControlServiceV1* s) : service(s) {}
-    std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControlV1>> Bind(
-        std::shared_ptr<IBaselineTask> task, const BaselineStateLimitsV1& limits) override {
+    explicit FailingControl(IBaselineStateControlService* s) : service(s) {}
+    std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControl>> Bind(
+        std::shared_ptr<IBaselineTask> task, const BaselineStateLimits& limits) override {
         auto bound = service->Bind(task, limits);
         auto h = std::make_shared<Handle>();
         h->original = bound.second;
@@ -400,32 +426,32 @@ std::string Configuration(const std::string& source, const std::string& table, b
 struct Fault {
     int mode = 0;
 };
-class FaultSession final : public IDatabaseAtomicSessionV1 {
+class FaultSession final : public IDatabaseAtomicSession {
  public:
-    FaultSession(std::shared_ptr<IDatabaseAtomicSessionV1> session, std::shared_ptr<Fault> fault)
+    FaultSession(std::shared_ptr<IDatabaseAtomicSession> session, std::shared_ptr<Fault> fault)
         : session_(std::move(session)), fault_(std::move(fault)) {}
-    DatabaseAtomicStatusV1 Begin() override { return session_->Begin(); }
-    DatabaseAtomicStatusV1 ExecutePrepared(const char* sql, const DatabaseParameterV1* p, size_t n,
-                                           uint64_t* affected) override {
+    DatabaseAtomicStatus Begin() override { return session_->Begin(); }
+    DatabaseAtomicStatus ExecutePrepared(const char* sql, const DatabaseParameter* p, size_t n,
+                                         uint64_t* affected) override {
         if (fault_->mode == 1 && std::string_view(sql).find("INSERT INTO baseline_model_versions") == 0) {
             fault_->mode = 0;
             *affected = 0;
-            return {DatabaseAtomicCodeV1::kError, "crash before model write"};
+            return {DatabaseAtomicCode::kError, "crash before model write"};
         }
         return session_->ExecutePrepared(sql, p, n, affected);
     }
-    DatabaseAtomicStatusV1 CreateReader(const char* sql, const DatabaseParameterV1* p, size_t n,
-                                        IBatchReader** r) override {
+    DatabaseAtomicStatus CreateReader(const char* sql, const DatabaseParameter* p, size_t n,
+                                      IBatchReader** r) override {
         return session_->CreateReader(sql, p, n, r);
     }
-    DatabaseAtomicStatusV1 ReadDatabaseTime(int64_t* t) override { return session_->ReadDatabaseTime(t); }
-    DatabaseCommitResultV1 Commit() override {
+    DatabaseAtomicStatus ReadDatabaseTime(int64_t* t) override { return session_->ReadDatabaseTime(t); }
+    DatabaseCommitResult Commit() override {
         int mode = fault_->mode;
         fault_->mode = 0;
         if (mode == 2) {
             auto status = session_->Rollback();
             Check(status.ok(), status.message);
-            return {{DatabaseAtomicCodeV1::kError, "crash before commit"}, DatabaseCommitOutcomeV1::kRolledBack};
+            return {{DatabaseAtomicCode::kError, "crash before commit"}, DatabaseCommitOutcome::kRolledBack};
         }
         if (mode == 3 || mode == 4) {
             if (mode == 3) {
@@ -434,20 +460,19 @@ class FaultSession final : public IDatabaseAtomicSessionV1 {
             } else
                 Check(session_->Rollback().ok(), "unknown rollback fixture");
             session_->Close();
-            return {{DatabaseAtomicCodeV1::kCommitUnknown, "lost commit confirmation"},
-                    DatabaseCommitOutcomeV1::kUnknown};
+            return {{DatabaseAtomicCode::kCommitUnknown, "lost commit confirmation"}, DatabaseCommitOutcome::kUnknown};
         }
         return session_->Commit();
     }
-    DatabaseAtomicStatusV1 Rollback() override { return session_->Rollback(); }
+    DatabaseAtomicStatus Rollback() override { return session_->Rollback(); }
     void Cancel() override { session_->Cancel(); }
     void Close() override { session_->Close(); }
 
  private:
-    std::shared_ptr<IDatabaseAtomicSessionV1> session_;
+    std::shared_ptr<IDatabaseAtomicSession> session_;
     std::shared_ptr<Fault> fault_;
 };
-class FaultTarget final : public IDatabaseChannel, public IDatabaseAtomicTargetV1 {
+class FaultTarget final : public IDatabaseChannel, public IDatabaseAtomicTarget {
  public:
     explicit FaultTarget(std::shared_ptr<IDatabaseChannel> target) : target_(std::move(target)) {}
     std::shared_ptr<Fault> fault = std::make_shared<Fault>();
@@ -468,10 +493,10 @@ class FaultTarget final : public IDatabaseChannel, public IDatabaseAtomicTargetV
     int ExecuteQueryArrow(const char*, std::vector<std::shared_ptr<arrow::RecordBatch>>*) override { return -1; }
     int WriteArrowBatches(const char*, const std::vector<std::shared_ptr<arrow::RecordBatch>>&) override { return -1; }
     int ExecuteSql(const char*) override { return -1; }
-    DatabaseAtomicStatusV1 AcquireAtomicSession(const DatabaseAtomicSessionOptionsV1& options,
-                                                std::shared_ptr<IDatabaseAtomicSessionV1>* output) override {
-        std::shared_ptr<IDatabaseAtomicSessionV1> session;
-        auto s = dynamic_cast<IDatabaseAtomicTargetV1*>(target_.get())->AcquireAtomicSession(options, &session);
+    DatabaseAtomicStatus AcquireAtomicSession(const DatabaseAtomicSessionOptions& options,
+                                              std::shared_ptr<IDatabaseAtomicSession>* output) override {
+        std::shared_ptr<IDatabaseAtomicSession> session;
+        auto s = dynamic_cast<IDatabaseAtomicTarget*>(target_.get())->AcquireAtomicSession(options, &session);
         if (s.ok()) *output = std::make_shared<FaultSession>(session, fault);
         return s;
     }
@@ -489,10 +514,10 @@ struct Querier : IQuerier {
     }
     void* First(const Guid& id) override {
         if (std::memcmp(&id, &IID_BASELINE_SERVICE, sizeof(id)) == 0) return static_cast<IBaselineService*>(&baseline);
-        if (std::memcmp(&id, &IID_BASELINE_STATE_CONTROL_SERVICE_V1, sizeof(id)) == 0)
-            return static_cast<IBaselineStateControlServiceV1*>(&baseline);
-        if (std::memcmp(&id, &IID_BASELINE_CHECKPOINT_SERVICE_V1, sizeof(id)) == 0)
-            return static_cast<IBaselineCheckpointServiceV1*>(&baseline);
+        if (std::memcmp(&id, &IID_BASELINE_STATE_CONTROL_SERVICE, sizeof(id)) == 0)
+            return static_cast<IBaselineStateControlService*>(&baseline);
+        if (std::memcmp(&id, &IID_BASELINE_CHECKPOINT_SERVICE, sizeof(id)) == 0)
+            return static_cast<IBaselineCheckpointService*>(&baseline);
         return nullptr;
     }
     int Traverse(const Guid& id, fntraverse f) override {
@@ -502,8 +527,8 @@ struct Querier : IQuerier {
 };
 struct Loaded {
     void* handle = nullptr;
-    IBlockTransformOperatorV2* provider = nullptr;
-    CppOperatorPluginDestroyCapabilityV2Fn destroy = nullptr;
+    IBlockTransformOperator* provider = nullptr;
+    CppOperatorPluginDestroyCapabilityFn destroy = nullptr;
     explicit Loaded(IQuerier& q) {
         handle = dlopen("./libflowsql_baseliner.so", RTLD_NOW | RTLD_LOCAL);
         if (!handle) std::cerr << dlerror() << '\n';
@@ -511,20 +536,19 @@ struct Loaded {
         auto version =
             reinterpret_cast<CppOperatorPluginAbiVersionFn>(dlsym(handle, kCppOperatorPluginAbiVersionSymbol));
         auto count = reinterpret_cast<CppOperatorPluginCountFn>(dlsym(handle, kCppOperatorPluginCountSymbol));
-        auto describe =
-            reinterpret_cast<CppOperatorPluginDescribeV2Fn>(dlsym(handle, kCppOperatorPluginDescribeV2Symbol));
-        auto create = reinterpret_cast<CppOperatorPluginCreateCapabilityV2Fn>(
-            dlsym(handle, kCppOperatorPluginCreateCapabilityV2Symbol));
-        destroy = reinterpret_cast<CppOperatorPluginDestroyCapabilityV2Fn>(
-            dlsym(handle, kCppOperatorPluginDestroyCapabilityV2Symbol));
+        auto describe = reinterpret_cast<CppOperatorPluginDescribeFn>(dlsym(handle, kCppOperatorPluginDescribeSymbol));
+        auto create = reinterpret_cast<CppOperatorPluginCreateCapabilityFn>(
+            dlsym(handle, kCppOperatorPluginCreateCapabilitySymbol));
+        destroy = reinterpret_cast<CppOperatorPluginDestroyCapabilityFn>(
+            dlsym(handle, kCppOperatorPluginDestroyCapabilitySymbol));
         assert(version && count && describe && create && destroy && version() == 2 && count() == 1);
-        CppOperatorDescriptorV2 descriptor{};
-        descriptor.struct_size = kCppOperatorDescriptorV2Size;
+        CppOperatorDescriptor descriptor{};
+        descriptor.struct_size = kCppOperatorDescriptorSize;
         assert(describe(0, &descriptor) == 0 && std::string(descriptor.category) == "explore" &&
                std::string(descriptor.name) == "baseliner");
-        assert(std::memcmp(&descriptor.contract_iid, &IID_BLOCK_TRANSFORM_OPERATOR_V2, sizeof(Guid)) == 0 &&
+        assert(std::memcmp(&descriptor.contract_iid, &IID_BLOCK_TRANSFORM_OPERATOR, sizeof(Guid)) == 0 &&
                describe(1, &descriptor) != 0);
-        provider = static_cast<IBlockTransformOperatorV2*>(create(0, &q));
+        provider = static_cast<IBlockTransformOperator*>(create(0, &q));
         assert(provider);
     }
     ~Loaded() {
@@ -570,28 +594,28 @@ std::string With(const ConfigSnapshot& c) {
     w.EndObject();
     return {b.GetString(), b.GetSize()};
 }
-using TaskOwner = std::unique_ptr<IBlockTransformTaskV2, std::function<void(IBlockTransformTaskV2*)>>;
+using TaskOwner = std::unique_ptr<IBlockTransformTask, std::function<void(IBlockTransformTask*)>>;
 TaskOwner ManagedTask(const std::shared_ptr<Loaded>& op, const ConfigSnapshot& c, IDatabaseChannel* target) {
     auto with = With(c);
-    BlockTransformTaskConfigV2 config{kBlockTransformTaskConfigV2Size, kBlockTransformContractVersionV2,
-                                      "maintenance-execution", with.c_str(), ""};
-    IBlockTransformTaskV2* raw = nullptr;
+    BlockTransformTaskConfig config{kBlockTransformTaskConfigSize, kBlockTransformContractVersion,
+                                    "maintenance-execution", with.c_str(), ""};
+    IBlockTransformTask* raw = nullptr;
     Check(op->provider->CreateTask(config, &raw) == 0 && raw, "create managed maintenance task");
     TaskOwner task(raw, [op](auto* p) { op->provider->ReleaseTask(p); });
-    Check(dynamic_cast<IBlockTransformInputSourceTaskV1*>(raw)->BindInputSource(c.config.source.c_str()) == 0,
+    Check(dynamic_cast<IBlockTransformInputSourceTask*>(raw)->BindInputSource(c.config.source.c_str()) == 0,
           "bind source");
     auto exact = std::string(target->Category()) + "." + target->Name();
-    BlockTransformManagedSinkBindingV1 sink;
+    BlockTransformManagedSinkBinding sink;
     sink.sink_channel = target;
     sink.target = exact.c_str();
     sink.category = target->Category();
     sink.name = target->Name();
-    Check(dynamic_cast<IBlockTransformManagedSinkTaskV1*>(raw)->BindManagedSink(sink) == 0, raw->LastError());
+    Check(dynamic_cast<IBlockTransformManagedSinkTask*>(raw)->BindManagedSink(sink) == 0, raw->LastError());
     std::shared_ptr<arrow::Schema> output;
     Check(raw->Open(MakeSchema(SchemaKind::kObservation), &output) == 0, raw->LastError());
     return task;
 }
-void Feed(IBlockTransformTaskV2* task, bool history, int64_t bucket = 41) {
+void Feed(IBlockTransformTask* task, bool history, int64_t bucket = 41) {
     std::vector<Observation> rows;
     for (int64_t t = history ? 0 : bucket; t <= (history ? 40 : bucket); ++t)
         for (auto kind : {BaselineTaskKind::kValue, BaselineTaskKind::kRatio, BaselineTaskKind::kRelation})
@@ -599,24 +623,25 @@ void Feed(IBlockTransformTaskV2* task, bool history, int64_t bucket = 41) {
     std::shared_ptr<arrow::RecordBatch> batch;
     std::string error;
     Check(MakeObservationBatch(rows, 1 << 24, &batch, &error) == 0, error);
-    std::vector<BlockTransformOutputV1> outputs;
+    std::vector<BlockTransformOutput> outputs;
     Check(task->ProcessBlock(batch, 0, &outputs) == 0, task->LastError());
     assert(outputs.empty());
-    Check(dynamic_cast<IBlockTransformInputProgressTaskV1*>(task)->AcceptInputProgress(
+    Check(dynamic_cast<IBlockTransformInputProgressTask*>(task)->AcceptInputProgress(
               {1, {{"d", "epoch", std::to_string(history ? 41 : bucket + 1), history ? 41 : bucket + 1}}}) == 0,
           task->LastError());
 }
-int Expire(IBlockTransformTaskV2* task, int64_t* latency = nullptr) {
-    BlockTransformTimeDriveStateV1 state{};
-    Check(task->GetTimeDriveState(&state) == 0 && state.armed, "idle time drive is armed");
+int Expire(IBlockTransformTask* task, int64_t* latency = nullptr) {
+    BlockTransformTimeDriveState state{};
+    Check(dynamic_cast<IBlockTransformTimeDrivenTask*>(task)->GetTimeDriveState(&state) == 0 && state.armed,
+          "idle time drive is armed");
     auto wall =
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
             .count();
-    BlockTransformTimeEventV1 event{kBlockTransformTimeEventV1Size, kBlockTransformTimeDriveVersionV1,
-                                    state.deadline_ns + 61000000000, wall};
-    std::vector<BlockTransformOutputV1> outputs;
+    BlockTransformTimeEvent event{kBlockTransformTimeEventSize, kBlockTransformTimeDriveVersion,
+                                  state.deadline_ns + 61000000000, wall};
+    std::vector<BlockTransformOutput> outputs;
     auto begin = std::chrono::steady_clock::now();
-    int rc = task->OnTime(event, &outputs);
+    int rc = dynamic_cast<IBlockTransformTimeDrivenTask*>(task)->OnTime(event, &outputs);
     assert(outputs.empty());
     if (latency)
         *latency =
@@ -632,11 +657,11 @@ StoredGeneration Load(IDatabaseChannel* target, const ConfigSnapshot& c) {
     return saved;
 }
 uint64_t MaintenanceCount(IDatabaseChannel* target, const ConfigSnapshot& c) {
-    std::shared_ptr<IDatabaseAtomicSessionV1> session;
-    Check(dynamic_cast<IDatabaseAtomicTargetV1*>(target)->AcquireAtomicSession({}, &session).ok(),
+    std::shared_ptr<IDatabaseAtomicSession> session;
+    Check(dynamic_cast<IDatabaseAtomicTarget*>(target)->AcquireAtomicSession({}, &session).ok(),
           "query maintenance session");
     std::shared_ptr<arrow::RecordBatch> rows;
-    Check(ReadAtomicBatch(*session, "SELECT COUNT(*) FROM baseline_maintenance_v1 WHERE task_key=?",
+    Check(ReadAtomicBatch(*session, "SELECT COUNT(*) FROM baseline_maintenance WHERE task_key=?",
                           {TextParameter(c.config.task_key)}, &rows)
               .ok(),
           "query maintenance count");
@@ -667,14 +692,14 @@ void AssertState(const StoredGeneration& saved, const ConfigSnapshot& c, uint64_
 class OutputRecorder {
  public:
     PluginLoader* loader = PluginLoader::Single();
-    IDataSemanticsRegistryV1* registry = nullptr;
-    IOperatorDataContractV1* service = nullptr;
+    IDataSemanticsRegistry* registry = nullptr;
+    IOperatorDataContract* service = nullptr;
     ~OutputRecorder() { loader->Unload(); }
-    OperatorContractSnapshotV1 use;
-    DataSemanticsErrorV1 error;
+    OperatorContractSnapshot use;
+    DataSemanticsError error;
     dataset::Json request{rapidjson::kObjectType};
     int calls = 0;
-    OutputRecorder(const ConfigSnapshot& config, IBlockTransformTaskV2* task) {
+    OutputRecorder(const ConfigSnapshot& config, IBlockTransformTask* task) {
         using namespace dataset;
         char path[] = "/tmp/flowsql_managed_output_semantics_XXXXXX";
         const auto fd = mkstemp(path);
@@ -684,8 +709,8 @@ class OutputRecorder {
         const char* libraries[] = {"libflowsql_config_channel.so"};
         const char* options[] = {option.c_str()};
         assert(loader->Load(".", libraries, options, 1) == 0 && loader->StartAll() == 0);
-        registry = static_cast<IDataSemanticsRegistryV1*>(loader->First(IID_DATA_SEMANTICS_REGISTRY_V1));
-        service = static_cast<IOperatorDataContractV1*>(loader->First(IID_OPERATOR_DATA_CONTRACT_V1));
+        registry = static_cast<IDataSemanticsRegistry*>(loader->First(IID_DATA_SEMANTICS_REGISTRY));
+        service = static_cast<IOperatorDataContract*>(loader->First(IID_OPERATOR_DATA_CONTRACT));
         assert(registry && service);
         std::ifstream file(std::string(FLOWSQL_SOURCE_ROOT) +
                            "/config/semantics/examples/operator-contract-baseliner.json");
@@ -737,7 +762,7 @@ class OutputRecorder {
         Set(request, "name", "managed", ra);
         request.AddMember("expected_current_revision", 0, ra);
         document.Parse(
-            R"({"schema_id":"flowsql.operator-data-use.v1","title":"published outputs","run_id":"managed","stage_index":0,"operator_ref":{"category":"explore","name":"baseliner","version":"1"},"outputs":[],"outcome":"partial"})");
+            R"({"schema_id":"flowsql.operator-data-use","title":"published outputs","run_id":"managed","stage_index":0,"operator_ref":{"category":"explore","name":"baseliner","version":"1"},"outputs":[],"outcome":"partial"})");
         auto& da = document.GetAllocator();
         for (const char* key : {"contract_ref", "component_revision", "effective_parameters", "normalized_config",
                                 "config_refs", "execution_context"})
@@ -747,10 +772,10 @@ class OutputRecorder {
         Set(document, "checks", Copy(check, da), da);
         Set(request, "document", Copy(document, ra), ra);
     }
-    int Record(IBlockTransformTaskV2* task) {
+    int Record(IBlockTransformTask* task) {
         using namespace dataset;
         Json observed;
-        if (contracts::ProducerOutputs(dynamic_cast<IOperatorOutputObservationV1*>(task), &observed, &error)) return -1;
+        if (contracts::ProducerOutputs(dynamic_cast<IOperatorOutputObservation*>(task), &observed, &error)) return -1;
         dataset::Value absent(rapidjson::kObjectType);
         Set(absent, "port_id", "model_parameters", observed.GetAllocator());
         Set(absent, "state", "absent", observed.GetAllocator());
@@ -774,7 +799,7 @@ void ManagedMatrix(std::shared_ptr<IDatabaseChannel> target) {
         {
             auto task = ManagedTask(op, c, target.get());
             OutputRecorder recorder(c, task.get());
-            auto* publisher = dynamic_cast<IOperatorOutputPublicationV1*>(task.get());
+            auto* publisher = dynamic_cast<IOperatorOutputPublication*>(task.get());
             assert(publisher);
             publisher->SetOutputPublicationObserver([&] { return recorder.Record(task.get()); });
             Feed(task.get(), true);
@@ -791,18 +816,18 @@ void ManagedMatrix(std::shared_ptr<IDatabaseChannel> target) {
                 }
                 assert(output["state"] == "observed" && output["output_check"] == "matched");
                 assert(bindings.insert(dataset::Get(output, "binding_ref")).second);
-                DataSemanticsSnapshotV1 reread;
+                DataSemanticsSnapshot reread;
                 assert(recorder.registry->Resolve(dataset::Get(output, "binding_ref").c_str(), &reread,
                                                   &recorder.error) == 0);
             }
             assert(bindings.size() == 3);
-            DataSemanticsSnapshotV1 reread;
+            DataSemanticsSnapshot reread;
             assert(recorder.registry->Resolve(recorder.use.exact_reference.c_str(), &reread, &recorder.error) == 0);
             assert(*reread.document_json == *recorder.use.document_json);
             publisher->SetOutputPublicationObserver({});
             dataset::Json observations;
-            DataSemanticsErrorV1 contract_error;
-            Check(contracts::ProducerOutputs(dynamic_cast<IOperatorOutputObservationV1*>(task.get()), &observations,
+            DataSemanticsError contract_error;
+            Check(contracts::ProducerOutputs(dynamic_cast<IOperatorOutputObservation*>(task.get()), &observations,
                                              &contract_error) == 0,
                   contract_error.message);
             for (const char* port : {"results", "relation_fusion", "maintenance"}) {
@@ -836,7 +861,7 @@ void ManagedMatrix(std::shared_ptr<IDatabaseChannel> target) {
             auto task = ManagedTask(op, c, target.get());
             Feed(task.get(), false, 43);
             int notifications = 0;
-            auto* publisher = dynamic_cast<IOperatorOutputPublicationV1*>(task.get());
+            auto* publisher = dynamic_cast<IOperatorOutputPublication*>(task.get());
             publisher->SetOutputPublicationObserver([&] {
                 ++notifications;
                 return -EIO;
@@ -862,13 +887,13 @@ void ManagedMatrix(std::shared_ptr<IDatabaseChannel> target) {
     {  // A failed/crashed writer retains its fencing lease; takeover is legal only after expiry.
         DurableStore blocked;
         assert(blocked.Open(c, target.get(), "premature-takeover") != 0);
-        std::shared_ptr<IDatabaseAtomicSessionV1> inspection;
-        Check(dynamic_cast<IDatabaseAtomicTargetV1*>(target.get())->AcquireAtomicSession({}, &inspection).ok(),
+        std::shared_ptr<IDatabaseAtomicSession> inspection;
+        Check(dynamic_cast<IDatabaseAtomicTarget*>(target.get())->AcquireAtomicSession({}, &inspection).ok(),
               "fault lease inspection");
         Check(inspection->Begin().ok(), "simulate expired failed writer");
         int64_t now = 0;
         Check(inspection->ReadDatabaseTime(&now).ok(), "expiry target clock");
-        auto p = std::vector<DatabaseParameterV1>{IntParameter(now), TextParameter(c.config.task_key)};
+        auto p = std::vector<DatabaseParameter>{IntParameter(now), TextParameter(c.config.task_key)};
         uint64_t affected = 0;
         Check(inspection
                       ->ExecutePrepared("UPDATE baseline_tasks SET lease_deadline=? WHERE task_key=?", p.data(),

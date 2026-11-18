@@ -24,8 +24,8 @@ namespace database {
 // 同时实现 IPlugin（生命周期）、IDatabaseFactory（通道工厂）、IRouterHandle（路由声明）
 class __attribute__((visibility("default"))) DatabasePlugin : public IPlugin,
                                                               public IDatabaseFactory,
-                                                              public IDatabaseChannelLeaseProviderV1,
-                                                              public IChannelDatasetDescriptorV1,
+                                                              public IDatabaseChannelLeaseProvider,
+                                                              public IChannelDatasetDescriptor,
                                                               public IRouterHandle {
  public:
     DatabasePlugin() = default;
@@ -55,8 +55,7 @@ class __attribute__((visibility("default"))) DatabasePlugin : public IPlugin,
     void EnumRoutes(std::function<void(const RouteItem&)> callback) override;
 
     const char* ProviderId() const override { return "database"; }
-    int Describe(const ChannelDatasetRequestV1& request, ChannelDatasetSnapshotV1* out,
-                 DataSemanticsErrorV1* error) override;
+    int Describe(const ChannelDatasetRequest& request, ChannelDatasetSnapshot* out, DataSemanticsError* error) override;
 
  private:
     // 路由处理（fnRouterHandler 签名）

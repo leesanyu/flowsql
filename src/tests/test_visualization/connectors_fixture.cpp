@@ -98,8 +98,8 @@ int main(int argc, char** argv) {
             execute("DROP TABLE IF EXISTS " + quoted);
         } else if (mode == "baseline" || mode == "numeric_baseline" || mode == "statistics_baseline") {
             auto* begin = dynamic_cast<IDbSnapshotSession*>(session.get());
-            auto* query = dynamic_cast<IDatabaseExplorationSessionV1*>(session.get());
-            DatabaseSnapshotOptionsV1 options;
+            auto* query = dynamic_cast<IDatabaseExplorationSession*>(session.get());
+            DatabaseSnapshotOptions options;
             options.consistent_transaction = dialect != "clickhouse";
             assert(begin && query && begin->BeginSnapshot(options) == 0);
             const auto avg = dialect == "clickhouse" ? "avgOrNull(value)" : "AVG(value)";
@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
             rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
             writer.StartArray();
             for (const auto& statement : sql) {
-                ExplorationResultV1 result;
+                ExplorationResult result;
                 assert(query->Query(statement.c_str(), nullptr, 0, 100, 65536, &result) == 0);
                 writer.StartArray();
                 for (const auto& row : result.rows) {
@@ -157,7 +157,7 @@ int main(int argc, char** argv) {
                             writer.Double(*value);
                         else if (auto value = std::get_if<std::string>(&cell))
                             writer.String(value->data(), value->size());
-                        else if (auto value = std::get_if<ExplorationDecimalV1>(&cell))
+                        else if (auto value = std::get_if<ExplorationDecimal>(&cell))
                             writer.String(value->text.data(), value->text.size());
                         else
                             assert(false);

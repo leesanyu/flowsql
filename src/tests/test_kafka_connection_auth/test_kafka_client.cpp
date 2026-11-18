@@ -55,7 +55,7 @@ int main() {
         "channels", "add",
         Parse(
             R"({"name":"source","connection_name":"offline","role":"source","topic":"events","consumer_group":"test","payload_kind":"packet"})"));
-    flowsql::IKafkaClientSessionV1* leased = nullptr;
+    flowsql::IKafkaClientSession* leased = nullptr;
     std::string error;
     assert(provider.OpenSession("source", "sink", &leased, &error) != 0 && leased == nullptr);
     assert(provider.OpenSession("source", "source", &leased, &error) == 0 && leased);

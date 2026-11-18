@@ -7,15 +7,15 @@
 #include <string>
 
 namespace flowsql {
-struct DataFrameMetadataV1 {
+struct DataFrameMetadata {
     std::shared_ptr<arrow::Schema> schema;
     uint64_t replacement_generation = 0;
     bool pending = false;
     std::string error;
 };
 // Optional in-process channel capability. Never loads data or copies record buffers.
-struct IDataFrameMetadataV1 {
-    virtual ~IDataFrameMetadataV1() = default;
-    virtual DataFrameMetadataV1 DescribeMetadata() = 0;
+struct IDataFrameMetadata {
+    virtual ~IDataFrameMetadata() = default;
+    virtual DataFrameMetadata DescribeMetadata() = 0;
 };
 }  // namespace flowsql

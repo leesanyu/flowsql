@@ -18,8 +18,8 @@ namespace flowsql {
 // DataFrameChannel — IDataFrameChannel 的内存实现
 // Read() 快照语义（非破坏性），Write() 替换语义
 class DataFrameChannel : public IAppendableDataFrameChannel,
-                         public IDataFrameSnapshotReaderV1,
-                         public IDataFrameMetadataV1 {
+                         public IDataFrameSnapshotReader,
+                         public IDataFrameMetadata {
  public:
     DataFrameChannel(const std::string& category, const std::string& name);
     ~DataFrameChannel() override = default;
@@ -43,8 +43,8 @@ class DataFrameChannel : public IAppendableDataFrameChannel,
     int Write(IDataFrame* df) override;
     int Append(IDataFrame* df) override;
     int Read(IDataFrame* df) override;
-    DataFrameMetadataV1 DescribeMetadata() override;
-    int CaptureSnapshot(const DataFrameSnapshotRequestV1& request, std::shared_ptr<arrow::RecordBatch>* output,
+    DataFrameMetadata DescribeMetadata() override;
+    int CaptureSnapshot(const DataFrameSnapshotRequest& request, std::shared_ptr<arrow::RecordBatch>* output,
                         uint64_t* retained_bytes, std::string* error) override;
 
  private:

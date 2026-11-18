@@ -6,7 +6,7 @@
 #include <string_view>
 
 namespace flowsql {
-struct BaselineModelParametersV1 {
+struct BaselineModelParameters {
     uint32_t parameters_version = 1;
     BaselineStatus status = BaselineStatus::kNotTrained;
     std::string maturity;
@@ -15,11 +15,11 @@ struct BaselineModelParametersV1 {
 // Independent optional task capability; existing task/service virtual tables stay unchanged.
 // Serialize with Submit/Bootstrap/Release/Close. No learning, cursor or diagnostic mutation.
 // Owned output; keep the plugin alive through the task and every exported product.
-interface IBaselineModelParametersV1 {
-    virtual ~IBaselineModelParametersV1() = default;
+interface IBaselineModelParameters {
+    virtual ~IBaselineModelParameters() = default;
     // max_bytes bounds serialization; failure leaves output unchanged. Missing series is a
     // successful untrained result. Closed task, empty key or invalid budget returns failure.
     virtual BaselineStatus ExportModelParameters(std::string_view series_key, uint64_t max_bytes,
-                                                 BaselineModelParametersV1 * output) const = 0;
+                                                 BaselineModelParameters * output) const = 0;
 };
 }  // namespace flowsql

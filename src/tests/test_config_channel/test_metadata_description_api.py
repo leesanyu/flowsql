@@ -238,14 +238,14 @@ def main():
                 before=describe(base,locator)
                 field=before['structure']['fields'][0]['name']
                 meaning=dict(state='declared',origin='manual',value='HTTP object meaning')
-                payload=dict(locator=locator,basis=before['basis'],changes=dict(fields={field:dict(definition=meaning)}),confirmations=before['checks'].get('required_confirmations',[]))
+                payload=dict(locator=locator,basis=before['basis'],editor_changes=dict(fields={field:dict(definition='HTTP object meaning')}),confirmations=before['checks'].get('required_confirmations',[]))
                 saved=call(base,'channels/save-description',payload)
                 assert saved['status']=='applied' and saved['dictionary_ref'] and saved['binding_ref']
                 assert call(base,'channels/save-description',payload)['binding_ref']==saved['binding_ref']
                 current=describe(base,locator)
                 assert current['basis']==saved['basis'] and current['description']['document']['fields'][0]['definition']==meaning
                 if locator['kind']=='dataframe':assert current['description']['document']['fields'][0]['unit']['value']['code']=='ms'
-                payload['changes']['fields'][field]['definition']['value']='stale write'
+                payload['editor_changes']['fields'][field]['definition']='stale write'
                 assert call(base,'channels/save-description',payload,409)['code']=='REVISION_CONFLICT'
             assert describe(base,dict(kind='dataframe',name='lazy'))['structure']['state']=='pending'
             # The simplified client sends no SemanticValue wrappers or field identities.
@@ -301,7 +301,7 @@ def main():
             with ThreadingHTTPServer(('127.0.0.1',0),SilentPeer) as peer:
                 thread=threading.Thread(target=peer.serve_forever,kwargs={'poll_interval':.01});thread.start()
                 try:
-                    assert request('http://127.0.0.1:'+str(gateway)+'/gateway/register',dict(prefix='/semantics/v1/describe',address='127.0.0.1:'+str(peer.server_port)))[0]==200
+                    assert request('http://127.0.0.1:'+str(gateway)+'/gateway/register',dict(prefix='/semantics/describe',address='127.0.0.1:'+str(peer.server_port)))[0]==200
                     wall=int(time.time()*1000);started=time.monotonic()
                     err=call(base,'describe',dict(target=dict(kind='operator',name='builtin.passthrough'),timeout_ms=80),504)
                     assert err['code']=='SOURCE_TIMEOUT' and time.monotonic()-started<.35

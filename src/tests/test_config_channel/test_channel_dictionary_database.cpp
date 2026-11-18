@@ -23,8 +23,8 @@ std::string Quote(const std::string& s, const std::string& dialect) {
     return result + q;
 }
 Json Describe(DatabasePlugin& p, const Json& locator) {
-    ChannelDatasetSnapshotV1 snapshot;
-    DataSemanticsErrorV1 error;
+    ChannelDatasetSnapshot snapshot;
+    DataSemanticsError error;
     const auto rc = p.Describe({Encode(locator), 5000}, &snapshot, &error);
     if (rc) std::cerr << "describe failed: " << error.code << " " << error.message << std::endl;
     assert(rc == 0 && snapshot.document_json);
@@ -117,8 +117,8 @@ void Backend(const std::string& dialect, const std::filesystem::path& root) {
     Json missing;
     missing.CopyFrom(locator, missing.GetAllocator());
     Set(missing, "table", table + "_absent", missing.GetAllocator());
-    ChannelDatasetSnapshotV1 out;
-    DataSemanticsErrorV1 error;
+    ChannelDatasetSnapshot out;
+    DataSemanticsError error;
     assert(plugin.Describe({Encode(missing)}, &out, &error) != 0 && error.code == "NOT_FOUND" && !out.document_json);
     Set(missing, "sql", "SELECT * FROM anything", missing.GetAllocator());
     assert(plugin.Describe({Encode(missing)}, &out, &error) != 0 && error.code == "INVALID_REQUEST");
@@ -235,8 +235,8 @@ void SQLiteDeclarations(const std::filesystem::path& root) {
     const auto absent = (root / "absent.db").string();
     assert(plugin.Option(("type=sqlite;name=absent;path=" + absent).c_str()) == 0);
     Set(locator, "name", "absent", locator.GetAllocator());
-    ChannelDatasetSnapshotV1 out;
-    DataSemanticsErrorV1 error;
+    ChannelDatasetSnapshot out;
+    DataSemanticsError error;
     assert(plugin.Describe({Encode(locator)}, &out, &error) != 0 && error.code == "SOURCE_UNAVAILABLE");
     assert(!out.document_json && !std::filesystem::exists(absent));
     Set(locator, "name", "declared", locator.GetAllocator());

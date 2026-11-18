@@ -21,8 +21,8 @@ class TaskRegistry;
 
 class __attribute__((visibility("default"))) BaselinePlugin : public IPlugin,
                                                               public IBaselineService,
-                                                              public IBaselineStateControlServiceV1,
-                                                              public IBaselineCheckpointServiceV1 {
+                                                              public IBaselineStateControlService,
+                                                              public IBaselineCheckpointService {
  public:
     BaselinePlugin();
     ~BaselinePlugin() override;
@@ -44,11 +44,11 @@ class __attribute__((visibility("default"))) BaselinePlugin : public IPlugin,
 
     BaselineSerializationResult QueryServiceSnapshot(BaselineSerializationFormat format) const override;
 
-    std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControlV1>> Bind(
-        std::shared_ptr<IBaselineTask> task, const BaselineStateLimitsV1& limits) override;
-    std::pair<BaselineStatus, std::shared_ptr<IBaselineCheckpointV1>> Bind(
-        std::shared_ptr<IBaselineTask> task, std::shared_ptr<IBaselineTaskStateControlV1> state_control,
-        const BaselineCheckpointBindingV1& binding) override;
+    std::pair<BaselineStatus, std::shared_ptr<IBaselineTaskStateControl>> Bind(
+        std::shared_ptr<IBaselineTask> task, const BaselineStateLimits& limits) override;
+    std::pair<BaselineStatus, std::shared_ptr<IBaselineCheckpoint>> Bind(
+        std::shared_ptr<IBaselineTask> task, std::shared_ptr<IBaselineTaskStateControl> state_control,
+        const BaselineCheckpointBinding& binding) override;
 
  private:
     IQuerier* querier_ = nullptr;

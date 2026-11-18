@@ -40,7 +40,7 @@ template <bool ipv6 = false>
 auto Echo(bool request, uint16_t id = 1, uint16_t sequence = 2) {
     using Address = std::conditional_t<ipv6, flowsql::network::IPv6Address, flowsql::network::IPv4Address>;
     npm::NpmIcmpFamilyParsed<Address> parsed;
-    parsed.kind = request ? npm::NpmIcmpMessageKindV1::kEchoRequest : npm::NpmIcmpMessageKindV1::kEchoReply;
+    parsed.kind = request ? npm::NpmIcmpMessageKind::kEchoRequest : npm::NpmIcmpMessageKind::kEchoReply;
     parsed.icmp_type = ipv6 ? (request ? 128 : 129) : (request ? 8 : 0);
     parsed.echo_id = id;
     parsed.echo_sequence = sequence;
@@ -73,9 +73,9 @@ struct ObservedEvent {
 
 void TestMatchRetryAndIsolation() {
     auto budget = std::make_shared<Budget>();
-    npm::NpmIcmpConfigV1 config;
+    npm::NpmIcmpConfig config;
     config.echo_timeout_ns = 100;
-    npm::NpmIcmpEchoTrackerV1 tracker(config, budget);
+    npm::NpmIcmpEchoTracker tracker(config, budget);
     std::vector<ObservedEvent> rows;
     const auto emit = [&](const auto& row) {
         rows.emplace_back(row);
@@ -119,9 +119,9 @@ void TestMatchRetryAndIsolation() {
 
 void TestTruncationAndTime() {
     auto budget = std::make_shared<Budget>();
-    npm::NpmIcmpConfigV1 config;
+    npm::NpmIcmpConfig config;
     config.echo_timeout_ns = 100;
-    npm::NpmIcmpEchoTrackerV1 tracker(config, budget);
+    npm::NpmIcmpEchoTracker tracker(config, budget);
     std::vector<ObservedEvent> rows;
     const auto emit = [&](const auto& row) {
         rows.emplace_back(row);
@@ -152,9 +152,9 @@ void TestTruncationAndTime() {
 
 void TestEofBudgetAndFailure() {
     auto budget = std::make_shared<Budget>();
-    npm::NpmIcmpConfigV1 config;
+    npm::NpmIcmpConfig config;
     config.max_pending_echo = 1;
-    npm::NpmIcmpEchoTrackerV1 tracker(config, budget);
+    npm::NpmIcmpEchoTracker tracker(config, budget);
     std::vector<ObservedEvent> rows;
     const auto emit = [&](const auto& row) {
         rows.emplace_back(row);
@@ -167,7 +167,7 @@ void TestEofBudgetAndFailure() {
     assert(budget->used == 0 && tracker.PendingCount() == 0);
     assert(tracker.Finish(151, emit) == 0 && rows.size() == 1);
 
-    npm::NpmIcmpEchoTrackerV1 failing(config, budget);
+    npm::NpmIcmpEchoTracker failing(config, budget);
     budget->limit = 0;
     assert(failing.OnEcho(Echo(true), 1, 100, emit) == ENOMEM && failing.PendingCount() == 0);
     budget->limit = std::numeric_limits<uint64_t>::max();
@@ -180,9 +180,9 @@ void TestEofBudgetAndFailure() {
 
 void TestTimestampBounds() {
     auto budget = std::make_shared<Budget>();
-    npm::NpmIcmpConfigV1 config;
+    npm::NpmIcmpConfig config;
     config.echo_timeout_ns = 100;
-    npm::NpmIcmpEchoTrackerV1 tracker(config, budget);
+    npm::NpmIcmpEchoTracker tracker(config, budget);
     std::vector<ObservedEvent> rows;
     const auto emit = [&](const auto& row) {
         rows.emplace_back(row);
@@ -200,10 +200,10 @@ void TestTimestampBounds() {
 
 void TestSharedFamilyCapacityAndCharges() {
     auto budget = std::make_shared<Budget>();
-    npm::NpmIcmpConfigV1 config;
+    npm::NpmIcmpConfig config;
     config.max_pending_echo = 2;
     config.echo_timeout_ns = 100;
-    npm::NpmIcmpEchoTrackerV1 tracker(config, budget);
+    npm::NpmIcmpEchoTracker tracker(config, budget);
     std::vector<ObservedEvent> rows;
     const auto emit = [&](const auto& row) {
         rows.emplace_back(row);

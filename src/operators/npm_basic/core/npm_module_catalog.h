@@ -16,51 +16,50 @@ struct NpmBasicTaskConfig;
 class NpmProtocolContext;
 class NpmResultRouter;
 
-struct NpmModuleInstanceV1 {
+struct NpmModuleInstance {
     std::unique_ptr<INpmAnalysisModule> analysis;
-    std::unique_ptr<INpmProtocolModuleV1> protocol;
+    std::unique_ptr<INpmProtocolModule> protocol;
     // Optional, non-owning interface of the same protocol object; this factory struct is internal, not plugin ABI.
-    INpmTcpStreamConsumerV1* tcp_stream_consumer = nullptr;
+    INpmTcpStreamConsumer* tcp_stream_consumer = nullptr;
 };
 
 /** Checks instance shape, declared stream consumption and interface ownership before runtime publication. */
-NpmProtocolContractStatusV1 ValidateNpmModuleInstanceV1(const NpmModulePlanV1& plan,
-                                                        const NpmModuleInstanceV1& instance);
+NpmProtocolContractStatus ValidateNpmModuleInstance(const NpmModulePlan& plan, const NpmModuleInstance& instance);
 
-struct NpmPreparedModuleV1 {
-    NpmModulePlanV1 plan;
-    std::function<NpmModuleInstanceV1(NpmProtocolContext&, std::shared_ptr<INpmTaskBudget>)> create;
+struct NpmPreparedModule {
+    NpmModulePlan plan;
+    std::function<NpmModuleInstance(NpmProtocolContext&, std::shared_ptr<INpmTaskBudget>)> create;
 };
 
-struct NpmModuleRegistrationV1 {
+struct NpmModuleRegistration {
     std::string module_id;
     bool available = true;
     std::vector<std::string> entity_ids;
     // json is borrowed only during prepare; returned plans and factory captures must own their configuration.
-    std::function<NpmProtocolContractStatusV1(const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModuleV1*)>
+    std::function<NpmProtocolContractStatus(const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModule*)>
         prepare;
 };
 
-using NpmModuleCatalogV1 = std::vector<NpmModuleRegistrationV1>;
-const NpmModuleCatalogV1& ProductionNpmModuleCatalogV1();
-NpmProtocolContractStatusV1 ValidateNpmModuleCatalogV1(const NpmModuleCatalogV1& catalog);
-NpmProtocolContractStatusV1 PrepareNpmModulesV1(const NpmBasicTaskConfig& config, const NpmModuleCatalogV1& catalog,
-                                                std::vector<NpmPreparedModuleV1>* output);
+using NpmModuleCatalog = std::vector<NpmModuleRegistration>;
+const NpmModuleCatalog& ProductionNpmModuleCatalog();
+NpmProtocolContractStatus ValidateNpmModuleCatalog(const NpmModuleCatalog& catalog);
+NpmProtocolContractStatus PrepareNpmModules(const NpmBasicTaskConfig& config, const NpmModuleCatalog& catalog,
+                                            std::vector<NpmPreparedModule>* output);
 
 /** Adapts subscriptions to the existing unique session processing chain. */
-class NpmProtocolModuleAdapter final : public INpmAnalysisModule, private INpmResultEmitterV1 {
+class NpmProtocolModuleAdapter final : public INpmAnalysisModule, private INpmResultEmitter {
  public:
-    NpmProtocolModuleAdapter(NpmModulePlanV1 plan, std::unique_ptr<INpmProtocolModuleV1> module,
+    NpmProtocolModuleAdapter(NpmModulePlan plan, std::unique_ptr<INpmProtocolModule> module,
                              const std::atomic<bool>* cancellation_requested, NpmResultRouter* router);
     ~NpmProtocolModuleAdapter() override;
     bool AcceptsControl() const;
-    int OnControl(const NpmInputEventV1& event);
+    int OnControl(const NpmInputEvent& event);
     std::optional<int64_t> NextEventDeadlineNs() const;
-    int OnTime(const NpmModuleTimeV1& time);
+    int OnTime(const NpmModuleTime& time);
     int Finish(int64_t observed_at_ns);
     void Abort() noexcept;
-    const NpmModulePlanV1& Plan() const noexcept { return plan_; }
-    INpmResultEmitterV1* StreamEmitter() noexcept { return this; }
+    const NpmModulePlan& Plan() const noexcept { return plan_; }
+    INpmResultEmitter* StreamEmitter() noexcept { return this; }
     int OnPacket(const NpmPacketView&, const NpmSessionView&, INpmResultWriter&) override;
     int OnSessionSnapshot(const NpmSessionView&, int64_t, INpmResultWriter&) override;
     int OnSessionEnd(const NpmSessionView&, NpmSessionEndReason, int64_t, INpmResultWriter&) override;
@@ -69,8 +68,8 @@ class NpmProtocolModuleAdapter final : public INpmAnalysisModule, private INpmRe
     bool AcceptsSession(const NpmSessionView&) const;
     int Emit(std::string_view entity_id, const arrow::RecordBatch& rows) override;
     NpmResultRouter* router_;
-    NpmModulePlanV1 plan_;
-    std::unique_ptr<INpmProtocolModuleV1> module_;
+    NpmModulePlan plan_;
+    std::unique_ptr<INpmProtocolModule> module_;
     const std::atomic<bool>* cancellation_requested_ = nullptr;
     bool finished_ = false;
     bool aborted_ = false;

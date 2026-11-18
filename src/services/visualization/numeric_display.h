@@ -11,15 +11,15 @@
 #include "workflow.h"
 
 namespace flowsql::visualization {
-struct NumericValueV1 {
+struct NumericValue {
     double value;
     bool exact;
 };
-struct NumericDisplayV1 {
+struct NumericDisplay {
     std::string field_id;
     std::string mode = "exact";
     std::string origin = "decimal";
-    std::vector<ExplorationValueV1> exact_values;
+    std::vector<ExplorationValue> exact_values;
 };
 
 // Canonical decimal text, including scientific notation from native numeric results.
@@ -65,7 +65,7 @@ inline std::string CanonicalDecimal(std::string text) {
     }
     return negative ? "-" + result : result;
 }
-inline NumericValueV1 DecimalForDisplay(const std::string& text) {
+inline NumericValue DecimalForDisplay(const std::string& text) {
     try {
         char* end = nullptr;
         const double value = std::strtod(text.c_str(), &end);

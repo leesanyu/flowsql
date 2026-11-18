@@ -25,13 +25,13 @@ class EmptyLookup final : public npm::INpmFamilyIcmpActiveSessionLookup {
 };
 
 void TestConfig() {
-    npm::NpmIcmpConfigV1 config;
-    using Error = npm::NpmIcmpConfigErrorV1;
+    npm::NpmIcmpConfig config;
+    using Error = npm::NpmIcmpConfigError;
     const auto reject = [&](std::string_view json, Error error, std::string_view path) {
-        const auto status = npm::ParseNpmIcmpConfigV1(json, &config);
+        const auto status = npm::ParseNpmIcmpConfig(json, &config);
         assert(status.error == error && status.path == path);
-        assert(config.echo_timeout_ns == npm::kNpmIcmpDefaultEchoTimeoutNsV1);
-        assert(config.max_pending_echo == npm::kNpmIcmpDefaultMaxPendingEchoV1);
+        assert(config.echo_timeout_ns == npm::kNpmIcmpDefaultEchoTimeoutNs);
+        assert(config.max_pending_echo == npm::kNpmIcmpDefaultMaxPendingEcho);
     };
     reject("", Error::kInvalidType, "/icmp");
     reject("null", Error::kInvalidType, "/icmp");
@@ -44,13 +44,13 @@ void TestConfig() {
     reject(R"({"max_pending_echo":0})", Error::kInvalidRange, "/icmp/max_pending_echo");
     reject(R"({"max_pending_echo":4097})", Error::kInvalidRange, "/icmp/max_pending_echo");
     reject(R"({"max_pending_echo":1,"max_pending_echo":2})", Error::kDuplicateField, "/icmp/max_pending_echo");
-    assert(npm::ParseNpmIcmpConfigV1("{}", nullptr).error == Error::kInvalidType);
-    assert(npm::ParseNpmIcmpConfigV1("{}", &config).error == Error::kNone);
+    assert(npm::ParseNpmIcmpConfig("{}", nullptr).error == Error::kInvalidType);
+    assert(npm::ParseNpmIcmpConfig("{}", &config).error == Error::kNone);
     assert(config.echo_timeout_ns == 5'000'000'000 && config.max_pending_echo == 4096);
-    assert(npm::ParseNpmIcmpConfigV1(R"({"echo_timeout_ns":1000000,"max_pending_echo":1})", &config).error ==
+    assert(npm::ParseNpmIcmpConfig(R"({"echo_timeout_ns":1000000,"max_pending_echo":1})", &config).error ==
            Error::kNone);
     assert(config.echo_timeout_ns == 1'000'000 && config.max_pending_echo == 1);
-    assert(npm::ParseNpmIcmpConfigV1(R"({"echo_timeout_ns":300000000000,"max_pending_echo":4096})", &config).error ==
+    assert(npm::ParseNpmIcmpConfig(R"({"echo_timeout_ns":300000000000,"max_pending_echo":4096})", &config).error ==
            Error::kNone);
 }
 
@@ -61,19 +61,19 @@ void TestPlanAndSchema() {
     assert(!lookup.FindActive(npm::NpmIcmpQuotedFlow4{}));
     assert(!lookup.FindActive(npm::NpmIcmpQuotedFlow6{}));
 
-    const auto plan = npm::NpmIcmpModulePlanV1();
+    const auto plan = npm::NpmIcmpModulePlan();
     assert(plan.module_id == "icmp");
-    assert(plan.input_mask == static_cast<uint8_t>(npm::NpmInputKindV1::kControlPacket));
+    assert(plan.input_mask == static_cast<uint8_t>(npm::NpmInputKind::kControlPacket));
     assert(!plan.requires_labeling && !plan.requires_tcp_stream && !plan.primary_label_ids);
-    assert(npm::ValidateNpmModulePlanV1(plan, {}).error == npm::NpmProtocolContractErrorV1::kNone);
+    assert(npm::ValidateNpmModulePlan(plan, {}).error == npm::NpmProtocolContractError::kNone);
     assert(plan.entities.size() == 2);
     for (size_t family_index = 0; family_index < 2; ++family_index) {
         const auto& entity = plan.entities.at(family_index);
         const auto address_type = family_index == 0 ? arrow::Type::UINT32 : arrow::Type::FIXED_SIZE_BINARY;
         assert(entity.entity_id == (family_index == 0 ? "icmp_event_ipv4" : "icmp_event_ipv6") &&
                entity.module_id == "icmp");
-        assert(entity.schema_version == 1 && entity.revision_semantics == npm::NpmRevisionSemanticsV1::kEvent);
-        assert(npm::ValidateNpmEntityDescriptorV1(entity).error == npm::NpmProtocolContractErrorV1::kNone);
+        assert(entity.schema_version == 1 && entity.revision_semantics == npm::NpmRevisionSemantics::kEvent);
+        assert(npm::ValidateNpmEntityDescriptor(entity).error == npm::NpmProtocolContractError::kNone);
         for (const auto& [key, value] : std::vector<std::pair<const char*, const char*>>{
 
                  {"flowsql.schema_version", "1"},

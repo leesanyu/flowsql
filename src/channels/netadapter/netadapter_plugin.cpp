@@ -12,7 +12,7 @@
 namespace flowsql::channels::netadapter {
 struct NetAdapterPlugin::Channel final : IBlockStreamChannel {
     std::string name, option;
-    CaptureBackendConfigV1 config;
+    CaptureBackendConfig config;
     uint64_t domain = 0;
     std::atomic<uint32_t> leases{0};
     const char* Category() override { return "netadapter"; }
@@ -30,7 +30,7 @@ struct NetAdapterPlugin::Channel final : IBlockStreamChannel {
 };
 struct NetAdapterPlugin::Lease {
     std::shared_ptr<Channel> channel;
-    std::shared_ptr<ICaptureBackendSessionV1> backend;
+    std::shared_ptr<ICaptureBackendSession> backend;
     ~Lease() { --channel->leases; }
 };
 int NetAdapterPlugin::Option(const char* option) {
@@ -106,11 +106,11 @@ int NetAdapterPlugin::Unload() {
     protocol_ = nullptr;
     return 0;
 }
-ICaptureBackendProviderV1* NetAdapterPlugin::Provider(const std::string& backend) const {
-    ICaptureBackendProviderV1* result = nullptr;
+ICaptureBackendProvider* NetAdapterPlugin::Provider(const std::string& backend) const {
+    ICaptureBackendProvider* result = nullptr;
     if (querier_)
-        querier_->Traverse(IID_CAPTURE_BACKEND_PROVIDER_V1, [&](void* value) {
-            auto* provider = static_cast<ICaptureBackendProviderV1*>(value);
+        querier_->Traverse(IID_CAPTURE_BACKEND_PROVIDER, [&](void* value) {
+            auto* provider = static_cast<ICaptureBackendProvider*>(value);
             if (provider && backend == provider->Backend()) {
                 result = provider;
                 return 1;
@@ -159,7 +159,7 @@ int NetAdapterPlugin::ModifyChannel(const std::string& type, const std::string& 
     auto it = channels_.find(name);
     if (it == channels_.end()) return ENOENT;
     if (it->second->leases) return EBUSY;
-    CaptureBackendConfigV1 config;
+    CaptureBackendConfig config;
     std::string normalized, error;
     if (ParseNetAdapterConfig(option, &config, &normalized, &error) != 0) return EINVAL;
     if (!Provider(config.backend)) return ENODEV;
@@ -238,8 +238,8 @@ void NetAdapterPlugin::QueryChannels(
     for (const auto& row : rows) callback("netadapter", row.name, row.option, row.status);
 }
 void NetAdapterPlugin::DescribeChannelTypes(
-    std::function<void(const BlockStreamChannelTypeDescriptorV1&)> callback) const {
-    BlockStreamChannelTypeDescriptorV1 descriptor;
+    std::function<void(const BlockStreamChannelTypeDescriptor&)> callback) const {
+    BlockStreamChannelTypeDescriptor descriptor;
     descriptor.channel_type = "netadapter";
     descriptor.display_name = "NetAdapter 网卡采集";
     descriptor.allowed_roles = {"source"};
@@ -261,7 +261,7 @@ void NetAdapterPlugin::DescribeChannelTypes(
     };
     callback(descriptor);
 }
-int NetAdapterPlugin::CreateReader(const BlockStreamReaderConfigV1& request, IBlockStreamChannel** output) {
+int NetAdapterPlugin::CreateReader(const BlockStreamReaderConfig& request, IBlockStreamChannel** output) {
     if (!output) return EINVAL;
     *output = nullptr;
     if (!request.source_category || std::string(request.source_category) != "netadapter") return ENOTSUP;
@@ -278,7 +278,7 @@ int NetAdapterPlugin::CreateReader(const BlockStreamReaderConfigV1& request, IBl
     auto filter = std::make_shared<packet::PcapFilterPlan>();
     std::string error;
     if (pcapfile::CompilePcapFilterPlanJson(request.pushed_filter_plan_json, filter.get(), &error) != 0) return EINVAL;
-    std::shared_ptr<ICaptureBackendSessionV1> backend;
+    std::shared_ptr<ICaptureBackendSession> backend;
     const int rc = provider->Open(it->second->config, &backend, &error);
     if (rc) return rc;
     if (!backend) return EFAULT;
@@ -310,13 +310,13 @@ void NetAdapterPlugin::ReleaseReader(IBlockStreamChannel* reader) {
     it->second->Cancel();
     readers_.erase(it);
 }
-int NetAdapterPlugin::Resolve(const FilterDomainResolveRequestV1& request, FilterDomainResolveResultV1* result) const {
+int NetAdapterPlugin::Resolve(const FilterDomainResolveRequest& request, FilterDomainResolveResult* result) const {
     if (!request.target_category || std::string(request.target_category) != "netadapter") return ENOTSUP;
     auto next = request;
     next.target_category = "pcapfile";
     return pcapfile::PcapFilterDomainResolver().Resolve(next, result);
 }
-int NetAdapterPlugin::EvaluatePushdown(const FilterPushdownRequestV1& request, FilterPushdownResultV1* result) const {
+int NetAdapterPlugin::EvaluatePushdown(const FilterPushdownRequest& request, FilterPushdownResult* result) const {
     if (!request.target_category || std::string(request.target_category) != "netadapter") return ENOTSUP;
     if (!result || request.contract_version != 1 || !request.canonical_plan_json) return EINVAL;
     result->diagnostic = "exact typed packet plan; unsupported nodes stay residual";

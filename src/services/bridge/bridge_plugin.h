@@ -24,7 +24,7 @@ namespace bridge {
 // BridgePlugin — 桥接插件生命周期管理器
 // Gateway 架构下：不再管理 Python Worker 进程，通过 HTTP 发现 Worker 并注册算子
 // 实现 IBridge 接口，提供 Python 算子的查询和刷新能力
-class BridgePlugin : public IPlugin, public IBridge, public IPythonOperatorPublisherV1 {
+class BridgePlugin : public IPlugin, public IBridge, public IPythonOperatorPublisher {
  public:
     BridgePlugin() = default;
     ~BridgePlugin() override = default;
@@ -40,16 +40,16 @@ class BridgePlugin : public IPlugin, public IBridge, public IPythonOperatorPubli
     std::shared_ptr<IOperator> FindOperator(const std::string& category, const std::string& name) override;
     void TraverseOperators(std::function<int(IOperator*)> fn) override;
     int Refresh() override;
-    int ReadPythonSource(const char*, const char*, std::string*, DataSemanticsErrorV1*) override;
-    int PublishPythonSource(const char*, const char*, const char*, std::string*, DataSemanticsErrorV1*) override;
+    int ReadPythonSource(const char*, const char*, std::string*, DataSemanticsError*) override;
+    int PublishPythonSource(const char*, const char*, const char*, std::string*, DataSemanticsError*) override;
 
  private:
     using BridgeOperatorMap = std::unordered_map<std::string, std::shared_ptr<PythonOperatorBridge>>;
 
     // 从 Python Worker 获取算子列表并原子替换本地快照（不注册到 PluginLoader）
     int DiscoverOperators();
-    int ApplyOperators(const rapidjson::Value&, const std::string& token, DataSemanticsErrorV1*);
-    int WorkerControl(const std::string&, const rapidjson::Value&, rapidjson::Document*, DataSemanticsErrorV1*);
+    int ApplyOperators(const rapidjson::Value&, const std::string& token, DataSemanticsError*);
+    int WorkerControl(const std::string&, const rapidjson::Value&, rapidjson::Document*, DataSemanticsError*);
     std::mutex discovery_mu_;
     int SyncOperatorsToCatalog(const std::vector<flowsql::OperatorMeta>& ops);
     size_t OperatorCount() const;

@@ -11,7 +11,7 @@
 namespace flowsql::npm {
 namespace {
 
-using Error = NpmTlsFramerErrorV1;
+using Error = NpmTlsFramerError;
 
 void MarkTime(std::optional<int64_t> capture, bool* known, std::optional<int64_t>* maximum) {
     if (!capture) {
@@ -21,21 +21,21 @@ void MarkTime(std::optional<int64_t> capture, bool* known, std::optional<int64_t
     }
 }
 
-NpmTlsFramedKindV1 RecordKind(uint8_t type) {
-    if (type == 20) return NpmTlsFramedKindV1::kChangeCipherSpec;
-    if (type == 21) return NpmTlsFramedKindV1::kAlert;
-    return NpmTlsFramedKindV1::kApplicationData;
+NpmTlsFramedKind RecordKind(uint8_t type) {
+    if (type == 20) return NpmTlsFramedKind::kChangeCipherSpec;
+    if (type == 21) return NpmTlsFramedKind::kAlert;
+    return NpmTlsFramedKind::kApplicationData;
 }
 
 }  // namespace
 
-NpmTlsFramerV1::NpmTlsFramerV1(uint32_t max_hello_bytes) : max_hello_bytes_(max_hello_bytes) {}
+NpmTlsFramer::NpmTlsFramer(uint32_t max_hello_bytes) : max_hello_bytes_(max_hello_bytes) {}
 
-size_t NpmTlsFramerV1::RetainedBytes() const noexcept {
+size_t NpmTlsFramer::RetainedBytes() const noexcept {
     return directions_[0].framing.hello_bytes.size() + directions_[1].framing.hello_bytes.size();
 }
 
-NpmTlsFramerErrorV1 NpmTlsFramerV1::Fail(NpmTlsFramerErrorV1 error) noexcept {
+NpmTlsFramerError NpmTlsFramer::Fail(NpmTlsFramerError error) noexcept {
     closed_ = true;
     for (auto& direction : directions_) {
         direction.framing.hello_bytes.clear();
@@ -44,31 +44,31 @@ NpmTlsFramerErrorV1 NpmTlsFramerV1::Fail(NpmTlsFramerErrorV1 error) noexcept {
     return error;
 }
 
-NpmTlsFramerErrorV1 NpmTlsFramerV1::NoCandidate(Direction* direction, NpmTlsFramerErrorV1 error) noexcept {
+NpmTlsFramerError NpmTlsFramer::NoCandidate(Direction* direction, NpmTlsFramerError error) noexcept {
     direction->disabled = true;
     direction->framing.hello_bytes.clear();
     if (directions_[0].disabled && directions_[1].disabled) closed_ = true;
     return error;
 }
 
-NpmTlsFramerErrorV1 NpmTlsFramerV1::FinishMessage(Direction* direction, NpmPacketDirection packet_direction,
-                                                  std::vector<NpmTlsFramedEventV1>* output) {
-    NpmTlsFramedEventV1 event;
+NpmTlsFramerError NpmTlsFramer::FinishMessage(Direction* direction, NpmPacketDirection packet_direction,
+                                              std::vector<NpmTlsFramedEvent>* output) {
+    NpmTlsFramedEvent event;
     event.direction = packet_direction;
     event.message_type = direction->message_type;
     event.first_byte_at_ns = direction->message_first_at_ns;
     event.complete_at_ns = direction->message_times_known ? direction->message_max_at_ns : std::nullopt;
     if (direction->message_type == 1 || direction->message_type == 2) {
-        NpmTlsHelloFactsV1 facts;
+        NpmTlsHelloFacts facts;
         const auto error =
-            ParseNpmTlsHelloV1(direction->message_type, direction->framing.hello_bytes, event.complete_at_ns, &facts);
-        if (error == NpmTlsHelloErrorV1::kLimit) return Fail(Error::kHelloLimit);
-        if (error == NpmTlsHelloErrorV1::kAllocationFailed) return Fail(Error::kAllocationFailed);
-        if (error != NpmTlsHelloErrorV1::kNone) return Fail(Error::kMalformedHello);
-        event.kind = direction->message_type == 1 ? NpmTlsFramedKindV1::kClientHello : NpmTlsFramedKindV1::kServerHello;
+            ParseNpmTlsHello(direction->message_type, direction->framing.hello_bytes, event.complete_at_ns, &facts);
+        if (error == NpmTlsHelloError::kLimit) return Fail(Error::kHelloLimit);
+        if (error == NpmTlsHelloError::kAllocationFailed) return Fail(Error::kAllocationFailed);
+        if (error != NpmTlsHelloError::kNone) return Fail(Error::kMalformedHello);
+        event.kind = direction->message_type == 1 ? NpmTlsFramedKind::kClientHello : NpmTlsFramedKind::kServerHello;
         event.hello = std::move(facts);
     } else {
-        event.kind = NpmTlsFramedKindV1::kOtherHandshake;
+        event.kind = NpmTlsFramedKind::kOtherHandshake;
     }
     output->push_back(std::move(event));
     direction->framing.handshake_header_bytes = 0;
@@ -81,10 +81,10 @@ NpmTlsFramerErrorV1 NpmTlsFramerV1::FinishMessage(Direction* direction, NpmPacke
     return Error::kNone;
 }
 
-NpmTlsFramerErrorV1 NpmTlsFramerV1::FinishRecord(Direction* direction, NpmPacketDirection packet_direction,
-                                                 std::vector<NpmTlsFramedEventV1>* output) {
+NpmTlsFramerError NpmTlsFramer::FinishRecord(Direction* direction, NpmPacketDirection packet_direction,
+                                             std::vector<NpmTlsFramedEvent>* output) {
     if (direction->record_type != 22) {
-        NpmTlsFramedEventV1 event;
+        NpmTlsFramedEvent event;
         event.direction = packet_direction;
         event.kind = RecordKind(direction->record_type);
         event.record_length = direction->record_length;
@@ -103,9 +103,8 @@ NpmTlsFramerErrorV1 NpmTlsFramerV1::FinishRecord(Direction* direction, NpmPacket
     return Error::kNone;
 }
 
-NpmTlsFramerErrorV1 NpmTlsFramerV1::ConsumeData(Direction* direction, NpmPacketDirection packet_direction,
-                                                const NpmTcpStreamEventV1& event,
-                                                std::vector<NpmTlsFramedEventV1>* output) {
+NpmTlsFramerError NpmTlsFramer::ConsumeData(Direction* direction, NpmPacketDirection packet_direction,
+                                            const NpmTcpStreamEvent& event, std::vector<NpmTlsFramedEvent>* output) {
     const auto* bytes = event.bytes.data;
     const size_t length = event.bytes.size;
     size_t offset = 0;
@@ -210,27 +209,27 @@ NpmTlsFramerErrorV1 NpmTlsFramerV1::ConsumeData(Direction* direction, NpmPacketD
     return Error::kNone;
 }
 
-NpmTlsFramerErrorV1 NpmTlsFramerV1::Consume(const NpmTcpStreamContextV1& context, const NpmTcpStreamEventV1& event,
-                                            std::vector<NpmTlsFramedEventV1>* output) {
+NpmTlsFramerError NpmTlsFramer::Consume(const NpmTcpStreamContext& context, const NpmTcpStreamEvent& event,
+                                        std::vector<NpmTlsFramedEvent>* output) {
     if (output == nullptr) return Error::kInvalidInput;
     if (closed_) return Error::kNone;
     const auto direction_index = static_cast<uint8_t>(context.direction);
     if (direction_index > 1) return Error::kInvalidInput;
     auto* direction = &directions_[direction_index];
     if (direction->disabled) return Error::kNone;
-    if (context.origin != NpmTcpStreamOriginV1::kSyn) {
+    if (context.origin != NpmTcpStreamOrigin::kSyn) {
         return candidate_ ? Fail(Error::kUnsupportedFraming) : NoCandidate(direction, Error::kMidstream);
     }
     if (event.begin != direction->next_offset || event.end < event.begin) {
         return candidate_ ? Fail(Error::kUnsupportedFraming) : NoCandidate(direction, Error::kNotTls);
     }
-    if (event.kind == NpmTcpStreamEventKindV1::kGap) {
+    if (event.kind == NpmTcpStreamEventKind::kGap) {
         direction->framing.gap_seen = true;
         direction->next_offset = event.end;
         const auto error = event.includes_capture_truncation ? Error::kCaptureTruncation : Error::kGap;
         return candidate_ ? Fail(error) : NoCandidate(direction, Error::kNotTls);
     }
-    if (event.kind == NpmTcpStreamEventKindV1::kEnd) {
+    if (event.kind == NpmTcpStreamEventKind::kEnd) {
         direction->framing.ended = true;
         const auto& framing = direction->framing;
         if (candidate_ && (framing.record_header_bytes != 0 || framing.record_remaining != 0 ||
@@ -241,7 +240,7 @@ NpmTlsFramerErrorV1 NpmTlsFramerV1::Consume(const NpmTcpStreamContextV1& context
         if (!candidate_ && directions_[0].disabled && directions_[1].disabled) closed_ = true;
         return Error::kNone;
     }
-    if (event.kind != NpmTcpStreamEventKindV1::kData || event.bytes.empty() ||
+    if (event.kind != NpmTcpStreamEventKind::kData || event.bytes.empty() ||
         event.end - event.begin != event.bytes.size) {
         return Error::kInvalidInput;
     }

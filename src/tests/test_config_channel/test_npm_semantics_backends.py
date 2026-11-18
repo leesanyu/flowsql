@@ -128,7 +128,7 @@ def backend_case(executable, backend, evidence):
             used, published = check(call, backend, first, 'final')
             original_use = resolve(call, first['contract_checks'][0]['use_ref'])
             original_contract = resolve(call, used['contract_ref'])
-            relation = published['npm_dns_transaction_ipv4_final_v1']
+            relation = published['npm_dns_transaction_ipv4_final']
             original_dictionary = resolve(call, relation['dictionary_ref'])
             current = describe(call, relation['locator'])
             semantic(call, 'channels/save-description', dict(

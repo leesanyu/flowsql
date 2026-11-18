@@ -18,7 +18,7 @@ const api = async (path, payload, status = 200) => {
   const result = await r.json(); assert.equal(r.status, status, JSON.stringify(result)); return result.data || result
 }
 const contract = {
-  schema_id: 'flowsql.operator-data-contract.v1', title: 'Browser declared contract',
+  schema_id: 'flowsql.operator-data-contract', title: 'Browser declared contract',
   operator: { category: 'browser', name: 'created', version: '1' },
   configuration: { invocation_schema: { type: 'object', properties: { column: {type:'string'}, mode:{type:'string',enum:['a','b','']}, scalar:{type:'string',default:'123'} }, additionalProperties: true }, affects: {} },
   inputs: [{ port_id: 'input', min_count: 1, max_count: 1, shape: 'dataframe', roles: [{

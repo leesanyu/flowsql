@@ -121,8 +121,8 @@ void ColdAndDirect() {
             Ok(e.Submit(o, &out), e);
             assert(out.results.size() == 1 && !out.relation);
             auto result = kind == BaselineTaskKind::kValue
-                              ? v->SubmitObservation({Key(o.identity), t, *o.value, 1}, {})
-                              : r->SubmitObservation({Key(o.identity), t, *o.numerator, *o.denominator}, {});
+                              ? v->SubmitObservation({Key(o.identity), t, *o.value, 1}, {}).result
+                              : r->SubmitObservation({Key(o.identity), t, *o.numerator, *o.denominator}, {}).result;
             Equal(out.results[0], result, t == 0);
             skipped |= result.status == BaselineStatus::kOk && !result.can_update;
             assert(out.results[0].values.target_bucket == t && out.results[0].values.issued_after_bucket == t);
@@ -178,8 +178,8 @@ void History() {
         EvaluationOutput out;
         Ok(e.Submit(o, &out), e);
         assert(out.results.size() == 1);
-        auto result = v ? v->SubmitObservation({vi.series_key, 200, *o.value, 1}, {})
-                        : r->SubmitObservation({ri.series_key, 200, *o.numerator, *o.denominator}, {});
+        auto result = v ? v->SubmitObservation({vi.series_key, 200, *o.value, 1}, {}).result
+                        : r->SubmitObservation({ri.series_key, 200, *o.numerator, *o.denominator}, {}).result;
         Equal(out.results[0], result);
         assert(out.results[0].model_basis_id.find("bootstrap") != std::string::npos);
         EvaluationOutput bad;
@@ -267,7 +267,7 @@ void RelationParity() {
         direct_input.bucket_id = bucket;
         direct_input.group_idx = input.groups;
         direct_input.metrics = {{"m", 1000.0 + bucket, 3, {500.0, 300.0, 200.0 + bucket}}};
-        auto expected = task.second->SubmitObservation(direct_input, {});
+        auto expected = task.second->SubmitObservation(direct_input, {}).result;
         assert(output.relation && output.relation->status == expected.status);
         assert(output.relation->basis_version == expected.basis_version);
         assert(output.relation->basis_status == expected.basis_status);
@@ -321,7 +321,7 @@ void ForecastReadOnly() {
         auto input = Input(BaselineTaskKind::kValue, bucket, 100 + bucket % 4);
         EvaluationOutput output;
         Ok(e.Submit(input, &output), e);
-        auto expected = task.second->SubmitObservation({key, bucket, *input.value, 1}, {});
+        auto expected = task.second->SubmitObservation({key, bucket, *input.value, 1}, {}).result;
         Equal(output.results.front(), expected, bucket == 0);
         assert(e.QuerySeriesSnapshot("d", "v", input.identity) ==
                task.second->QuerySeriesSnapshot(key, BaselineSerializationFormat::kJson));
@@ -393,7 +393,7 @@ void RatioForecastAndFailedPrediction() {
         EvaluationOutput output;
         Ok(e.Submit(input, &output), e);
         const auto key = Key(input.identity);
-        task->SubmitObservation({key, t, *input.numerator, *input.denominator}, {});
+        task->SubmitObservation({key, t, *input.numerator, *input.denominator}, {}).result;
         auto before = task->QuerySeriesSnapshot(key, BaselineSerializationFormat::kJson);
         auto predictions = task->PredictRolling(key, t + 1, 3);
         assert(before == task->QuerySeriesSnapshot(key, BaselineSerializationFormat::kJson));
@@ -457,7 +457,7 @@ void SampledAndDownweight() {
             if (!sampled && t == 3) input.value = 1e100;
             EvaluationOutput output;
             Ok(e.Submit(input, &output), e);
-            const auto expected = task->SubmitObservation({key, t, *input.value, *input.sample_count}, {});
+            const auto expected = task->SubmitObservation({key, t, *input.value, *input.sample_count}, {}).result;
             Equal(output.results.front(), expected, t == 0);
             skipped |= !expected.can_update;
             downweighted |= expected.can_update && expected.update_weight > 0 && expected.update_weight < 1;
@@ -530,7 +530,7 @@ void RelationVersionsAndForecast() {
         observation.group_idx = input.groups;
         for (const auto& m : input.metrics)
             observation.metrics.push_back({m.metric, m.total, m.active_count, m.values_by_group});
-        const auto expected = task->SubmitObservation(observation, {});
+        const auto expected = task->SubmitObservation(observation, {}).result;
         assert(output.relation && expected.status == BaselineStatus::kOk);
         assert(output.relation->basis_status == expected.basis_status &&
                output.relation->basis_version == expected.basis_version &&

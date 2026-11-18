@@ -10,23 +10,22 @@
 #include <new>
 
 namespace flowsql::npm {
-int NpmTcpStreamProvider::ConsumerGate::OnTcpStreamReadable(const NpmTcpStreamContextV1& context,
-                                                            INpmTcpStreamCursorV1& cursor,
-                                                            INpmResultEmitterV1& emitter) {
+int NpmTcpStreamProvider::ConsumerGate::OnTcpStreamReadable(const NpmTcpStreamContext& context,
+                                                            INpmTcpStreamCursor& cursor, INpmResultEmitter& emitter) {
     if (cancellation_requested && cancellation_requested->load(std::memory_order_acquire)) return ECANCELED;
     const int error = target->OnTcpStreamReadable(context, cursor, emitter);
     return error == 0 && cancellation_requested && cancellation_requested->load(std::memory_order_acquire) ? ECANCELED
                                                                                                            : error;
 }
 
-NpmTcpStreamProvider::NpmTcpStreamProvider(NpmTcpStreamConfigV1 config, std::shared_ptr<INpmTaskBudget> budget,
+NpmTcpStreamProvider::NpmTcpStreamProvider(NpmTcpStreamConfig config, std::shared_ptr<INpmTaskBudget> budget,
                                            const std::atomic<bool>* cancellation_requested)
     : config_(config),
       budget_(std::move(budget)),
       charged_(sizeof(*this)),
       cancellation_requested_(cancellation_requested) {}
 
-NpmTcpStreamError NpmTcpStreamProvider::Create(NpmTcpStreamConfigV1 config, std::shared_ptr<INpmTaskBudget> budget,
+NpmTcpStreamError NpmTcpStreamProvider::Create(NpmTcpStreamConfig config, std::shared_ptr<INpmTaskBudget> budget,
                                                Span<const NpmTcpStreamRegistration> registrations,
                                                std::unique_ptr<NpmTcpStreamProvider>* output,
                                                const std::atomic<bool>* cancellation_requested) {
@@ -190,7 +189,7 @@ int NpmTcpStreamProvider::OnSessionEnd(const NpmSessionView& session, NpmSession
     for (size_t index = 0; index < 2; ++index) {
         auto& stream = at->second.directions[index];
         if (!stream) continue;
-        const auto error = stream->End(session, NpmTcpStreamEndReasonV1::kSessionEnd, reason, observed_at_ns);
+        const auto error = stream->End(session, NpmTcpStreamEndReason::kSessionEnd, reason, observed_at_ns);
         if (error != NpmTcpStreamError::kNone) {
             SaveFailure(*stream);
             return EIO;

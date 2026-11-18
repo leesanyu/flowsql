@@ -630,7 +630,7 @@ Binding Store::Acquire(const std::string& name, const std::string& usage) {
     ++connections_in_use_[connection_name];
     return binding;
 }
-void Store::Release(const KafkaBindingSnapshotV1& snapshot) {
+void Store::Release(const KafkaBindingSnapshot& snapshot) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto c = channels_in_use_.find(snapshot.channel_name), n = connections_in_use_.find(snapshot.connection_name);
     if (snapshot.channel_revision != 0 && c != channels_in_use_.end() && c->second) --c->second;

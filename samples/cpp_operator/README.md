@@ -15,14 +15,16 @@
 
 ## ABI 约束
 
-插件必须导出以下 4 个符号（`extern "C"`）：
+插件使用 `framework/interfaces/cpp_operator_plugin_abi.h` 的当前 descriptor/capability 契约，导出 5 个 `extern "C"` 符号：
 
-1. `int flowsql_abi_version()`
-2. `int flowsql_operator_count()`
-3. `flowsql::IOperator* flowsql_create_operator(int index)`
-4. `void flowsql_destroy_operator(flowsql::IOperator* op)`
+1. `int flowsql_abi_version()`：返回 `kCppOperatorPluginAbiVersion`（当前值 2）。
+2. `int flowsql_operator_count()`：全部逻辑算子共用的索引数量，每个算子只出现一次。
+3. `int flowsql_describe_operator(int index, CppOperatorDescriptor* descriptor)`：校验尺寸和索引，返回身份与能力 IID；借用字符串在库卸载前有效。
+4. `void* flowsql_create_operator_capability(int index, IQuerier* querier)`：返回该 IID 对应的接口指针。
+5. `void flowsql_destroy_operator_capability(int index, void* capability)`：使用创建时的相同索引销毁。
 
-当前示例使用 ABI 版本 `1`，与运行时 `binaddon` 插件管理器一致。
+仅接受当前 ABI；接口变更时同步重建宿主和插件。实例、任务、Arrow 结果及 Schema 必须先于库卸载销毁，异常不得越过导出边界。
+可选 `flowsql_operator_data_contract(int index)` 返回不可变 JSON 声明或精确契约引用，宿主在库有效期间复制；未声明时返回空指针。
 
 ## 示例算子输出
 

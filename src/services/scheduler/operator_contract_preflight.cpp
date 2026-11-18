@@ -26,7 +26,7 @@ std::string Source(const Value& locator) {
     return Get(locator, "type") + "." + name + "." +
            (Get(locator, "schema").empty() ? "" : Get(locator, "schema") + ".") + Get(locator, "table");
 }
-int Failure(const DataSemanticsErrorV1& error, std::string* response) {
+int Failure(const DataSemanticsError& error, std::string* response) {
     Json body(rapidjson::kObjectType);
     auto& a = body.GetAllocator();
     Value issue(rapidjson::kObjectType);
@@ -71,43 +71,43 @@ int32_t SchedulerPlugin::HandleOperatorContractCheck(const std::string&, const s
     for (const auto& parameter : request["parameters"].GetObject())
         if (!parameter_names.insert(Text(parameter.name)).second)
             return Failure({"CONTRACT_INVALID", "duplicate algorithm parameter", "/parameters"}, &rsp);
-    DataSemanticsErrorV1 issue;
+    DataSemanticsError issue;
     contracts::Invocation invocation;
     const auto category = Get(request["operator"], "category"), name = Get(request["operator"], "name");
-    CppOperatorCapabilityLeaseV1 lease;
+    CppOperatorCapabilityLease lease;
     bool ambiguous = false;
     int discovery_error = 0;
     auto provider = FindBlockTransformOperator(category, name, &lease, &ambiguous, &discovery_error);
     if (ambiguous) return Failure({"COMPONENT_CHANGED", "operator capability is ambiguous", "/operator"}, &rsp);
     if (discovery_error) return Failure({"UNAVAILABLE", "operator capability discovery failed", "/operator"}, &rsp);
     std::shared_ptr<IOperator> holder;
-    IOperatorConfigAdapterV1* adapter = nullptr;
+    IOperatorConfigAdapter* adapter = nullptr;
     if (provider && Get(request["inputs"][0]["locator"], "kind") == "dataframe") {
-        auto* capability = provider.v2 ? dynamic_cast<IBlockTransformDataFrameInputProviderV1*>(provider.v2) : nullptr;
+        auto* capability =
+            provider.capability ? dynamic_cast<IBlockTransformDataFrameInputProvider*>(provider.capability) : nullptr;
         if (!capability || !capability->SupportsDataFrameInput()) provider = {};
     }
     if (provider) {
         invocation.component = provider.component;
-        adapter = provider.v2 ? dynamic_cast<IOperatorConfigAdapterV1*>(provider.v2)
-                              : dynamic_cast<IOperatorConfigAdapterV1*>(provider.v1);
+        adapter = dynamic_cast<IOperatorConfigAdapter*>(provider.capability);
     } else {
         holder = FindOperator(category, name);
         if (!holder) return Failure({"NOT_FOUND", "operator not found", "/operator"}, &rsp);
-        if (contracts::Component(querier_, dynamic_cast<IOperatorContractIdentityV1*>(holder.get()), category, name,
+        if (contracts::Component(querier_, dynamic_cast<IOperatorContractIdentity*>(holder.get()), category, name,
                                  &invocation.component, &issue))
             return Failure(issue, &rsp);
         for (const auto& parameter : request["parameters"].GetObject())
             if (holder->Configure(parameter.name.GetString(), parameter.value.GetString()))
                 return Failure({"CONTRACT_INVALID", "operator rejected algorithm parameter", "/parameters"}, &rsp);
-        adapter = dynamic_cast<IOperatorConfigAdapterV1*>(holder.get());
+        adapter = dynamic_cast<IOperatorConfigAdapter*>(holder.get());
     }
     Json contract, inputs(rapidjson::kArrayType), context(rapidjson::kObjectType);
     auto& a = inputs.GetAllocator();
     auto& ca = context.GetAllocator();
     if (invocation.component.contract_state == "declared") {
         auto* service =
-            querier_ ? static_cast<IOperatorDataContractV1*>(querier_->First(IID_OPERATOR_DATA_CONTRACT_V1)) : nullptr;
-        OperatorContractSnapshotV1 definition;
+            querier_ ? static_cast<IOperatorDataContract*>(querier_->First(IID_OPERATOR_DATA_CONTRACT)) : nullptr;
+        OperatorContractSnapshot definition;
         if (!service) return Failure({"UNAVAILABLE", "declared contract service unavailable", ""}, &rsp);
         if (service->Resolve(invocation.component.contract_ref.c_str(), &definition, &issue))
             return Failure(issue, &rsp);

@@ -14,8 +14,8 @@
 #include <limits>
 #include <memory>
 #include <unordered_set>
+#include "compiled_semantics_schema.h"
 #include "config_content_validator.h"
-#include "data_semantics_api_schema.h"
 #include "data_semantics_registry.h"
 
 namespace flowsql::channels::config {
@@ -40,19 +40,15 @@ std::string Hash(const std::string& text) {
     }
     return out;
 }
-int ApiValidate(const std::string& key, const Value& v, DataSemanticsErrorV1* e) {
-    Document schema;
-    schema.Parse(kSemanticsApiSchema);
-    Add(schema, "$ref", "#/%24defs/" + key, schema.GetAllocator());
-    rapidjson::SchemaDocument compiled(schema);
-    rapidjson::SchemaValidator validator(compiled);
+int ApiValidate(const std::string& key, const Value& v, DataSemanticsError* e) {
+    rapidjson::SchemaValidator validator(CompiledSemanticsApiSchema(key));
     if (v.Accept(validator)) return 0;
     rapidjson::StringBuffer path;
     validator.GetInvalidDocumentPointer().Stringify(path);
     return SemanticsFail(e, "INVALID_DOCUMENT", "payload does not match published " + key + " schema",
                          path.GetString());
 }
-int32_t Error(const DataSemanticsErrorV1& e, std::string& response) {
+int32_t Error(const DataSemanticsError& e, std::string& response) {
     Document d(rapidjson::kObjectType);
     auto& a = d.GetAllocator();
     Value v(rapidjson::kObjectType);
@@ -74,7 +70,7 @@ int Finish(const std::string& op, Value& data, std::string& response) {
     auto& a = d.GetAllocator();
     d.AddMember("data", Value(data, a), a);
     response = SemanticsJson(d);
-    DataSemanticsErrorV1 e;
+    DataSemanticsError e;
     if (response.size() > 12 * 1024 * 1024) return Error({"LIMIT_EXCEEDED", "response exceeds 12 MiB", ""}, response);
     if (ApiValidate(op + "Response", d, &e))
         return Error({"STORAGE_ERROR", "response contract validation failed: " + e.message, e.field_path}, response);
@@ -104,7 +100,7 @@ void Paging(Value& data, const std::string& scope, uint64_t offset, size_t count
     Add(data, "next_cursor", more ? Cursor(scope, offset + count) : "", a);
     data.AddMember("has_more", more, a);
 }
-void Meta(Value& data, const DataSemanticsSnapshotV1& snap, Alloc& a) {
+void Meta(Value& data, const DataSemanticsSnapshot& snap, Alloc& a) {
     SemanticsIdentity id;
     ParseSemanticsReference(snap.exact_reference, &id);
     Add(data, "exact_reference", snap.exact_reference, a);
@@ -198,7 +194,7 @@ std::string Text(sqlite3_stmt* s, int index) {
 
 int32_t DataSemanticsRegistry::Control(const std::string& op, const std::string& request, std::string& response) {
     Document r;
-    DataSemanticsErrorV1 e;
+    DataSemanticsError e;
     if (ParseSemanticsJson(request, &r, &e) || ApiValidate(op + "Request", r, &e)) return Error(e, response);
     Document data(rapidjson::kObjectType);
     auto& a = data.GetAllocator();
@@ -268,7 +264,7 @@ int32_t DataSemanticsRegistry::Control(const std::string& op, const std::string&
         Add(data, "data_validation", "not_run", a);
         if (!check.empty()) Add(data, "structure_check", check, a);
     } else if (op == "binding_lookup") {
-        DataSemanticsSnapshotV1 snap;
+        DataSemanticsSnapshot snap;
         if (BindingLookup(String(r["object_key"], "provider_id"), String(r["object_key"], "object_id"), &snap, &e))
             return Error(e, response);
         Document d;
@@ -295,7 +291,7 @@ int32_t DataSemanticsRegistry::Control(const std::string& op, const std::string&
         if (op == "history" && !SemanticsName(name))
             return Error({"INVALID_DOCUMENT", "invalid name", "/name"}, response);
         if (op == "history") {
-            DataSemanticsSnapshotV1 snap;
+            DataSemanticsSnapshot snap;
             if (Resolve((kind + "." + name + "@1").c_str(), &snap, &e)) return Error(e, response);
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -365,13 +361,13 @@ int32_t DataSemanticsRegistry::Control(const std::string& op, const std::string&
         data.AddMember("items", items, a);
         Paging(data, scope, offset, count, more, a);
     } else if (op == "resolve" || op == "export") {
-        DataSemanticsSnapshotV1 snap;
+        DataSemanticsSnapshot snap;
         if (Resolve(String(r, "exact_reference").c_str(), &snap, &e)) return Error(e, response);
         Document d;
         d.Parse(snap.document_json->c_str());
         const auto operator_view = String(r, "view");
         if (op == "resolve" && (operator_view == "summary" || operator_view == "resource")) {
-            if (String(d, "schema_id") != "flowsql.operator-data-contract.v1")
+            if (String(d, "schema_id") != "flowsql.operator-data-contract")
                 return Error({"INVALID_DOCUMENT", "resource views require an operator contract", "/view"}, response);
             const auto pointer = operator_view == "summary" ? std::string("") : String(r, "resource_pointer");
             if (operator_view == "resource" && (pointer.empty() || pointer.front() != '/'))
@@ -433,7 +429,7 @@ int32_t DataSemanticsRegistry::Control(const std::string& op, const std::string&
             if (NormalizeSemantics(id.kind, *snap.document_json, &ignored, &refs, &e)) return Error(e, response);
             std::unordered_set<std::string> seen;
             if (id.kind == "binding") {
-                DataSemanticsSnapshotV1 dictionary;
+                DataSemanticsSnapshot dictionary;
                 if (Resolve(String(d, "dictionary_ref").c_str(), &dictionary, &e)) return Error(e, response);
                 Document dd;
                 dd.Parse(dictionary.document_json->c_str());
@@ -448,7 +444,7 @@ int32_t DataSemanticsRegistry::Control(const std::string& op, const std::string&
             size_t context_bytes = view == "document" ? snap.document_json->size() : 0;
             for (const auto& ref : refs)
                 if (seen.insert(ref.target).second) {
-                    DataSemanticsSnapshotV1 target;
+                    DataSemanticsSnapshot target;
                     if (Resolve(ref.target.c_str(), &target, &e)) return Error(e, response);
                     if (target.document_json->size() > 12 * 1024 * 1024 - context_bytes)
                         return Error({"LIMIT_EXCEEDED", "reference context exceeds 12 MiB", ""}, response);

@@ -106,9 +106,8 @@ struct HasValueSubmitObservation : std::false_type {};
 
 template <typename T>
 struct HasValueSubmitObservation<
-    T,
-    std::void_t<decltype(static_cast<RollingBaselineResult (T::*)(
-        const ValueRollingObservation&, const RollingSubmitOptions&)>(&T::SubmitObservation))>>
+    T, std::void_t<decltype(static_cast<BaselineEvaluationResult (T::*)(
+                                const ValueRollingObservation&, const RollingSubmitOptions&)>(&T::SubmitObservation))>>
     : std::true_type {};
 
 template <typename T, typename = void>
@@ -151,9 +150,8 @@ struct HasRatioSubmitObservation : std::false_type {};
 
 template <typename T>
 struct HasRatioSubmitObservation<
-    T,
-    std::void_t<decltype(static_cast<RollingBaselineResult (T::*)(
-        const RatioRollingObservation&, const RollingSubmitOptions&)>(&T::SubmitObservation))>>
+    T, std::void_t<decltype(static_cast<BaselineEvaluationResult (T::*)(
+                                const RatioRollingObservation&, const RollingSubmitOptions&)>(&T::SubmitObservation))>>
     : std::true_type {};
 
 template <typename T, typename = void>
@@ -203,11 +201,9 @@ struct HasRelationSubmitObservation : std::false_type {};
 
 template <typename T>
 struct HasRelationSubmitObservation<
-    T,
-    std::void_t<decltype(static_cast<RelationRollingResult (T::*)(
-        const RelationRollingObservation&, const RelationRollingSubmitOptions&)>(
-        &T::SubmitObservation))>>
-    : std::true_type {};
+    T, std::void_t<decltype(static_cast<BaselineRelationEvaluationResult (T::*)(const RelationRollingObservation&,
+                                                                                const RelationRollingSubmitOptions&)>(
+           &T::SubmitObservation))>> : std::true_type {};
 
 template <typename T, typename = void>
 struct HasRelationPredictRoutedSummary : std::false_type {};
@@ -295,9 +291,8 @@ void TestTaskHeaderContracts() {
             int64_t,
             uint32_t,
             const BootstrapPredictionOptions&) const;
-    using ExpectedRelationSubmitObservation =
-        RelationRollingResult (IBaselineRelationTask::*)(
-            const RelationRollingObservation&, const RelationRollingSubmitOptions&);
+    using ExpectedRelationSubmitObservation = BaselineRelationEvaluationResult (IBaselineRelationTask::*)(
+        const RelationRollingObservation&, const RelationRollingSubmitOptions&);
     using ExpectedRelationPredictRoutedSummary =
         RollingPrediction (IBaselineRelationTask::*)(
             const RelationRoutedSummaryQuery&, int64_t) const;
@@ -507,14 +502,14 @@ void TestCloseReleasesResourcesWhileTaskHandlesRemainAlive() {
         assert(relation->Bootstrap(relation_input).status == BaselineStatus::kOk);
         for (int i = 0; i < 32; ++i) {
             const std::string key = "online-" + std::to_string(i);
-            assert(value->SubmitObservation({key, 100, 100.0, 1}, {}).status == BaselineStatus::kOk);
-            assert(ratio->SubmitObservation({key, 100, 50.0, 100.0}, {}).status == BaselineStatus::kOk);
+            assert(value->SubmitObservation({key, 100, 100.0, 1}, {}).result.status == BaselineStatus::kOk);
+            assert(ratio->SubmitObservation({key, 100, 50.0, 100.0}, {}).result.status == BaselineStatus::kOk);
             RelationRollingObservation observation;
             observation.series_key = key;
             observation.bucket_id = 100;
             observation.group_idx = {1, 2};
             observation.metrics = relation_input.blocks.back().metrics;
-            assert(relation->SubmitObservation(observation, {}).status == BaselineStatus::kOk);
+            assert(relation->SubmitObservation(observation, {}).result.status == BaselineStatus::kOk);
         }
 
         std::vector<std::shared_ptr<IBaselineTask>> tasks{value, ratio, relation};
@@ -546,14 +541,14 @@ void TestCloseReleasesResourcesWhileTaskHandlesRemainAlive() {
             }
         }
         assert(registry.Size() == 0);
-        assert(value->SubmitObservation({"trained", 101, 100.0, 1}, {}).status != BaselineStatus::kOk);
-        assert(ratio->SubmitObservation({"trained", 101, 50.0, 100.0}, {}).status != BaselineStatus::kOk);
+        assert(value->SubmitObservation({"trained", 101, 100.0, 1}, {}).result.status != BaselineStatus::kOk);
+        assert(ratio->SubmitObservation({"trained", 101, 50.0, 100.0}, {}).result.status != BaselineStatus::kOk);
         RelationRollingObservation observation;
         observation.series_key = "trained";
         observation.bucket_id = 101;
         observation.group_idx = {1, 2};
         observation.metrics = relation_input.blocks.back().metrics;
-        assert(relation->SubmitObservation(observation, {}).status != BaselineStatus::kOk);
+        assert(relation->SubmitObservation(observation, {}).result.status != BaselineStatus::kOk);
     }
     std::printf("[PASS] Close releases resources through public and registry base handles\n");
 }
@@ -1048,7 +1043,7 @@ void TestBootstrapEngineTrainsRelationBasis() {
     RelationTaskCreateSpec spec;
     spec.task_spec.task_id = "relation-bootstrap-task";
     spec.task_spec.task_kind = "relation";
-    spec.task_spec.feature_id = "client_mix";
+    spec.task_spec.feature_id = "client_mix_task";
     spec.task_spec.feature_base = "client_mix";
     spec.task_spec.group_space_id = "client_group";
     spec.task_spec.group_space_version = "v1";
@@ -1177,12 +1172,18 @@ void TestBootstrapEngineTrainsRelationBasis() {
     rapidjson::Writer<rapidjson::StringBuffer> legacy_writer(legacy_buffer);
     legacy_doc.Accept(legacy_writer);
     BootstrapArtifact legacy_loaded_artifact;
-    assert(engine.LoadArtifact(legacy_buffer.GetString(),
-                               BaselineSerializationFormat::kJson,
-                               &legacy_loaded_artifact) == BaselineStatus::kOk);
-    AssertRelationFusionMetadata(legacy_loaded_artifact.relation_fusion_metadata);
-    assert(legacy_loaded_artifact.diagnostics.find("relation_fusion_metadata_defaulted") !=
-           std::string::npos);
+    assert(engine.LoadArtifact(legacy_buffer.GetString(), BaselineSerializationFormat::kJson,
+                               &legacy_loaded_artifact) == BaselineStatus::kParseFailed);
+    assert(engine.ValidateArtifactCompatibility(loaded_artifact, spec) == BaselineStatus::kOk);
+    auto obsolete_identity = loaded_artifact;
+    obsolete_identity.relation_fusion_metadata.feature_base = spec.task_spec.feature_id;
+    assert(engine.ValidateArtifactCompatibility(obsolete_identity, spec) == BaselineStatus::kIncompatibleArtifact);
+    auto missing_metadata = loaded_artifact;
+    missing_metadata.relation_fusion_metadata = {};
+    BootstrapSeed rejected_seed;
+    assert(engine.ExportSeed(missing_metadata, &rejected_seed) == BaselineStatus::kIncompatibleArtifact);
+    assert(engine.ExportArtifact(missing_metadata, BaselineSerializationFormat::kJson).first ==
+           BaselineStatus::kIncompatibleArtifact);
 
     std::printf("[PASS] Bootstrap engine trains relation basis\n");
 }

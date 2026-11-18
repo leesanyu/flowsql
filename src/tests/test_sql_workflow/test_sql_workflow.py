@@ -300,7 +300,7 @@ def finite(rt):
     assert dns[0]['latency_ns'] == 10_000_000, dns
     with sqlite3.connect(rt.root / 'work.db') as db:
         for entity in ['basic', 'session', 'dns_transaction']:
-            count = db.execute(f'SELECT COUNT(*) FROM npm_{entity}_ipv4_final_v1 WHERE __npm_run_id=?', (run_id,)).fetchone()[0]
+            count = db.execute(f'SELECT COUNT(*) FROM npm_{entity}_ipv4_final WHERE __npm_run_id=?', (run_id,)).fetchone()[0]
             assert count == 1, (entity, count)
     request(rt, 'E04')
     with sqlite3.connect(rt.root / 'work.db') as db:

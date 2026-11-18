@@ -51,28 +51,28 @@ Value Module(const std::string& id, const std::string& json, Alloc& a) {
     Value out(rapidjson::kObjectType);
 #define PARAM(name) out.AddMember(#name, c.name, a)
     if (id == "dns") {
-        NpmDnsConfigV1 c;
-        const auto status = ParseNpmDnsConfigV1(json, &c);
-        assert(status.error == NpmDnsConfigErrorV1::kNone);
+        NpmDnsConfig c;
+        const auto status = ParseNpmDnsConfig(json, &c);
+        assert(status.error == NpmDnsConfigError::kNone);
         PARAM(response_timeout_ns);
         PARAM(max_pending_per_session);
     } else if (id == "http1") {
-        NpmHttp1ConfigV1 c;
-        const auto status = ParseNpmHttp1ConfigV1(json, &c);
-        assert(status.error == NpmHttp1ConfigErrorV1::kNone);
+        NpmHttp1Config c;
+        const auto status = ParseNpmHttp1Config(json, &c);
+        assert(status.error == NpmHttp1ConfigError::kNone);
         PARAM(response_timeout_ns);
         PARAM(max_pending_per_session);
         PARAM(max_header_bytes);
     } else if (id == "tls") {
-        NpmTlsConfigV1 c;
-        const auto status = ParseNpmTlsConfigV1(json, &c);
-        assert(status.error == NpmTlsConfigErrorV1::kNone);
+        NpmTlsConfig c;
+        const auto status = ParseNpmTlsConfig(json, &c);
+        assert(status.error == NpmTlsConfigError::kNone);
         PARAM(handshake_timeout_ns);
         PARAM(max_hello_bytes);
     } else if (id == "icmp") {
-        NpmIcmpConfigV1 c;
-        const auto status = ParseNpmIcmpConfigV1(json, &c);
-        assert(status.error == NpmIcmpConfigErrorV1::kNone);
+        NpmIcmpConfig c;
+        const auto status = ParseNpmIcmpConfig(json, &c);
+        assert(status.error == NpmIcmpConfigError::kNone);
         PARAM(echo_timeout_ns);
         PARAM(max_pending_echo);
     }
@@ -81,7 +81,7 @@ Value Module(const std::string& id, const std::string& json, Alloc& a) {
 }
 }  // namespace
 
-int NpmBasicTask::ResolveInvocation(const char* text, std::string* result, DataSemanticsErrorV1* error) {
+int NpmBasicTask::ResolveInvocation(const char* text, std::string* result, DataSemanticsError* error) {
     using namespace dataset;
     if (result) result->clear();
     Json request;
@@ -141,7 +141,7 @@ int NpmBasicTask::ResolveInvocation(const char* text, std::string* result, DataS
     return 0;
 }
 
-int NpmBasicOperator::ResolveInvocation(const char* text, std::string* result, DataSemanticsErrorV1* error) {
+int NpmBasicOperator::ResolveInvocation(const char* text, std::string* result, DataSemanticsError* error) {
     if (result) result->clear();
     if (error) *error = {};
     Json request;
@@ -156,15 +156,15 @@ int NpmBasicOperator::ResolveInvocation(const char* text, std::string* result, D
     const auto with = Encode(request["parameters"]);
     const bool labeling = NpmBasicTaskRequestsLabeling(with.c_str());
     NpmBasicTaskConfig config;
-    const auto status = ParseNpmBasicTaskConfig(with.c_str(), &config, labeling, ProductionNpmModuleCatalogV1(),
+    const auto status = ParseNpmBasicTaskConfig(with.c_str(), &config, labeling, ProductionNpmModuleCatalog(),
                                                 Get(context, "source", "unresolved"), managed);
     if (status.error != NpmBasicTaskConfigError::kNone)
         return dataset::Fail(error, "CONTRACT_INCOMPATIBLE", "NPM production parameter parser rejected invocation",
                              status.parameter_status.path.empty() ? "/parameters/" + status.field
                                                                   : "/parameters" + status.parameter_status.path);
-    std::vector<NpmPreparedModuleV1> prepared;
-    const auto modules = PrepareNpmModulesV1(config, ProductionNpmModuleCatalogV1(), &prepared);
-    if (modules.error != NpmProtocolContractErrorV1::kNone)
+    std::vector<NpmPreparedModule> prepared;
+    const auto modules = PrepareNpmModules(config, ProductionNpmModuleCatalog(), &prepared);
+    if (modules.error != NpmProtocolContractError::kNone)
         return dataset::Fail(error, "CONTRACT_INCOMPATIBLE", "NPM production module parser rejected invocation",
                              "/parameters/" + modules.field);
     for (const auto& module : prepared)
@@ -177,7 +177,7 @@ int NpmBasicOperator::ResolveInvocation(const char* text, std::string* result, D
         const auto mode = context["finite_source"].GetBool() ? NpmRunMode::kOffline : NpmRunMode::kRealtime;
         if (mode_known && mode != config.analysis.run_mode)
             return dataset::Fail(error, "CONTRACT_INCOMPATIBLE", "run_mode conflicts with source capability",
-                                 "/parameters/run_mode");
+                                 "/parameters/core/run_mode");
         config.analysis.run_mode = mode;
         mode_known = true;
     }
@@ -189,13 +189,12 @@ int NpmBasicOperator::ResolveInvocation(const char* text, std::string* result, D
         .AddMember("config_refs", Value(rapidjson::kArrayType), a);
     if (labeling) {
         auto* provider =
-            querier_ ? static_cast<IFlowLabelingProviderV1*>(querier_->First(IID_FLOW_LABELING_PROVIDER_V1)) : nullptr;
-        FlowLabelingDiagnosticV1 diagnostic;
-        if (!provider || provider->RuntimeStatus(&diagnostic) != FlowLabelingErrorV1::kNone)
+            querier_ ? static_cast<IFlowLabelingProvider*>(querier_->First(IID_FLOW_LABELING_PROVIDER)) : nullptr;
+        FlowLabelingDiagnostic diagnostic;
+        if (!provider || provider->RuntimeStatus(&diagnostic) != FlowLabelingError::kNone)
             return dataset::Fail(error, "UNAVAILABLE", "NPM labeling provider unavailable", "/features/labeling");
-        auto* registry = querier_
-                             ? static_cast<IConfigChannelRegistryV1*>(querier_->First(IID_CONFIG_CHANNEL_REGISTRY_V1))
-                             : nullptr;
+        auto* registry =
+            querier_ ? static_cast<IConfigChannelRegistry*>(querier_->First(IID_CONFIG_CHANNEL_REGISTRY)) : nullptr;
         if (!registry) return dataset::Fail(error, "UNAVAILABLE", "config registry unavailable", "/core/labeling");
         ConfigChannelSnapshot snapshot;
         std::string detail;

@@ -17,18 +17,18 @@ namespace flowsql {
  * lifetime is retained. The token keeps the capability, its provider, and the
  * shared-library handle alive as one unit.
  */
-struct CppOperatorCapabilityLeaseV1 {
+struct CppOperatorCapabilityLease {
     void* capability = nullptr;
     std::shared_ptr<void> lifetime;
 };
 
 // {0x668b58d2-3735-4c89-9b45-5dea776c01a7}
-const Guid IID_CPP_OPERATOR_PLUGIN_REGISTRY_V1 = {
+const Guid IID_CPP_OPERATOR_PLUGIN_REGISTRY = {
     0x668b58d2, 0x3735, 0x4c89, {0x9b, 0x45, 0x5d, 0xea, 0x77, 0x6c, 0x01, 0xa7}};
 
 /** Runtime registry for capabilities exported by activated C++ operator plugins. */
-interface ICppOperatorPluginRegistryV1 {
-    virtual ~ICppOperatorPluginRegistryV1() = default;
+interface ICppOperatorPluginRegistry {
+    virtual ~ICppOperatorPluginRegistry() = default;
 
     /**
      * Acquires the unique capability matching category.name and contract_iid.
@@ -36,7 +36,7 @@ interface ICppOperatorPluginRegistryV1 {
      * implementation must reset the output lease to its empty state.
      */
     virtual int Acquire(const char* category, const char* name, const Guid& contract_iid,
-                        CppOperatorCapabilityLeaseV1* lease) = 0;
+                        CppOperatorCapabilityLease* lease) = 0;
 };
 
 }  // namespace flowsql

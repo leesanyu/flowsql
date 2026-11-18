@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://flowsql.local/semantics/v1/documents.schema.json",
+  "$id": "https://flowsql.local/semantics/documents.schema.json",
   "$defs": {
     "type": {
       "type": "object",
@@ -1587,7 +1587,7 @@
         "schema_id": {
           "type": "string",
           "enum": [
-            "flowsql.data-standard.v1"
+            "flowsql.data-standard"
           ]
         },
         "title": {
@@ -1977,7 +1977,7 @@
         "schema_id": {
           "type": "string",
           "enum": [
-            "flowsql.data-dictionary.v1"
+            "flowsql.data-dictionary"
           ]
         },
         "title": {
@@ -2088,7 +2088,7 @@
         "schema_id": {
           "type": "string",
           "enum": [
-            "flowsql.data-binding.v1"
+            "flowsql.data-binding"
           ]
         },
         "object_key": {
@@ -2139,6 +2139,12 @@
               }
             }
           ]
+        },
+        "source_snapshot": {
+          "$ref": "#/%24defs/datasetSnapshot"
+        },
+        "confirmation": {
+          "$ref": "#/%24defs/bindingConfirmation"
         }
       },
       "required": [
@@ -2147,7 +2153,9 @@
         "object_label",
         "dictionary_ref",
         "field_map",
-        "declared_schema"
+        "declared_schema",
+        "source_snapshot",
+        "confirmation"
       ],
       "additionalProperties": false
     },
@@ -2278,7 +2286,7 @@
         "schema_id": {
           "type": "string",
           "enum": [
-            "flowsql.channel-dataset.v1"
+            "flowsql.channel-dataset"
           ]
         },
         "object_key": {
@@ -2389,83 +2397,6 @@
       "required": [
         "path",
         "reason"
-      ],
-      "additionalProperties": false
-    },
-    "channelBinding": {
-      "type": "object",
-      "properties": {
-        "schema_id": {
-          "type": "string",
-          "enum": [
-            "flowsql.data-binding.v2"
-          ]
-        },
-        "object_key": {
-          "$ref": "#/%24defs/object_key"
-        },
-        "object_label": {
-          "type": "string",
-          "minLength": 1
-        },
-        "dictionary_ref": {
-          "type": "string",
-          "minLength": 1
-        },
-        "field_map": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "string",
-            "minLength": 1
-          }
-        },
-        "declared_schema": {
-          "oneOf": [
-            {
-              "type": "null"
-            },
-            {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "name": {
-                    "type": "string",
-                    "minLength": 1
-                  },
-                  "type": {
-                    "$ref": "#/%24defs/type"
-                  },
-                  "nullable": {
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "name",
-                  "type",
-                  "nullable"
-                ],
-                "additionalProperties": false
-              }
-            }
-          ]
-        },
-        "source_snapshot": {
-          "$ref": "#/%24defs/datasetSnapshot"
-        },
-        "confirmation": {
-          "$ref": "#/%24defs/bindingConfirmation"
-        }
-      },
-      "required": [
-        "schema_id",
-        "object_key",
-        "object_label",
-        "dictionary_ref",
-        "field_map",
-        "declared_schema",
-        "source_snapshot",
-        "confirmation"
       ],
       "additionalProperties": false
     },
@@ -2911,7 +2842,7 @@
       "properties": {
         "schema_id": {
           "enum": [
-            "flowsql.operator-data-contract.v1"
+            "flowsql.operator-data-contract"
           ]
         },
         "title": {
@@ -2979,7 +2910,7 @@
       "properties": {
         "schema_id": {
           "enum": [
-            "flowsql.operator-data-use.v1"
+            "flowsql.operator-data-use"
           ]
         },
         "title": {
@@ -3077,9 +3008,6 @@
     },
     {
       "$ref": "#/%24defs/binding"
-    },
-    {
-      "$ref": "#/%24defs/channelBinding"
     },
     {
       "$ref": "#/%24defs/operatorContract"

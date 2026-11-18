@@ -8,16 +8,16 @@
 
 namespace flowsql::contracts {
 struct Invocation {
-    OperatorComponentContractV1 component;
+    OperatorComponentContract component;
     dataset::Json resolved, check;
 };
-inline int Component(IQuerier* querier, IOperatorContractIdentityV1* identity, const std::string& category,
-                     const std::string& name, OperatorComponentContractV1* out, DataSemanticsErrorV1* error) {
+inline int Component(IQuerier* querier, IOperatorContractIdentity* identity, const std::string& category,
+                     const std::string& name, OperatorComponentContract* out, DataSemanticsError* error) {
     *out = {};
     if (identity) {
         *out = identity->ContractIdentity();
     } else if (querier) {
-        auto* directory = static_cast<IOperatorContractCatalogV1*>(querier->First(IID_OPERATOR_CONTRACT_CATALOG_V1));
+        auto* directory = static_cast<IOperatorContractCatalog*>(querier->First(IID_OPERATOR_CONTRACT_CATALOG));
         if (directory && directory->Lookup(category.c_str(), name.c_str(), out, error)) return -1;
         if (out->contract_state == "declared")
             return dataset::Fail(error, "COMPONENT_CHANGED", "operator instance has no frozen component identity");
@@ -30,9 +30,9 @@ inline int Component(IQuerier* querier, IOperatorContractIdentityV1* identity, c
     if (out->name.empty()) out->name = name;
     return 0;
 }
-inline int CheckInvocation(IQuerier* querier, Invocation* invocation, IOperatorConfigAdapterV1* adapter,
+inline int CheckInvocation(IQuerier* querier, Invocation* invocation, IOperatorConfigAdapter* adapter,
                            const dataset::Value& parameters, const dataset::Value& inputs,
-                           const dataset::Value& execution_context, DataSemanticsErrorV1* error) {
+                           const dataset::Value& execution_context, DataSemanticsError* error) {
     using namespace dataset;
     auto& component = invocation->component;
     invocation->resolved.SetObject();
@@ -79,8 +79,7 @@ inline int CheckInvocation(IQuerier* querier, Invocation* invocation, IOperatorC
     }
     Set(invocation->resolved, "contract_ref", component.contract_ref, a);
     Set(invocation->resolved, "component_revision", component.component_revision, a);
-    auto* service =
-        querier ? static_cast<IOperatorDataContractV1*>(querier->First(IID_OPERATOR_DATA_CONTRACT_V1)) : nullptr;
+    auto* service = querier ? static_cast<IOperatorDataContract*>(querier->First(IID_OPERATOR_DATA_CONTRACT)) : nullptr;
     if (!service) return Fail(error, "UNAVAILABLE", "declared operator contract service unavailable");
     std::string checked;
     if (service->CheckAndDerive(Encode(invocation->resolved).c_str(), &checked, error)) return -1;
@@ -94,7 +93,7 @@ inline int CheckInvocation(IQuerier* querier, Invocation* invocation, IOperatorC
 // Reads metadata only. Real provider snapshots are retained; transient stages get a
 // distinct identity and no borrowed binding from an unrelated same-named object.
 inline int DescribeInput(IQuerier* querier, const dataset::Value& locator, const std::shared_ptr<arrow::Schema>& schema,
-                         dataset::Json* snapshot, std::string* binding_ref, DataSemanticsErrorV1* error) {
+                         dataset::Json* snapshot, std::string* binding_ref, DataSemanticsError* error) {
     using namespace dataset;
     binding_ref->clear();
     if (querier && !locator.IsNull()) {

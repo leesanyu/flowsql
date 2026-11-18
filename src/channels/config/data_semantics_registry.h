@@ -12,7 +12,7 @@ struct SemanticsSaveRequest {
     bool source_observed = false;
 };
 struct SemanticsSaveResult {
-    DataSemanticsSnapshotV1 snapshot;
+    DataSemanticsSnapshot snapshot;
     bool created_revision = false;
     std::string structure_check;
     std::string data_validation = "not_run";
@@ -21,39 +21,39 @@ struct SemanticsReferenceItem {
     std::string source_reference, field_path;
     bool is_current = false;
 };
-class DataSemanticsRegistry : public IDataSemanticsRegistryV1 {
+class DataSemanticsRegistry : public IDataSemanticsRegistry {
  public:
     DataSemanticsRegistry() = default;
     ~DataSemanticsRegistry() override;
     DataSemanticsRegistry(const DataSemanticsRegistry&) = delete;
     DataSemanticsRegistry& operator=(const DataSemanticsRegistry&) = delete;
-    int Open(const std::string& db_path, DataSemanticsErrorV1* error);
+    int Open(const std::string& db_path, DataSemanticsError* error);
     void Close();
     int Preview(const std::string& kind, const std::string& content, rapidjson::Document* out,
-                std::string* structure_check, DataSemanticsErrorV1* error);
+                std::string* structure_check, DataSemanticsError* error);
     int32_t Control(const std::string& operation, const std::string& request, std::string& response);
-    int Save(const SemanticsSaveRequest& request, SemanticsSaveResult* out, DataSemanticsErrorV1* error);
+    int Save(const SemanticsSaveRequest& request, SemanticsSaveResult* out, DataSemanticsError* error);
     // Trusted execution only; one write transaction publishes all output metadata.
     int SaveBatch(const std::vector<SemanticsSaveRequest>& requests, std::vector<SemanticsSaveResult>* out,
-                  DataSemanticsErrorV1* error);
-    int Resolve(const char* reference, DataSemanticsSnapshotV1* out, DataSemanticsErrorV1* error) override;
+                  DataSemanticsError* error);
+    int Resolve(const char* reference, DataSemanticsSnapshot* out, DataSemanticsError* error) override;
 
-    int BindingLookup(const std::string& provider, const std::string& object, DataSemanticsSnapshotV1* out,
-                      DataSemanticsErrorV1* error);
-    int ObservationTrusted(const std::string& reference, bool* trusted, DataSemanticsErrorV1* error);
+    int BindingLookup(const std::string& provider, const std::string& object, DataSemanticsSnapshot* out,
+                      DataSemanticsError* error);
+    int ObservationTrusted(const std::string& reference, bool* trusted, DataSemanticsError* error);
     int References(const std::string& target, bool history, std::vector<SemanticsReferenceItem>* out,
-                   DataSemanticsErrorV1* error);
+                   DataSemanticsError* error);
 
  private:
     int SaveUnlocked(const SemanticsSaveRequest& request, bool execution_owned, SemanticsSaveResult* out,
-                     DataSemanticsErrorV1* error);
+                     DataSemanticsError* error);
     int WriteBatch(const std::vector<SemanticsSaveRequest>& requests, bool execution_owned,
-                   std::vector<SemanticsSaveResult>* out, DataSemanticsErrorV1* error);
+                   std::vector<SemanticsSaveResult>* out, DataSemanticsError* error);
     int ValidateLinks(const std::string& kind, const rapidjson::Value& document,
                       const std::vector<SemanticsReference>& references, std::string* structure_check,
-                      DataSemanticsErrorV1* error);
-    int Read(const std::string& reference, DataSemanticsSnapshotV1* out, DataSemanticsErrorV1* error);
-    int StorageError(DataSemanticsErrorV1* error);
+                      DataSemanticsError* error);
+    int Read(const std::string& reference, DataSemanticsSnapshot* out, DataSemanticsError* error);
+    int StorageError(DataSemanticsError* error);
     std::mutex mutex_;
     sqlite3* db_ = nullptr;
 };

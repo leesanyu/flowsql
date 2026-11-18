@@ -250,7 +250,7 @@ void ResultCodec::Validate(const arrow::RecordBatch& b) const {
     for (int i = 0; i < b.num_columns(); ++i)
         Check(schema_->field(i)->nullable() || b.column(i)->null_count() == 0, "RESULT_NULLABILITY");
 }
-KafkaProduceMessageV1 ResultCodec::Row(const arrow::RecordBatch& b, int64_t r, uint64_t ordinal) const {
+KafkaProduceMessage ResultCodec::Row(const arrow::RecordBatch& b, int64_t r, uint64_t ordinal) const {
     rapidjson::Document d(rapidjson::kObjectType);
     auto& a = d.GetAllocator();
     V data(rapidjson::kObjectType), id(rapidjson::kArrayType);
@@ -301,7 +301,7 @@ KafkaProduceMessageV1 ResultCodec::Row(const arrow::RecordBatch& b, int64_t r, u
     Put(d, "schema_fingerprint", fingerprint_, a);
     d.AddMember("schema_version", config_.schema_version, a);
     Put(d, "task_id", task_, a);
-    KafkaProduceMessageV1 out{Json(key), Json(d)};
+    KafkaProduceMessage out{Json(key), Json(d)};
     Check(out.key.size() <= 4096 && out.key.size() + out.value.size() <= config_.max_message_bytes,
           "RESULT_MESSAGE_TOO_LARGE");
     return out;

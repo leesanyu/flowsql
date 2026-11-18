@@ -110,7 +110,7 @@ class CanonicalFilterPlanWriter {
     bool Write(const std::shared_ptr<const BoundFilterExpr>& expression, std::string* output) {
         writer_.StartObject();
         writer_.Key("version");
-        writer_.Uint(kFilterPushdownContractVersionV1);
+        writer_.Uint(kFilterPushdownContractVersion);
         writer_.Key("root");
         if (!WriteNode(expression)) return false;
         writer_.EndObject();
@@ -413,7 +413,7 @@ FilterPlanError NegotiateFilterPushdown(IQuerier* querier, const FilterPushdownT
     plan_error = BuildCanonicalFilterPlan(target.output_schema, expression, &result.canonical_plan_json, error);
     if (plan_error != FilterPlanError::kNone) return plan_error;
 
-    FilterPushdownRequestV1 request;
+    FilterPushdownRequest request;
     request.target_kind = target.kind;
     request.target_category = target.category.c_str();
     request.target_name = target.name.c_str();
@@ -423,16 +423,16 @@ FilterPlanError NegotiateFilterPushdown(IQuerier* querier, const FilterPushdownT
 
     bool stopped = false;
     int provider_return_code = ENOTSUP;
-    FilterPushdownResultV1 provider_result;
-    const int traverse_return_code = querier->Traverse(IID_FILTER_PUSHDOWN_V1, [&](void* iface) {
+    FilterPushdownResult provider_result;
+    const int traverse_return_code = querier->Traverse(IID_FILTER_PUSHDOWN, [&](void* iface) {
         if (!iface) {
             stopped = true;
             provider_return_code = EINVAL;
             provider_result.diagnostic = "IID traversal returned a null provider";
             return -1;
         }
-        FilterPushdownResultV1 current;
-        const int current_return_code = static_cast<IFilterPushdownV1*>(iface)->EvaluatePushdown(request, &current);
+        FilterPushdownResult current;
+        const int current_return_code = static_cast<IFilterPushdown*>(iface)->EvaluatePushdown(request, &current);
         if (current_return_code == ENOTSUP) return 0;
         stopped = true;
         provider_return_code = current_return_code;
@@ -441,7 +441,7 @@ FilterPlanError NegotiateFilterPushdown(IQuerier* querier, const FilterPushdownT
     });
     if (traverse_return_code != 0) {
         if (error) {
-            *error = "IFilterPushdownV1 traversal failed with code " + std::to_string(traverse_return_code);
+            *error = "IFilterPushdown traversal failed with code " + std::to_string(traverse_return_code);
         }
         return FilterPlanError::kQuerierError;
     }
@@ -451,7 +451,7 @@ FilterPlanError NegotiateFilterPushdown(IQuerier* querier, const FilterPushdownT
     }
     if (provider_return_code != 0) {
         if (error) {
-            *error = "IFilterPushdownV1 provider failed with code " + std::to_string(provider_return_code);
+            *error = "IFilterPushdown provider failed with code " + std::to_string(provider_return_code);
             if (!provider_result.diagnostic.empty()) {
                 *error += ": " + provider_result.diagnostic;
             }
@@ -521,16 +521,16 @@ FilterPlanError MaterializeFilterTaskSessionPlan(const std::shared_ptr<arrow::Sc
             BuildCanonicalFilterPlan(output_schema, result.pushed_expression, &result.pushed_filter_plan_json, error);
         if (plan_error != FilterPlanError::kNone) return plan_error;
     } else {
-        result.pushed_filter_plan_json = kEmptyCanonicalFilterPlanV1;
+        result.pushed_filter_plan_json = kEmptyCanonicalFilterPlan;
     }
 
     *output = std::move(result);
     return FilterPlanError::kNone;
 }
 
-FilterPlanError CreateBlockTransformTaskSession(IBlockTransformOperatorV1* provider, const std::string& task_id,
+FilterPlanError CreateBlockTransformTaskSession(IBlockTransformOperator* provider, const std::string& task_id,
                                                 const std::string& with_params_json,
-                                                const FilterTaskSessionPlan& filter_plan, IBlockTransformTaskV1** task,
+                                                const FilterTaskSessionPlan& filter_plan, IBlockTransformTask** task,
                                                 std::string* error) {
     if (task) *task = nullptr;
     if (error) error->clear();
@@ -545,12 +545,12 @@ FilterPlanError CreateBlockTransformTaskSession(IBlockTransformOperatorV1* provi
     const std::string owned_task_id = task_id;
     const std::string owned_with_params_json = with_params_json;
     const std::string owned_filter_plan_json = filter_plan.pushed_filter_plan_json;
-    BlockTransformTaskConfigV1 config;
+    BlockTransformTaskConfig config;
     config.task_id = owned_task_id.c_str();
     config.with_params_json = owned_with_params_json.c_str();
     config.pushed_filter_plan_json = owned_filter_plan_json.c_str();
 
-    IBlockTransformTaskV1* created_task = nullptr;
+    IBlockTransformTask* created_task = nullptr;
     const int create_return_code = provider->CreateTask(config, &created_task);
     if (create_return_code != 0 || !created_task) {
         if (created_task) provider->ReleaseTask(created_task);

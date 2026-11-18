@@ -34,14 +34,14 @@ NpmBudgetError NpmTcpStreamSharedDirection::Budget::Release(NpmBudgetCategory ca
 
 NpmBudgetUsage NpmTcpStreamSharedDirection::Budget::Usage() const { return task->Usage(); }
 
-class NpmTcpStreamSharedDirection::Cursor final : public INpmTcpStreamCursorV1 {
+class NpmTcpStreamSharedDirection::Cursor final : public INpmTcpStreamCursor {
  public:
     Cursor(NpmTcpStreamSharedDirection& owner, Reader& reader) : owner_(owner), reader_(reader) {}
-    bool Peek(NpmTcpStreamEventV1* event) const override {
+    bool Peek(NpmTcpStreamEvent* event) const override {
         if (!event) owner_.Latch(NpmTcpStreamError::kInvalidConsume, reader_.subscription.module_id);
         if (owner_.failure_.error != NpmTcpStreamError::kNone || !reader_.event) return false;
         *event = reader_.event->view;
-        if (event->kind == NpmTcpStreamEventKindV1::kData) {
+        if (event->kind == NpmTcpStreamEventKind::kData) {
             event->begin += reader_.offset;
             event->bytes.data += reader_.offset;
             event->bytes.size -= reader_.offset;
@@ -51,14 +51,14 @@ class NpmTcpStreamSharedDirection::Cursor final : public INpmTcpStreamCursorV1 {
     int Consume(uint64_t bytes) override {
         if (owner_.failure_.error != NpmTcpStreamError::kNone) return EIO;
         auto* event = reader_.event;
-        const bool data = event && event->view.kind == NpmTcpStreamEventKindV1::kData;
+        const bool data = event && event->view.kind == NpmTcpStreamEventKind::kData;
         if (!event || (data ? (bytes == 0 || bytes > event->view.bytes.size - reader_.offset) : bytes != 0)) {
             owner_.Latch(NpmTcpStreamError::kInvalidConsume, reader_.subscription.module_id);
             return EINVAL;
         }
         reader_.offset += bytes;
         if (data && reader_.offset < event->view.bytes.size) return 0;
-        reader_.end_seen = event->view.kind == NpmTcpStreamEventKindV1::kEnd;
+        reader_.end_seen = event->view.kind == NpmTcpStreamEventKind::kEnd;
         reader_.event = event->next;
         reader_.offset = 0;
         --event->remaining;
@@ -71,7 +71,7 @@ class NpmTcpStreamSharedDirection::Cursor final : public INpmTcpStreamCursorV1 {
     Reader& reader_;
 };
 
-class NpmTcpStreamSharedDirection::Emitter final : public INpmResultEmitterV1 {
+class NpmTcpStreamSharedDirection::Emitter final : public INpmResultEmitter {
  public:
     Emitter(NpmTcpStreamSharedDirection& owner, Reader& reader) : owner_(owner), reader_(reader) {}
     int Emit(std::string_view entity_id, const arrow::RecordBatch& rows) override {
@@ -93,9 +93,8 @@ class NpmTcpStreamSharedDirection::Emitter final : public INpmResultEmitterV1 {
     Reader& reader_;
 };
 
-NpmTcpStreamError NpmTcpStreamSharedDirection::Create(NpmTcpStreamConfigV1 config,
-                                                      std::shared_ptr<INpmTaskBudget> budget, uint64_t session_id,
-                                                      NpmPacketDirection direction,
+NpmTcpStreamError NpmTcpStreamSharedDirection::Create(NpmTcpStreamConfig config, std::shared_ptr<INpmTaskBudget> budget,
+                                                      uint64_t session_id, NpmPacketDirection direction,
                                                       Span<const NpmTcpStreamSubscription> subscriptions,
                                                       std::unique_ptr<NpmTcpStreamSharedDirection>* output,
                                                       NpmTcpStreamFailure* failure) {
@@ -145,13 +144,13 @@ NpmTcpStreamError NpmTcpStreamSharedDirection::Create(NpmTcpStreamConfigV1 confi
     return result;
 }
 
-NpmTcpStreamSharedDirection::NpmTcpStreamSharedDirection(NpmTcpStreamConfigV1 config,
+NpmTcpStreamSharedDirection::NpmTcpStreamSharedDirection(NpmTcpStreamConfig config,
                                                          std::shared_ptr<INpmTaskBudget> budget, uint64_t session_id,
                                                          NpmPacketDirection direction)
     : budget_(std::move(budget), config.max_buffered_bytes_per_direction),
       failure_{NpmTcpStreamError::kNone, session_id, direction, {}, {}} {}
 
-void NpmTcpStreamSharedDirection::Initialize(NpmTcpStreamConfigV1 config,
+void NpmTcpStreamSharedDirection::Initialize(NpmTcpStreamConfig config,
                                              Span<const NpmTcpStreamSubscription> subscriptions) {
     if (subscriptions.size > std::numeric_limits<uint64_t>::max() / sizeof(Reader)) {
         throw NpmTcpStreamError::kDirectionLimitExceeded;
@@ -186,12 +185,12 @@ void NpmTcpStreamSharedDirection::Latch(NpmTcpStreamError error, std::string_vie
     if (earliest) failure_.retaining_consumer = earliest->subscription.module_id;
 }
 
-int NpmTcpStreamSharedDirection::Emit(const NpmTcpStreamEventV1& event) {
+int NpmTcpStreamSharedDirection::Emit(const NpmTcpStreamEvent& event) {
     std::unique_ptr<uint8_t[]> empty;
     return EmitOwned(event, empty, 0);
 }
 
-int NpmTcpStreamSharedDirection::EmitOwned(const NpmTcpStreamEventV1& event, std::unique_ptr<uint8_t[]>& data,
+int NpmTcpStreamSharedDirection::EmitOwned(const NpmTcpStreamEvent& event, std::unique_ptr<uint8_t[]>& data,
                                            uint64_t allocated_bytes) {
     Reserve(sizeof(Event));
     auto node = std::make_unique<Event>();
@@ -252,7 +251,7 @@ bool NpmTcpStreamSharedDirection::Begin(const NpmSessionView& session) {
 }
 
 void NpmTcpStreamSharedDirection::Notify(const NpmSessionView& session, int64_t observed_at_ns) {
-    NpmTcpStreamContextV1 context;
+    NpmTcpStreamContext context;
     context.session = &session;
     context.direction = failure_.direction;
     context.origin = core_->Origin();
@@ -308,7 +307,7 @@ NpmTcpStreamError NpmTcpStreamSharedDirection::AdvanceWatermark(const NpmSession
     return Complete(core_->AdvanceWatermark(watermark_ns, *this), session, watermark_ns);
 }
 
-NpmTcpStreamError NpmTcpStreamSharedDirection::End(const NpmSessionView& session, NpmTcpStreamEndReasonV1 reason,
+NpmTcpStreamError NpmTcpStreamSharedDirection::End(const NpmSessionView& session, NpmTcpStreamEndReason reason,
                                                    std::optional<NpmSessionEndReason> session_reason,
                                                    int64_t observed_at_ns) {
     if (!Begin(session)) return failure_.error;

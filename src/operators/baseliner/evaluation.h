@@ -27,29 +27,29 @@ struct ModelParametersRow {
     Observation identity;
     std::string model_basis_id;
     std::optional<int64_t> as_of_bucket;
-    BaselineModelParametersV1 parameters;
+    BaselineModelParameters parameters;
 };
 struct MaintenanceRow {
     Observation identity;
     std::string event_kind;
     std::string reason;
-    BaselineStateUsageV1 usage;
+    BaselineStateUsage usage;
 };
 // All calls serialized. The caller retains the service/plugin owner until after Close/destruction.
 class EvaluationEngine {
  public:
     EvaluationEngine();
     ~EvaluationEngine();
-    int Open(ConfigSnapshot config, IBaselineService* service, IBaselineStateControlServiceV1* control,
-             IBaselineCheckpointServiceV1* checkpoints = nullptr);
+    int Open(ConfigSnapshot config, IBaselineService* service, IBaselineStateControlService* control,
+             IBaselineCheckpointService* checkpoints = nullptr);
     int ExportCheckpoint(std::string* output) const;
     int ExportModelParameters(std::vector<ModelParametersRow>* output) const;
     int RestoreCheckpoint(std::string_view checkpoint);
     void SetTime(int64_t monotonic_ns, int64_t wall_ns);
-    int SetSourceProgress(const BlockInputProgressV1& progress);
+    int SetSourceProgress(const BlockInputProgress& progress);
     std::optional<int64_t> NextMaintenanceDeadline() const;
     int Maintain(std::vector<MaintenanceRow>* output);
-    std::pair<BaselineStatus, BaselineStateUsageV1> QueryUsage() const;
+    std::pair<BaselineStatus, BaselineStateUsage> QueryUsage() const;
     // 1: durable replay, 0: new observation, -1: incompatible source epoch.
     int ClassifyReplay(const Observation& input) const;
     int Submit(const Observation& input, EvaluationOutput* output);

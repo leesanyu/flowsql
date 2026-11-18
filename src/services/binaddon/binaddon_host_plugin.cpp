@@ -6,8 +6,10 @@
 #include <common/error_code.h>
 #include <common/log.h>
 #include <framework/interfaces/iblock_transform_operator.h>
-#include <framework/interfaces/istream_operator.h>
+#include <framework/interfaces/ioperator_data_contract.h>
+#include <framework/interfaces/ioperator_output_observation.h>
 #include <common/operator_component.hpp>
+#include <functional>
 
 #include <openssl/evp.h>
 #include <rapidjson/document.h>
@@ -25,8 +27,6 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-
-#include "binaddon_operator_proxy.h"
 
 namespace fs = std::filesystem;
 
@@ -49,9 +49,8 @@ bool EqualsIgnoreCase(const std::string& a, const char* b) {
 bool SameGuid(const Guid& left, const Guid& right) { return std::memcmp(&left, &right, sizeof(Guid)) == 0; }
 
 const char* ContractName(const Guid& iid) {
-    if (SameGuid(iid, IID_OPERATOR)) return "operator_v1";
-    if (SameGuid(iid, IID_BLOCK_TRANSFORM_OPERATOR_V1)) return "block_transform_v1";
-    if (SameGuid(iid, IID_BLOCK_TRANSFORM_OPERATOR_V2)) return "block_transform_v2";
+    if (SameGuid(iid, IID_OPERATOR)) return "operator";
+    if (SameGuid(iid, IID_BLOCK_TRANSFORM_OPERATOR)) return "block_transform";
     return "unknown";
 }
 
@@ -147,16 +146,61 @@ struct CapabilityLeaseLifetime {
 
     std::shared_ptr<BinAddonHostPlugin::LoadedPlugin> owner;
 };
+// One current-ABI instance per invocation: configuration is never shared across calls.
+class CapabilityOperator final : public IOperator,
+                                 public IOperatorContractIdentity,
+                                 public IOperatorConfigAdapter,
+                                 public IOperatorOutputObservation {
+ public:
+    using Instance = std::unique_ptr<IOperator, std::function<void(IOperator*)>>;
+    CapabilityOperator(std::shared_ptr<void> lifetime, OperatorComponentContract identity, Instance instance)
+        : lifetime_(std::move(lifetime)), identity_(std::move(identity)), instance_(std::move(instance)) {}
+    OperatorComponentContract ContractIdentity() const override { return identity_; }
+    std::string Category() override { return instance_->Category(); }
+    std::string Name() override { return instance_->Name(); }
+    std::string Description() override { return instance_->Description(); }
+    OperatorPosition Position() override { return instance_->Position(); }
+    int Configure(const char* key, const char* value) override { return instance_->Configure(key, value); }
+    int Work(IChannel* input, IChannel* output) override { return instance_->Work(input, output); }
+    int Work(Span<IChannel*> inputs, IChannel* output) override { return instance_->Work(inputs, output); }
+    std::string LastError() override { return instance_->LastError(); }
+    int OutputObservations(std::string* output) const override {
+        if (auto* observer = dynamic_cast<IOperatorOutputObservation*>(instance_.get()))
+            return observer->OutputObservations(output);
+        if (output) output->clear();
+        return ENOTSUP;
+    }
+    int ResolveInvocation(const char* text, std::string* output, DataSemanticsError* error) override {
+        if (auto* adapter = dynamic_cast<IOperatorConfigAdapter*>(instance_.get()))
+            return adapter->ResolveInvocation(text, output, error);
+        using namespace dataset;
+        Json request;
+        if (!text || !output || request.Parse(text).HasParseError() || !request.IsObject() ||
+            !request.HasMember("parameters") || !request.HasMember("inputs"))
+            return Fail(error, "CONTRACT_INVALID", "invalid invocation request");
+        Json result(rapidjson::kObjectType);
+        auto& a = result.GetAllocator();
+        result.AddMember("effective_parameters", Copy(request["parameters"], a), a)
+            .AddMember("inputs", Copy(request["inputs"], a), a)
+            .AddMember("config_refs", Value(rapidjson::kArrayType), a);
+        *output = Encode(result);
+        if (error) *error = {};
+        return 0;
+    }
+
+ private:
+    // Members are destroyed in reverse order: instance, identity, then library lease.
+    std::shared_ptr<void> lifetime_;
+    const OperatorComponentContract identity_;
+    Instance instance_;
+};
 }  // namespace
 
 BinAddonHostPlugin::LoadedPlugin::~LoadedPlugin() {
     if (destroy_capability_fn) {
         for (auto it = capabilities.rbegin(); it != capabilities.rend(); ++it) {
             if (!it->instance) continue;
-            try {
-                destroy_capability_fn(it->index, it->instance);
-            } catch (...) {
-            }
+            destroy_capability_fn(it->index, it->instance);
             it->instance = nullptr;
         }
     }
@@ -238,13 +282,13 @@ int BinAddonHostPlugin::Stop() {
 }
 
 int BinAddonHostPlugin::Acquire(const char* category, const char* name, const Guid& contract_iid,
-                                CppOperatorCapabilityLeaseV1* lease) {
-    OperatorComponentContractV1 component;
+                                CppOperatorCapabilityLease* lease) {
+    OperatorComponentContract component;
     return AcquireContract(category, name, contract_iid, lease, &component);
 }
 
 int BinAddonHostPlugin::AcquireContract(const char* category, const char* name, const Guid& contract_iid,
-                                        CppOperatorCapabilityLeaseV1* lease, OperatorComponentContractV1* component) {
+                                        CppOperatorCapabilityLease* lease, OperatorComponentContract* component) {
     if (lease) *lease = {};
     if (component) *component = {};
     if (!lease || !component) return -1;
@@ -311,12 +355,13 @@ int BinAddonHostPlugin::EnsureOperatorDbLocked() {
         }
         return -1;
     }
-    if (sqlite3_exec(operator_db_, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr) != SQLITE_OK) {
+    if (EnsureSchemaLocked() != 0 ||
+        sqlite3_exec(operator_db_, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr) != SQLITE_OK) {
         sqlite3_close(operator_db_);
         operator_db_ = nullptr;
         return -1;
     }
-    return EnsureSchemaLocked();
+    return 0;
 }
 
 int BinAddonHostPlugin::EnsureSchemaLocked() {
@@ -339,32 +384,14 @@ int BinAddonHostPlugin::EnsureSchemaLocked() {
         ");";
     if (sqlite3_exec(operator_db_, ddl_catalog, nullptr, nullptr, nullptr) != SQLITE_OK) return -1;
 
-    bool has_category = false;
-    bool has_plugin_id = false;
-    sqlite3_stmt* info = nullptr;
-    if (sqlite3_prepare_v2(operator_db_, "PRAGMA table_info(operator_catalog);", -1, &info, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(info) == SQLITE_ROW) {
-            const unsigned char* name = sqlite3_column_text(info, 1);
-            const std::string col = name ? reinterpret_cast<const char*>(name) : "";
-            if (EqualsIgnoreCase(col, "category")) has_category = true;
-            if (EqualsIgnoreCase(col, "plugin_id")) {
-                has_plugin_id = true;
-            }
-        }
-        sqlite3_finalize(info);
-    }
-    if (!has_category) {
-        if (sqlite3_exec(operator_db_, "ALTER TABLE operator_catalog ADD COLUMN category TEXT;", nullptr, nullptr,
-                         nullptr) != SQLITE_OK) {
-            return -1;
-        }
-    }
-    if (!has_plugin_id) {
-        if (sqlite3_exec(operator_db_, "ALTER TABLE operator_catalog ADD COLUMN plugin_id TEXT;", nullptr, nullptr,
-                         nullptr) != SQLITE_OK) {
-            return -1;
-        }
-    }
+    sqlite3_stmt* current = nullptr;
+    const int rc = sqlite3_prepare_v2(
+        operator_db_,
+        "SELECT category,name,type,description,position,source,active,editable,content_ref,plugin_id,created_at,"
+        "updated_at FROM operator_catalog LIMIT 0",
+        -1, &current, nullptr);
+    sqlite3_finalize(current);
+    if (rc != SQLITE_OK) return -1;
     if (sqlite3_exec(operator_db_,
                      "CREATE UNIQUE INDEX IF NOT EXISTS ux_operator_catalog_category_name "
                      "ON operator_catalog(category COLLATE NOCASE, name COLLATE NOCASE);",
@@ -750,11 +777,6 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
         return error::NOT_FOUND;
     }
 
-    using FnStreamAbiVersion = int (*)();
-    using FnStreamOperatorCount = int (*)();
-    using FnCreateStreamOperator = IStreamOperator* (*)(int);
-    using FnDestroyStreamOperator = void (*)(IStreamOperator*);
-
     const std::string current_sha256 = Sha256File(row.file_path);
     if (current_sha256.empty() || current_sha256 != row.sha256) {
         std::lock_guard<std::mutex> lock(mu_);
@@ -798,20 +820,12 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
 
     auto* abi_fn = reinterpret_cast<CppOperatorPluginAbiVersionFn>(dlsym(handle, kCppOperatorPluginAbiVersionSymbol));
     auto* count_fn = reinterpret_cast<CppOperatorPluginCountFn>(dlsym(handle, kCppOperatorPluginCountSymbol));
-    auto* create_fn = reinterpret_cast<CppOperatorPluginCreateV1Fn>(dlsym(handle, kCppOperatorPluginCreateV1Symbol));
-    auto* destroy_fn = reinterpret_cast<CppOperatorPluginDestroyV1Fn>(dlsym(handle, kCppOperatorPluginDestroyV1Symbol));
-    auto* describe_fn =
-        reinterpret_cast<CppOperatorPluginDescribeV2Fn>(dlsym(handle, kCppOperatorPluginDescribeV2Symbol));
-    auto* create_capability_fn = reinterpret_cast<CppOperatorPluginCreateCapabilityV2Fn>(
-        dlsym(handle, kCppOperatorPluginCreateCapabilityV2Symbol));
-    auto* destroy_capability_fn = reinterpret_cast<CppOperatorPluginDestroyCapabilityV2Fn>(
-        dlsym(handle, kCppOperatorPluginDestroyCapabilityV2Symbol));
-    auto* data_contract_fn = reinterpret_cast<OperatorDataContractV1Fn>(dlsym(handle, kOperatorDataContractV1Symbol));
-    auto* stream_abi_fn = reinterpret_cast<FnStreamAbiVersion>(dlsym(handle, "flowsql_stream_abi_version"));
-    auto* stream_count_fn = reinterpret_cast<FnStreamOperatorCount>(dlsym(handle, "flowsql_stream_operator_count"));
-    auto* stream_create_fn = reinterpret_cast<FnCreateStreamOperator>(dlsym(handle, "flowsql_create_stream_operator"));
-    auto* stream_destroy_fn =
-        reinterpret_cast<FnDestroyStreamOperator>(dlsym(handle, "flowsql_destroy_stream_operator"));
+    auto* describe_fn = reinterpret_cast<CppOperatorPluginDescribeFn>(dlsym(handle, kCppOperatorPluginDescribeSymbol));
+    auto* create_capability_fn =
+        reinterpret_cast<CppOperatorPluginCreateCapabilityFn>(dlsym(handle, kCppOperatorPluginCreateCapabilitySymbol));
+    auto* destroy_capability_fn = reinterpret_cast<CppOperatorPluginDestroyCapabilityFn>(
+        dlsym(handle, kCppOperatorPluginDestroyCapabilitySymbol));
+    auto* data_contract_fn = reinterpret_cast<OperatorDataContractFn>(dlsym(handle, kOperatorDataContractSymbol));
     if (!abi_fn || !count_fn) return mark_broken(error::BAD_REQUEST, "missing required symbols", -1);
 
     int abi = -1;
@@ -822,7 +836,7 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
     } catch (...) {
         return mark_broken(error::BAD_REQUEST, "plugin export threw an exception", abi);
     }
-    if (abi != kCppOperatorPluginAbiVersionV1 && abi != kCppOperatorPluginAbiVersionV2) {
+    if (abi != kCppOperatorPluginAbiVersion) {
         return mark_broken(error::BAD_REQUEST, "abi version mismatch", abi);
     }
     if (count <= 0) return mark_broken(error::BAD_REQUEST, "operator_count must > 0", abi);
@@ -830,77 +844,14 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
     loaded->abi_version = abi;
     loaded->count_fn = count_fn;
 
-    const bool has_any_stream_symbols = stream_abi_fn || stream_count_fn || stream_create_fn || stream_destroy_fn;
-
-    int stream_count = 0;
-    if (abi == kCppOperatorPluginAbiVersionV1) {
-        if (!create_fn || !destroy_fn) {
-            return mark_broken(error::BAD_REQUEST, "missing required symbols", abi);
-        }
-        loaded->create_fn = create_fn;
-        loaded->destroy_fn = destroy_fn;
-        if (has_any_stream_symbols && (!stream_abi_fn || !stream_count_fn || !stream_create_fn || !stream_destroy_fn)) {
-            return mark_broken(error::BAD_REQUEST, "missing stream operator symbols", abi);
-        }
-    } else {
-        if (!describe_fn || !create_capability_fn || !destroy_capability_fn) {
-            return mark_broken(error::BAD_REQUEST, "missing required V2 symbols", abi);
-        }
-        if (has_any_stream_symbols) {
-            return mark_broken(error::BAD_REQUEST, "contract-specific count is not allowed in ABI V2", abi);
-        }
-        loaded->describe_fn = describe_fn;
-        loaded->create_capability_fn = create_capability_fn;
-        loaded->destroy_capability_fn = destroy_capability_fn;
+    if (!describe_fn || !create_capability_fn || !destroy_capability_fn) {
+        return mark_broken(error::BAD_REQUEST, "missing required symbols", abi);
     }
+    loaded->describe_fn = describe_fn;
+    loaded->create_capability_fn = create_capability_fn;
+    loaded->destroy_capability_fn = destroy_capability_fn;
 
-    if (abi == kCppOperatorPluginAbiVersionV1 && has_any_stream_symbols) {
-        constexpr int kFlowSqlStreamAbiVersion = 1;
-        int stream_abi = -1;
-        try {
-            stream_abi = stream_abi_fn();
-            stream_count = stream_count_fn();
-        } catch (...) {
-            return mark_broken(error::BAD_REQUEST, "stream plugin export threw an exception", abi);
-        }
-        if (stream_abi != kFlowSqlStreamAbiVersion) {
-            return mark_broken(error::BAD_REQUEST, "stream abi version mismatch", abi);
-        }
-        if (stream_count < 0) {
-            return mark_broken(error::BAD_REQUEST, "stream_operator_count must >= 0", abi);
-        }
-        for (int i = 0; i < stream_count; ++i) {
-            IStreamOperator* op = nullptr;
-            try {
-                op = stream_create_fn(i);
-            } catch (...) {
-                op = nullptr;
-            }
-            if (!op) return mark_broken(error::BAD_REQUEST, "create stream operator failed", abi);
-            std::string category;
-            std::string name;
-            try {
-                category = op->Category();
-                name = op->Name();
-            } catch (...) {
-                try {
-                    stream_destroy_fn(op);
-                } catch (...) {
-                }
-                return mark_broken(error::BAD_REQUEST, "stream operator metadata failed", abi);
-            }
-            try {
-                stream_destroy_fn(op);
-            } catch (...) {
-                return mark_broken(error::BAD_REQUEST, "destroy stream operator failed", abi);
-            }
-            if (category.empty() || name.empty()) {
-                return mark_broken(error::BAD_REQUEST, "empty category/name in stream operator", abi);
-            }
-        }
-    }
-
-    std::vector<OperatorContractDeclarationV1> declarations;
+    std::vector<OperatorContractDeclaration> declarations;
     std::vector<OperatorMeta> metas;
     std::vector<std::string> keys;
     std::vector<std::string> names;
@@ -913,97 +864,63 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
         OperatorMeta meta;
         meta.source = "cpp_plugin";
 
-        if (abi == kCppOperatorPluginAbiVersionV1) {
-            IOperator* op = nullptr;
-            try {
-                op = create_fn(i);
-            } catch (...) {
-                op = nullptr;
-            }
-            if (!op) return mark_broken(error::BAD_REQUEST, "create operator failed", abi);
-            try {
+        CppOperatorDescriptor descriptor{};
+        descriptor.struct_size = kCppOperatorDescriptorSize;
+        int describe_rc = -1;
+        try {
+            describe_rc = describe_fn(i, &descriptor);
+        } catch (...) {
+            describe_rc = -1;
+        }
+        if (describe_rc != 0) {
+            return mark_broken(error::BAD_REQUEST, "describe operator failed", abi);
+        }
+        if (!descriptor.category || !*descriptor.category || !descriptor.name || !*descriptor.name) {
+            return mark_broken(error::BAD_REQUEST, "empty category/name in plugin operator", abi);
+        }
+        if (!SameGuid(descriptor.contract_iid, IID_OPERATOR) &&
+            !SameGuid(descriptor.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR)) {
+            return mark_broken(error::BAD_REQUEST, "unsupported operator contract", abi);
+        }
+
+        void* capability = nullptr;
+        try {
+            capability = create_capability_fn(i, querier_);
+        } catch (...) {
+            capability = nullptr;
+        }
+        if (!capability) {
+            return mark_broken(error::BAD_REQUEST, "create operator capability failed", abi);
+        }
+
+        LoadedPlugin::Capability stored;
+        stored.index = i;
+        stored.category = descriptor.category;
+        stored.name = descriptor.name;
+        stored.description = descriptor.description ? descriptor.description : "";
+        stored.contract_iid = descriptor.contract_iid;
+        stored.instance = capability;
+        loaded->capabilities.push_back(std::move(stored));
+
+        try {
+            if (SameGuid(descriptor.contract_iid, IID_OPERATOR)) {
+                auto* op = static_cast<IOperator*>(capability);
                 meta.category = op->Category();
                 meta.name = op->Name();
-                meta.description = op->Description();
+                meta.description = descriptor.description ? descriptor.description : op->Description();
                 meta.position = op->Position() == OperatorPosition::STORAGE ? "storage" : "data";
-            } catch (...) {
-                try {
-                    destroy_fn(op);
-                } catch (...) {
-                }
-                return mark_broken(error::BAD_REQUEST, "operator metadata failed", abi);
+            } else {
+                auto* op = static_cast<IBlockTransformOperator*>(capability);
+                meta.category = op->Category();
+                meta.name = op->Name();
+                meta.description = descriptor.description ? descriptor.description : op->Description();
+                meta.position = "data";
             }
-            try {
-                destroy_fn(op);
-            } catch (...) {
-                return mark_broken(error::BAD_REQUEST, "destroy operator failed", abi);
-            }
-        } else {
-            CppOperatorDescriptorV2 descriptor{};
-            descriptor.struct_size = kCppOperatorDescriptorV2Size;
-            int describe_rc = -1;
-            try {
-                describe_rc = describe_fn(i, &descriptor);
-            } catch (...) {
-                describe_rc = -1;
-            }
-            if (describe_rc != 0) {
-                return mark_broken(error::BAD_REQUEST, "describe operator failed", abi);
-            }
-            if (!descriptor.category || !*descriptor.category || !descriptor.name || !*descriptor.name) {
-                return mark_broken(error::BAD_REQUEST, "empty category/name in plugin operator", abi);
-            }
-            if (!SameGuid(descriptor.contract_iid, IID_OPERATOR) &&
-                !SameGuid(descriptor.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V1) &&
-                !SameGuid(descriptor.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V2)) {
-                return mark_broken(error::BAD_REQUEST, "unsupported operator contract", abi);
-            }
-
-            void* capability = nullptr;
-            try {
-                capability = create_capability_fn(i, querier_);
-            } catch (...) {
-                capability = nullptr;
-            }
-            if (!capability) {
-                return mark_broken(error::BAD_REQUEST, "create operator capability failed", abi);
-            }
-
-            LoadedPlugin::Capability stored;
-            stored.index = i;
-            stored.category = descriptor.category;
-            stored.name = descriptor.name;
-            stored.description = descriptor.description ? descriptor.description : "";
-            stored.contract_iid = descriptor.contract_iid;
-            stored.instance = capability;
-            loaded->capabilities.push_back(std::move(stored));
-
-            try {
-                if (SameGuid(descriptor.contract_iid, IID_OPERATOR)) {
-                    auto* op = static_cast<IOperator*>(capability);
-                    meta.category = op->Category();
-                    meta.name = op->Name();
-                    meta.description = descriptor.description ? descriptor.description : op->Description();
-                    meta.position = op->Position() == OperatorPosition::STORAGE ? "storage" : "data";
-                } else if (SameGuid(descriptor.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V1)) {
-                    auto* op = static_cast<IBlockTransformOperatorV1*>(capability);
-                    meta.category = op->Category();
-                    meta.name = op->Name();
-                    meta.description = descriptor.description ? descriptor.description : op->Description();
-                    meta.position = "data";
-                } else {
-                    auto* op = static_cast<IBlockTransformOperatorV2*>(capability);
-                    meta.category = op->Category();
-                    meta.name = op->Name();
-                    meta.description = descriptor.description ? descriptor.description : op->Description();
-                    meta.position = "data";
-                }
-            } catch (...) {
-                return mark_broken(error::BAD_REQUEST, "operator capability metadata failed", abi);
-            }
-            if (meta.category != descriptor.category || meta.name != descriptor.name) {
-                return mark_broken(error::BAD_REQUEST, "operator descriptor mismatch", abi);
-            }
+        } catch (...) {
+            return mark_broken(error::BAD_REQUEST, "operator capability metadata failed", abi);
+        }
+        if (meta.category != descriptor.category || meta.name != descriptor.name) {
+            return mark_broken(error::BAD_REQUEST, "operator descriptor mismatch", abi);
         }
 
         if (meta.category.empty() || meta.name.empty()) {
@@ -1025,37 +942,9 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
             }
         }
         const std::string key = meta.category + "." + meta.name;
-        if (!local_keys.insert(ToLowerAscii(key)).second) {
-            bool version_pair = abi == kCppOperatorPluginAbiVersionV2;
-            const auto& current = loaded->capabilities.back();
-            for (size_t previous = 0; previous + 1 < loaded->capabilities.size(); ++previous) {
-                const auto& existing = loaded->capabilities[previous];
-                if (ToLowerAscii(existing.category + "." + existing.name) != ToLowerAscii(key)) continue;
-                const bool v1_v2 = SameGuid(existing.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V1) &&
-                                   SameGuid(current.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V2);
-                const bool v2_v1 = SameGuid(existing.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V2) &&
-                                   SameGuid(current.contract_iid, IID_BLOCK_TRANSFORM_OPERATOR_V1);
-                version_pair = version_pair && (v1_v2 || v2_v1);
-            }
-            if (!version_pair) return mark_broken(error::CONFLICT, "duplicate operators inside plugin", abi);
-            auto existing = std::find_if(declarations.begin(), declarations.end(), [&](const auto& d) {
-                return ToLowerAscii(d.category + "." + d.name) == ToLowerAscii(key);
-            });
-            if (!declaration.empty()) {
-                rapidjson::Document next;
-                next.Parse(declaration.c_str());
-                if (next.HasParseError()) return mark_broken(error::BAD_REQUEST, "invalid paired contract", abi);
-                if (!existing->declaration_json.empty()) {
-                    rapidjson::Document first;
-                    first.Parse(existing->declaration_json.c_str());
-                    if (first.HasParseError() || first != next)
-                        return mark_broken(error::BAD_REQUEST, "conflicting paired contracts", abi);
-                } else {
-                    existing->declaration_json = declaration;
-                }
-            }
-            continue;
-        }
+        if (!local_keys.insert(ToLowerAscii(key)).second)
+            return mark_broken(error::CONFLICT, "duplicate operators inside plugin", abi);
+
         declarations.push_back({meta.category, meta.name, current_sha256, declaration, ""});
         keys.push_back(key);
         names.push_back(meta.name);
@@ -1065,17 +954,16 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
     loaded->operator_keys = keys;
     loaded->operator_names = names;
     auto* contract_catalog =
-        querier_ ? static_cast<IOperatorContractCatalogV1*>(querier_->First(IID_OPERATOR_CONTRACT_CATALOG_V1))
-                 : nullptr;
-    std::vector<PreparedOperatorContractV1> prepared_contracts;
-    DataSemanticsErrorV1 contract_error;
+        querier_ ? static_cast<IOperatorContractCatalog*>(querier_->First(IID_OPERATOR_CONTRACT_CATALOG)) : nullptr;
+    std::vector<PreparedOperatorContract> prepared_contracts;
+    DataSemanticsError contract_error;
     const bool declared = std::any_of(declarations.begin(), declarations.end(),
                                       [](const auto& d) { return !d.declaration_json.empty(); });
     if (!contract_catalog && declared)
         return mark_broken(error::UNAVAILABLE, "declared contract catalog unavailable", abi);
     if (contract_catalog) {
         for (auto& d : declarations) {
-            OperatorComponentContractV1 previous;
+            OperatorComponentContract previous;
             if (contract_catalog->Lookup(d.category.c_str(), d.name.c_str(), &previous, &contract_error))
                 return mark_broken(error::UNAVAILABLE, "component contract lookup failed", abi);
             d.expected_component_revision = previous.component_revision;
@@ -1108,40 +996,22 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
 
         std::vector<std::string> inserted_keys;
         for (size_t i = 0; i < keys.size(); ++i) {
-            OperatorFactory factory;
-            if (abi == kCppOperatorPluginAbiVersionV1) {
-                factory = [loaded, idx = static_cast<int>(i)]() -> IOperator* {
-                    loaded->active_count.fetch_add(1, std::memory_order_seq_cst);
-                    if (loaded->pending_unload.load(std::memory_order_seq_cst)) {
-                        loaded->active_count.fetch_sub(1, std::memory_order_seq_cst);
-                        return nullptr;
-                    }
-                    IOperator* impl = nullptr;
-                    try {
-                        impl = loaded->create_fn(idx);
-                    } catch (...) {
-                        impl = nullptr;
-                    }
-                    if (!impl) {
-                        loaded->active_count.fetch_sub(1, std::memory_order_seq_cst);
-                        return nullptr;
-                    }
-                    try {
-                        auto* proxy = new BinAddonOperatorProxy(impl, loaded);
-                        loaded->active_count.fetch_sub(1, std::memory_order_seq_cst);
-                        return proxy;
-                    } catch (...) {
-                        try {
-                            loaded->destroy_fn(impl);
-                        } catch (...) {
-                        }
-                        loaded->active_count.fetch_sub(1, std::memory_order_seq_cst);
-                        return nullptr;
-                    }
-                };
-            } else {
-                factory = [loaded]() -> IOperator* { return nullptr; };
-            }
+            OperatorFactory factory = [loaded, i, querier = querier_]() -> IOperator* {
+                const auto& capability = loaded->capabilities[i];
+                // BlockTransform providers are acquired through their capability registry.
+                if (!SameGuid(capability.contract_iid, IID_OPERATOR)) return nullptr;
+                auto lifetime = std::make_shared<CapabilityLeaseLifetime>(loaded);
+                loaded->active_count.fetch_add(1, std::memory_order_seq_cst);
+                if (loaded->pending_unload.load(std::memory_order_seq_cst)) return nullptr;
+                CapabilityOperator::Instance instance(
+                    static_cast<IOperator*>(loaded->create_capability_fn(capability.index, querier)),
+                    [loaded, index = capability.index](IOperator* value) {
+                        loaded->destroy_capability_fn(index, value);
+                    });
+                if (!instance) return nullptr;
+                return new CapabilityOperator(std::move(lifetime), loaded->data_contracts[i], std::move(instance));
+            };
+
             if (registry_->Register(keys[i].c_str(), std::move(factory)) != 0) {
                 rollback_registered(inserted_keys);
                 (void)MarkPluginBrokenLocked(plugin_id, "operator factory conflict", abi);
@@ -1252,10 +1122,7 @@ int BinAddonHostPlugin::ActivateCppPlugin(const std::string& plugin_id, std::str
     w.Int(abi);
     w.Key("operator_count");
     w.Int(count);
-    if (has_any_stream_symbols) {
-        w.Key("stream_operator_count");
-        w.Int(stream_count);
-    }
+
     w.Key("operators");
     w.StartArray();
     for (const auto& key : keys) w.String(key.c_str());
@@ -1402,7 +1269,7 @@ int BinAddonHostPlugin::GetCppPluginDetail(const std::string& plugin_id, std::st
 
     PluginStoreRow row;
     std::vector<std::pair<std::string, std::string>> operator_details;
-    std::vector<OperatorComponentContractV1> data_contracts;
+    std::vector<OperatorComponentContract> data_contracts;
     {
         std::lock_guard<std::mutex> lock(mu_);
         if (EnsureOperatorDbLocked() != 0 || !operator_db_) {

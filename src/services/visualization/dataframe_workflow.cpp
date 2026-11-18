@@ -170,7 +170,7 @@ std::string DoubleText(double value) {
 // One materialised column keeps its Arrow type class, so text is compared by bytes and
 // integers stay exact instead of being widened to double for filtering or grouping.
 struct Column {
-    FieldV1 field;
+    Field field;
     std::shared_ptr<arrow::Array> array;
     std::vector<bool> valid;
     std::vector<int64_t> integers;
@@ -194,14 +194,14 @@ struct Cell {
 
 class Executor {
  public:
-    Executor(const std::shared_ptr<arrow::RecordBatch>& batch, const std::vector<FieldV1>& fields, uint64_t max_bytes,
+    Executor(const std::shared_ptr<arrow::RecordBatch>& batch, const std::vector<Field>& fields, uint64_t max_bytes,
              const std::chrono::steady_clock::time_point& deadline)
         : batch_(batch), fields_(fields), max_bytes_(max_bytes), deadline_(deadline) {
         for (size_t i = 0; i < static_cast<size_t>(batch_->num_columns()); ++i)
             columns_.emplace(fields_[i].id, Materialise(static_cast<int>(i), fields_[i]));
     }
 
-    DataFrameResultV1 Run(const Json& input, const std::string& mode, uint32_t maximum) {
+    DataFrameResult Run(const Json& input, const std::string& mode, uint32_t maximum) {
         Keys(input, {"workflow", "limit", "offset"});
         if (!input.HasMember("workflow") || !input["workflow"].IsArray() || input["workflow"].Size() > 32)
             Invalid("无效的 workflow");
@@ -300,7 +300,7 @@ class Executor {
         }
         if (limit > static_cast<int64_t>(maximum)) throw QueryFailure("RESULT_LIMIT", "请求的行数超过服务上限");
         const bool aggregate = !group_fields.empty() || !measures.empty();
-        DataFrameResultV1 result;
+        DataFrameResult result;
         result.scope = (limit >= 0 || offset)              ? "top_n"
                        : (!aggregate && mode == "limited") ? "limited_detail"
                                                            : "complete";
@@ -322,7 +322,7 @@ class Executor {
         if (std::chrono::steady_clock::now() >= deadline_) throw QueryFailure("TIMEOUT", "查询超过计算期限");
     }
 
-    Column Materialise(int index, const FieldV1& field) {
+    Column Materialise(int index, const Field& field) {
         Column column;
         column.field = field;
         column.array = batch_->column(index);
@@ -825,11 +825,11 @@ class Executor {
         return part;
     }
 
-    ExplorationValueV1 CellValue(const Column& column, int64_t row) const {
+    ExplorationValue CellValue(const Column& column, int64_t row) const {
         if (row < 0 || row >= column.length || !column.valid[static_cast<size_t>(row)]) return std::monostate{};
         if (column.field.type == "number") {
             if (column.decimal) {
-                ExplorationDecimalV1 decimal;
+                ExplorationDecimal decimal;
                 decimal.text = column.decimals[static_cast<size_t>(row)];
                 return decimal;
             }
@@ -839,7 +839,7 @@ class Executor {
         return column.texts[static_cast<size_t>(row)];
     }
 
-    ExplorationValueV1 KeyValue(const KeyPart& part) const {
+    ExplorationValue KeyValue(const KeyPart& part) const {
         if (part.null) return std::monostate{};
         if (part.kind == CellKind::kInteger) return part.integer;
         if (part.kind == CellKind::kReal) return part.real;
@@ -848,7 +848,7 @@ class Executor {
 
     void Project(const std::vector<int64_t>& rows, const std::vector<std::string>& project,
                  const std::vector<std::string>& sort_ids, const std::string& direction, int64_t limit, int64_t offset,
-                 DataFrameResultV1* result) {
+                 DataFrameResult* result) {
         for (const auto& id : project) result->fields.push_back(Lookup(id).field);
         for (const auto& id : sort_ids)
             if (std::find(project.begin(), project.end(), id) == project.end()) Invalid("排序字段未出现在结果中");
@@ -869,7 +869,7 @@ class Executor {
         for (int64_t position = begin; position < end; ++position) {
             if ((position & 0x3ff) == 0) Checkpoint();
             const auto row = ordering[static_cast<size_t>(position)];
-            std::vector<ExplorationValueV1> values;
+            std::vector<ExplorationValue> values;
             for (const auto& id : project) values.push_back(CellValue(Lookup(id), row));
             result->rows.push_back(std::move(values));
         }
@@ -883,14 +883,14 @@ class Executor {
         double real_sum = 0;
         bool finite = true;
         bool has_value = false;
-        ExplorationValueV1 minimum = std::monostate{};
-        ExplorationValueV1 maximum = std::monostate{};
+        ExplorationValue minimum = std::monostate{};
+        ExplorationValue maximum = std::monostate{};
         std::set<std::string> distinct;
         std::string decimal_sum = "0";
         bool decimal = false;
     };
 
-    static Cell CellFrom(const ExplorationValueV1& value) {
+    static Cell CellFrom(const ExplorationValue& value) {
         Cell cell;
         if (auto integer = std::get_if<int64_t>(&value)) {
             cell.kind = CellKind::kInteger;
@@ -901,7 +901,7 @@ class Executor {
         } else if (auto text = std::get_if<std::string>(&value)) {
             cell.kind = CellKind::kText;
             cell.text = *text;
-        } else if (auto decimal = std::get_if<ExplorationDecimalV1>(&value)) {
+        } else if (auto decimal = std::get_if<ExplorationDecimal>(&value)) {
             cell.kind = CellKind::kText;
             cell.text = decimal->text;
         }
@@ -1019,8 +1019,8 @@ class Executor {
                digits.substr(digits.size() - scale);
     }
 
-    ExplorationValueV1 MeasureValue(const Column* column, const std::string& aggregate,
-                                    const Accumulator& accumulator) const {
+    ExplorationValue MeasureValue(const Column* column, const std::string& aggregate,
+                                  const Accumulator& accumulator) const {
         if (aggregate == "count") return static_cast<int64_t>(column ? accumulator.non_null : accumulator.count);
         if (aggregate == "distinctCount") return static_cast<int64_t>(accumulator.distinct.size());
         if (!accumulator.has_value) return std::monostate{};
@@ -1028,7 +1028,7 @@ class Executor {
         if (aggregate == "max") return accumulator.maximum;
         if (aggregate == "sum") {
             if (accumulator.decimal) {
-                ExplorationDecimalV1 decimal;
+                ExplorationDecimal decimal;
                 decimal.text = CanonicalDecimal(accumulator.decimal_sum);
                 return decimal;
             }
@@ -1052,12 +1052,12 @@ class Executor {
     void Aggregate(const std::vector<int64_t>& rows, const std::vector<std::string>& group_fields,
                    const std::vector<std::string>& group_units, const std::vector<std::string>& aliases,
                    const std::vector<const rapidjson::Value*>& measures, const std::vector<std::string>& sort_ids,
-                   const std::string& direction, int64_t limit, int64_t offset, DataFrameResultV1* result) {
+                   const std::string& direction, int64_t limit, int64_t offset, DataFrameResult* result) {
         struct MeasureSpec {
             std::string id;
             std::string aggregate;
             const Column* column = nullptr;
-            FieldV1 output;
+            Field output;
         };
         std::vector<MeasureSpec> specs;
         for (const auto* measure : measures) {
@@ -1120,7 +1120,7 @@ class Executor {
         for (const auto& spec : specs) result->fields.push_back(spec.output);
         struct Row {
             GroupKey key;
-            std::vector<ExplorationValueV1> values;
+            std::vector<ExplorationValue> values;
         };
         std::vector<Row> output;
         for (const auto& [key, accumulators] : groups) {
@@ -1133,12 +1133,12 @@ class Executor {
         if (!sort_ids.empty()) {
             for (const auto& id : sort_ids) {
                 const auto found = std::find_if(result->fields.begin(), result->fields.end(),
-                                                [&](const FieldV1& field) { return field.id == id; });
+                                                [&](const Field& field) { return field.id == id; });
                 if (found == result->fields.end()) Invalid("排序字段未出现在结果中");
             }
             const auto index_of = [&](const std::string& id) {
                 return static_cast<size_t>(std::find_if(result->fields.begin(), result->fields.end(),
-                                                        [&](const FieldV1& field) { return field.id == id; }) -
+                                                        [&](const Field& field) { return field.id == id; }) -
                                            result->fields.begin());
             };
             std::stable_sort(output.begin(), output.end(), [&](const Row& left, const Row& right) {
@@ -1176,7 +1176,7 @@ class Executor {
             result->rows.push_back(std::move(output[static_cast<size_t>(position)].values));
         for (const auto& spec : specs) {
             if (!spec.column || !spec.column->decimal || spec.aggregate != "mean") continue;
-            NumericDisplayV1 display;
+            NumericDisplay display;
             display.field_id = spec.id;
             display.mode = "approximate";
             display.origin = "arrow_decimal_mean";
@@ -1186,7 +1186,7 @@ class Executor {
 
     // Fixed-width bins over the filtered non-NULL values: [lower, upper) and a closed last bin.
     void Histogram(const std::vector<int64_t>& rows, const std::string& field_id, uint32_t bins, int64_t limit,
-                   int64_t offset, DataFrameResultV1* result) {
+                   int64_t offset, DataFrameResult* result) {
         const auto& column = Lookup(field_id);
         std::vector<double> values;
         double minimum = 0, maximum = 0;
@@ -1237,7 +1237,7 @@ class Executor {
             result->rows.push_back({static_cast<int64_t>(index), lower, upper, static_cast<int64_t>(counts[index])});
         }
         if (column.decimal) {
-            NumericDisplayV1 display;
+            NumericDisplay display;
             display.field_id = "bin_lower";
             display.mode = "approximate";
             display.origin = "arrow_decimal_histogram";
@@ -1247,13 +1247,13 @@ class Executor {
             const int64_t begin = std::min<int64_t>(offset, static_cast<int64_t>(result->rows.size()));
             const int64_t end = limit < 0 ? static_cast<int64_t>(result->rows.size())
                                           : std::min<int64_t>(begin + limit, static_cast<int64_t>(result->rows.size()));
-            std::vector<std::vector<ExplorationValueV1>> kept(result->rows.begin() + begin, result->rows.begin() + end);
+            std::vector<std::vector<ExplorationValue>> kept(result->rows.begin() + begin, result->rows.begin() + end);
             result->rows = std::move(kept);
         }
     }
 
     std::shared_ptr<arrow::RecordBatch> batch_;
-    std::vector<FieldV1> fields_;
+    std::vector<Field> fields_;
     std::unordered_map<std::string, Column> columns_;
     std::unordered_map<std::string, std::pair<std::vector<std::string>, std::vector<bool>>> buckets_;
     uint64_t max_bytes_ = 0;
@@ -1262,8 +1262,8 @@ class Executor {
 };
 }  // namespace
 
-std::vector<FieldV1> DescribeArrowSchema(const arrow::Schema& schema) {
-    std::vector<FieldV1> fields;
+std::vector<Field> DescribeArrowSchema(const arrow::Schema& schema) {
+    std::vector<Field> fields;
     for (int i = 0; i < schema.num_fields(); ++i) {
         const auto& field = schema.field(i);
         fields.push_back({"f" + std::to_string(i), field->name(), TypeClass(field->type()), field->type()->ToString(),
@@ -1282,10 +1282,10 @@ std::string ArrowSchemaRevision(const arrow::Schema& schema) {
     return result.str();
 }
 
-DataFrameResultV1 ExecuteDataFrameWorkflow(const std::shared_ptr<arrow::RecordBatch>& batch,
-                                           const std::vector<FieldV1>& fields, const rapidjson::Value& payload,
-                                           const std::string& detail_mode, uint32_t max_rows, uint64_t max_bytes,
-                                           const std::chrono::steady_clock::time_point& deadline) {
+DataFrameResult ExecuteDataFrameWorkflow(const std::shared_ptr<arrow::RecordBatch>& batch,
+                                         const std::vector<Field>& fields, const rapidjson::Value& payload,
+                                         const std::string& detail_mode, uint32_t max_rows, uint64_t max_bytes,
+                                         const std::chrono::steady_clock::time_point& deadline) {
     if (!batch || !batch->schema()) Invalid("快照数据无效");
     if (fields.size() != static_cast<size_t>(batch->num_columns())) Invalid("快照字段与数据不一致");
     return Executor(batch, fields, max_bytes, deadline).Run(payload, detail_mode, max_rows);

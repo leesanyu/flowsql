@@ -16,7 +16,7 @@ std::shared_ptr<arrow::Field> AddressField(const char* name, packet::AddressFami
 }
 }  // namespace
 
-NpmEntityDescriptorV1 NpmFamilyEntityDescriptor(NpmFamilyEntityKind kind, packet::AddressFamily family) {
+NpmEntityDescriptor NpmFamilyEntityDescriptor(NpmFamilyEntityKind kind, packet::AddressFamily family) {
     if (family != packet::AddressFamily::kIPv4 && family != packet::AddressFamily::kIPv6)
         throw std::invalid_argument("NPM entity requires IPv4 or IPv6");
     std::vector<std::shared_ptr<arrow::Field>> fields;
@@ -240,12 +240,12 @@ NpmEntityDescriptorV1 NpmFamilyEntityDescriptor(NpmFamilyEntityKind kind, packet
         default:
             throw std::invalid_argument("unknown NPM entity kind");
     }
-    NpmEntityDescriptorV1 entity;
+    NpmEntityDescriptor entity;
     entity.module_id = module;
     entity.entity_id = base + (family == packet::AddressFamily::kIPv4 ? "_ipv4" : "_ipv6");
     const bool cumulative = kind == NpmFamilyEntityKind::kBasic || kind == NpmFamilyEntityKind::kSession;
     entity.identity_column = cumulative ? "session_id" : "entity_instance_id";
-    entity.revision_semantics = cumulative ? NpmRevisionSemanticsV1::kCumulative : NpmRevisionSemanticsV1::kEvent;
+    entity.revision_semantics = cumulative ? NpmRevisionSemantics::kCumulative : NpmRevisionSemantics::kEvent;
     auto metadata = arrow::key_value_metadata(
         {"flowsql.entity", "flowsql.module", "flowsql.schema_version", "flowsql.timestamp_unit", "flowsql.ip_family",
          "flowsql.revision_semantics", "flowsql.measurement_scope"},
@@ -259,7 +259,7 @@ NpmEntityDescriptorV1 NpmFamilyEntityDescriptor(NpmFamilyEntityKind kind, packet
     return entity;
 }
 
-arrow::Status ValidateNpmFamilyEntityRows(const NpmEntityDescriptorV1& entity, const arrow::RecordBatch& rows) {
+arrow::Status ValidateNpmFamilyEntityRows(const NpmEntityDescriptor& entity, const arrow::RecordBatch& rows) {
     if (!entity.schema || !rows.schema()->Equals(*entity.schema, true))
         return arrow::Status::Invalid("family result Schema mismatch");
     ARROW_RETURN_NOT_OK(rows.ValidateFull());
@@ -277,7 +277,7 @@ arrow::Status ValidateNpmFamilyEntityRows(const NpmEntityDescriptorV1& entity, c
         if (static_cast<const arrow::UInt64Array&>(*identity).Value(row) == 0 ||
             static_cast<const arrow::UInt64Array&>(*revision).Value(row) == 0)
             return arrow::Status::Invalid("zero family identity/revision");
-        if (entity.revision_semantics == NpmRevisionSemanticsV1::kEvent &&
+        if (entity.revision_semantics == NpmRevisionSemantics::kEvent &&
             (static_cast<const arrow::UInt64Array&>(*revision).Value(row) != 1 ||
              !static_cast<const arrow::BooleanArray&>(*final).Value(row)))
             return arrow::Status::Invalid("event requires revision 1 and is_final=true");
@@ -295,16 +295,16 @@ arrow::Status ValidateNpmFamilyInputEvent(const NpmFamilyInputEvent& input) {
         family = packet::AddressFamily::kIPv6;
     else
         return arrow::Status::Invalid("family input has no endpoint view");
-    if (input.kind == NpmInputKindV1::kControlPacket) {
+    if (input.kind == NpmInputKind::kControlPacket) {
         if (input.transport || input.session || input.layer->ports_valid ||
             input.layer->transport_protocol != (family == packet::AddressFamily::kIPv4 ? 1 : 58))
             return arrow::Status::Invalid("control packet must be portless and sessionless");
     } else {
-        const auto protocol = input.kind == NpmInputKindV1::kTcpPacket ? 6 : 17;
-        if ((input.kind != NpmInputKindV1::kTcpPacket && input.kind != NpmInputKindV1::kUdpDatagram) ||
-            !input.transport || !input.session || !input.session->facts.session_id ||
-            input.session->key.Family() != family || !input.layer->ports_valid ||
-            input.layer->transport_protocol != protocol || input.transport->layer != input.layer)
+        const auto protocol = input.kind == NpmInputKind::kTcpPacket ? 6 : 17;
+        if ((input.kind != NpmInputKind::kTcpPacket && input.kind != NpmInputKind::kUdpDatagram) || !input.transport ||
+            !input.session || !input.session->facts.session_id || input.session->key.Family() != family ||
+            !input.layer->ports_valid || input.layer->transport_protocol != protocol ||
+            input.transport->layer != input.layer)
             return arrow::Status::Invalid("transport/session family binding mismatch");
         const auto domain = family == packet::AddressFamily::kIPv4 ? input.session->key.Get4()->observation_domain_id
                                                                    : input.session->key.Get6()->observation_domain_id;

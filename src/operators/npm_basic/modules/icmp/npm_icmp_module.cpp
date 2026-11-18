@@ -10,16 +10,16 @@
 #include <utility>
 
 namespace flowsql::npm {
-NpmIcmpProtocolModuleV1::NpmIcmpProtocolModuleV1(NpmIcmpConfigV1 config, std::shared_ptr<INpmTaskBudget> budget)
+NpmIcmpProtocolModule::NpmIcmpProtocolModule(NpmIcmpConfig config, std::shared_ptr<INpmTaskBudget> budget)
     : budget_(std::move(budget)), echoes_(config, budget_) {}
 
-void NpmIcmpProtocolModuleV1::BindSessions(const NpmSessionTable* sessions, std::string input_namespace) {
+void NpmIcmpProtocolModule::BindSessions(const NpmSessionTable* sessions, std::string input_namespace) {
     sessions_ = sessions;
     input_namespace_ = std::move(input_namespace);
 }
 
 template <typename Address>
-std::optional<uint64_t> NpmIcmpProtocolModuleV1::Lookup(const NpmIcmpFamilyQuotedFlow<Address>& flow) const {
+std::optional<uint64_t> NpmIcmpProtocolModule::Lookup(const NpmIcmpFamilyQuotedFlow<Address>& flow) const {
     if (!sessions_ || input_namespace_.empty() || (flow.protocol != 6 && flow.protocol != 17)) return {};
     std::conditional_t<sizeof(Address) == 4, NpmSessionKey4, NpmSessionKey6> key;
     const int order = std::memcmp(flow.src_ip.bytes, flow.dst_ip.bytes, sizeof(Address));
@@ -35,26 +35,22 @@ std::optional<uint64_t> NpmIcmpProtocolModuleV1::Lookup(const NpmIcmpFamilyQuote
     if (sessions_->Find(NpmSessionKeyView(key), &session) != NpmSessionTableError::kNone) return {};
     return session.session_id;
 }
-std::optional<uint64_t> NpmIcmpProtocolModuleV1::FindActive(const NpmIcmpQuotedFlow4& flow) const {
-    return Lookup(flow);
-}
-std::optional<uint64_t> NpmIcmpProtocolModuleV1::FindActive(const NpmIcmpQuotedFlow6& flow) const {
-    return Lookup(flow);
+std::optional<uint64_t> NpmIcmpProtocolModule::FindActive(const NpmIcmpQuotedFlow4& flow) const { return Lookup(flow); }
+std::optional<uint64_t> NpmIcmpProtocolModule::FindActive(const NpmIcmpQuotedFlow6& flow) const { return Lookup(flow); }
+
+template <typename Address>
+int NpmIcmpProtocolModule::Emit(const NpmIcmpFamilyEvent<Address>& event, INpmResultEmitter& emitter) {
+    return EmitNpmIcmpEvent(event, budget_, emitter);
 }
 
 template <typename Address>
-int NpmIcmpProtocolModuleV1::Emit(const NpmIcmpFamilyEvent<Address>& event, INpmResultEmitterV1& emitter) {
-    return EmitNpmIcmpEventV1(event, budget_, emitter);
-}
-
-template <typename Address>
-int NpmIcmpProtocolModuleV1::OnFamilyInput(const NpmInputEventV1& input, INpmResultEmitterV1& emitter) {
+int NpmIcmpProtocolModule::OnFamilyInput(const NpmInputEvent& input, INpmResultEmitter& emitter) {
     NpmIcmpFamilyParsed<Address> parsed;
-    if (ParseNpmIcmpControlV1(input, &parsed) != NpmIcmpParseErrorV1::kNone) return EINVAL;
+    if (ParseNpmIcmpControl(input, &parsed) != NpmIcmpParseError::kNone) return EINVAL;
     const auto emit = [&](const auto& event) { return Emit(event, emitter); };
-    if (parsed.kind == NpmIcmpMessageKindV1::kEchoRequest || parsed.kind == NpmIcmpMessageKindV1::kEchoReply)
+    if (parsed.kind == NpmIcmpMessageKind::kEchoRequest || parsed.kind == NpmIcmpMessageKind::kEchoReply)
         return echoes_.OnEcho(parsed, input.observation_domain_id, input.packet.meta.timestamp_ns, emit);
-    if (parsed.kind != NpmIcmpMessageKindV1::kError) return 0;
+    if (parsed.kind != NpmIcmpMessageKind::kError) return 0;
     NpmIcmpFamilyEvent<Address> event;
     event.entity_instance_id = echoes_.AllocateEventId();
     if (event.entity_instance_id == 0) return EOVERFLOW;
@@ -80,23 +76,23 @@ int NpmIcmpProtocolModuleV1::OnFamilyInput(const NpmInputEventV1& input, INpmRes
     return Emit(event, emitter);
 }
 
-int NpmIcmpProtocolModuleV1::OnInput(const NpmInputEventV1& input, INpmResultEmitterV1& emitter) {
+int NpmIcmpProtocolModule::OnInput(const NpmInputEvent& input, INpmResultEmitter& emitter) {
     if (!input.layer) return EINVAL;
     if (input.layer->Get4()) return OnFamilyInput<network::IPv4Address>(input, emitter);
     if (input.layer->Get6()) return OnFamilyInput<network::IPv6Address>(input, emitter);
     return EINVAL;
 }
 
-std::optional<int64_t> NpmIcmpProtocolModuleV1::NextEventDeadlineNs() const { return echoes_.NextEventDeadlineNs(); }
+std::optional<int64_t> NpmIcmpProtocolModule::NextEventDeadlineNs() const { return echoes_.NextEventDeadlineNs(); }
 
-int NpmIcmpProtocolModuleV1::OnTime(const NpmModuleTimeV1& time, INpmResultEmitterV1& emitter) {
+int NpmIcmpProtocolModule::OnTime(const NpmModuleTime& time, INpmResultEmitter& emitter) {
     return echoes_.OnTime(time.watermark_ns, [&](const auto& event) { return Emit(event, emitter); });
 }
 
-int NpmIcmpProtocolModuleV1::Finish(int64_t observed_at_ns, INpmResultEmitterV1& emitter) {
+int NpmIcmpProtocolModule::Finish(int64_t observed_at_ns, INpmResultEmitter& emitter) {
     return echoes_.Finish(observed_at_ns, [&](const auto& event) { return Emit(event, emitter); });
 }
 
-void NpmIcmpProtocolModuleV1::Abort() noexcept { echoes_.Abort(); }
+void NpmIcmpProtocolModule::Abort() noexcept { echoes_.Abort(); }
 
 }  // namespace flowsql::npm

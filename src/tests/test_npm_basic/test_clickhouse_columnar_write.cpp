@@ -130,8 +130,8 @@ int main() {
                {{"host", "127.0.0.1"}, {"port", std::to_string(server.port)}, {"database", "columnar_test"}}) == 0);
     auto first = driver.CreateSession();
     auto second = driver.CreateSession();
-    auto* writer = dynamic_cast<flowsql::IDatabaseArrowWriteV1*>(first.get());
-    auto* next_writer = dynamic_cast<flowsql::IDatabaseArrowWriteV1*>(second.get());
+    auto* writer = dynamic_cast<flowsql::IDatabaseArrowWrite*>(first.get());
+    auto* next_writer = dynamic_cast<flowsql::IDatabaseArrowWrite*>(second.get());
     assert(writer && next_writer && "ClickHouse session must expose budgeted Arrow write capability");
     LimitedPool pool(4 * 1024 * 1024);
     assert(writer->WriteArrowBatchesWithPool("probe`table", {rows}, &pool) == 0);
@@ -158,7 +158,7 @@ int main() {
         sessions.push_back(driver.CreateSession());
         threads.emplace_back([session = sessions.back(), rows] {
             LimitedPool concurrent_pool(4 * 1024 * 1024);
-            auto* columnar = dynamic_cast<flowsql::IDatabaseArrowWriteV1*>(session.get());
+            auto* columnar = dynamic_cast<flowsql::IDatabaseArrowWrite*>(session.get());
             assert(columnar && columnar->WriteArrowBatchesWithPool("probe`table", {rows}, &concurrent_pool) == 0);
             assert(concurrent_pool.bytes_allocated() == 0);
         });

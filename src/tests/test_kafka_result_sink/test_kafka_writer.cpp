@@ -23,20 +23,20 @@ std::shared_ptr<arrow::RecordBatch> Batch(int rows = 5) {
     return arrow::RecordBatch::Make(arrow::schema({arrow::field("n", arrow::int64())}), rows,
                                     {b.Finish().ValueOrDie()});
 }
-struct Fake final : IKafkaClientSessionV1, IKafkaProducerSessionV1 {
-    KafkaBindingSnapshotV1 snapshot;
+struct Fake final : IKafkaClientSession, IKafkaProducerSession {
+    KafkaBindingSnapshot snapshot;
     std::atomic<bool> cancelled{false}, entered{false};
     bool wait = false;
     int calls = 0, drains = 0, fail_call = -1, drain_rc = 0, probe_rc = 0;
     uint64_t confirmed = 0;
-    const KafkaBindingSnapshotV1& Snapshot() const override { return snapshot; }
+    const KafkaBindingSnapshot& Snapshot() const override { return snapshot; }
     int Probe(uint32_t, std::string*) override { return probe_rc; }
     void Cancel() override { cancelled = true; }
     int QueryInterface(const Guid&, void** out) override {
-        *out = static_cast<IKafkaProducerSessionV1*>(this);
+        *out = static_cast<IKafkaProducerSession*>(this);
         return 0;
     }
-    int Produce(const std::vector<KafkaProduceMessageV1>& m, uint32_t timeout, KafkaDeliveryV1* out) override {
+    int Produce(const std::vector<KafkaProduceMessage>& m, uint32_t timeout, KafkaDelivery* out) override {
         assert(m.size() <= 2 && timeout <= 2000);
         entered = true;
         while (wait && !cancelled) std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -64,7 +64,7 @@ std::shared_ptr<Client> Session(const char* brokers, const std::string& topic = 
         R"({"encoding":"json","entity":"evt","schema_version":1,"record_kind":"event","queue_max_messages":2,"delivery_timeout_ms":2000})";
     return std::make_shared<Client>(std::move(b), Deployment{});
 }
-void Balanced(const ResultSinkReportV1& r) {
+void Balanced(const ResultSinkReport& r) {
     assert(r.input_rows == r.confirmed_rows + r.not_sent_rows + r.unknown_rows);
 }
 }  // namespace
@@ -157,13 +157,13 @@ int main() {
         assert(w.Finish() == 0);
         Balanced(w.Report());
         assert(w.Report().confirmed_rows == 5);
-        KafkaDeliveryV1 d;
+        KafkaDelivery d;
         assert(session->Produce({{"k", "v"}, {"k", "v"}, {"k", "v"}}, 1000, &d) == EINVAL && d.not_sent == 3);
     }
     {
         auto session = Session(brokers);
         rd_kafka_mock_broker_set_rtt(cluster, 1, 1000);
-        KafkaDeliveryV1 d;
+        KafkaDelivery d;
         auto start = std::chrono::steady_clock::now();
         assert(session->Produce({{"k", "v"}}, 100, &d) == ETIMEDOUT);
         assert(d.confirmed == 0 && d.not_sent + d.unknown == 1);
@@ -176,7 +176,7 @@ int main() {
     {
         auto session = Session(brokers);
         rd_kafka_mock_broker_set_down(cluster, 1);
-        KafkaDeliveryV1 d;
+        KafkaDelivery d;
         std::thread worker([&] { assert(session->Produce({{"k", "v"}}, 2000, &d) == ECANCELED); });
         std::this_thread::sleep_for(std::chrono::milliseconds(40));
         session->Cancel();
@@ -205,7 +205,7 @@ int main() {
             "channels", "add",
             Parse(
                 R"({"name":"events","connection_name":"mock","role":"sink","topic":"events","payload_kind":"structured","payload_options":{"sink":{"encoding":"json","entity":"evt","schema_version":1,"record_kind":"event"}}})"));
-        std::unique_ptr<IResultSinkWriterV1> w1, w2;
+        std::unique_ptr<IResultSinkWriter> w1, w2;
         assert(plugin.CreateWriter({1, "kafka.events", "t"}, &w1) == 0 &&
                plugin.CreateWriter({1, "kafka.events", "t"}, &w2) == 0);
         assert(w1->Report().publication_id != w2->Report().publication_id);

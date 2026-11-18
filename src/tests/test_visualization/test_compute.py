@@ -18,7 +18,7 @@ from test_entry import port, request
 
 def call(base, path, body=None):
     data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(base + '/api/visualization/v1/' + path, data=data,
+    req = urllib.request.Request(base + '/api/visualization/' + path, data=data,
                                  headers={'Content-Type': 'application/json'})
     try:
         response = urllib.request.urlopen(req, timeout=40)

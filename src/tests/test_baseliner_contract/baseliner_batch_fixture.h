@@ -50,7 +50,7 @@ inline std::string With(const std::string& parameters, bool model = true) {
 struct Querier : IQuerier {
     baseline::BaselinePlugin plugin;
     IBaselineService* service = nullptr;
-    IBaselineStateControlServiceV1* control = nullptr;
+    IBaselineStateControlService* control = nullptr;
     Querier() {
         Check(plugin.Option(nullptr) == 0 && plugin.Load(this) == 0 && plugin.Start() == 0, "baseline lifecycle");
     }
@@ -61,10 +61,10 @@ struct Querier : IQuerier {
     void* First(const Guid& id) override {
         if (std::memcmp(&id, &IID_BASELINE_SERVICE, sizeof(Guid)) == 0)
             return service ? service : static_cast<IBaselineService*>(&plugin);
-        if (std::memcmp(&id, &IID_BASELINE_STATE_CONTROL_SERVICE_V1, sizeof(Guid)) == 0)
-            return control ? control : static_cast<IBaselineStateControlServiceV1*>(&plugin);
-        if (std::memcmp(&id, &IID_BASELINE_CHECKPOINT_SERVICE_V1, sizeof(Guid)) == 0)
-            return static_cast<IBaselineCheckpointServiceV1*>(&plugin);
+        if (std::memcmp(&id, &IID_BASELINE_STATE_CONTROL_SERVICE, sizeof(Guid)) == 0)
+            return control ? control : static_cast<IBaselineStateControlService*>(&plugin);
+        if (std::memcmp(&id, &IID_BASELINE_CHECKPOINT_SERVICE, sizeof(Guid)) == 0)
+            return static_cast<IBaselineCheckpointService*>(&plugin);
         return nullptr;
     }
     int Traverse(const Guid& id, fntraverse callback) override {
@@ -75,19 +75,19 @@ struct Querier : IQuerier {
 struct Library {
     std::shared_ptr<Querier> querier = std::make_shared<Querier>();
     void* handle = nullptr;
-    IBlockTransformOperatorV2* provider = nullptr;
-    CppOperatorPluginDestroyCapabilityV2Fn destroy = nullptr;
+    IBlockTransformOperator* provider = nullptr;
+    CppOperatorPluginDestroyCapabilityFn destroy = nullptr;
     explicit Library(const char* path = "./libflowsql_baseliner.so") {
         handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
         Check(handle != nullptr, std::string("load baseliner: ") + path);
         auto version =
             reinterpret_cast<CppOperatorPluginAbiVersionFn>(dlsym(handle, kCppOperatorPluginAbiVersionSymbol));
-        auto create = reinterpret_cast<CppOperatorPluginCreateCapabilityV2Fn>(
-            dlsym(handle, kCppOperatorPluginCreateCapabilityV2Symbol));
-        destroy = reinterpret_cast<CppOperatorPluginDestroyCapabilityV2Fn>(
-            dlsym(handle, kCppOperatorPluginDestroyCapabilityV2Symbol));
+        auto create = reinterpret_cast<CppOperatorPluginCreateCapabilityFn>(
+            dlsym(handle, kCppOperatorPluginCreateCapabilitySymbol));
+        destroy = reinterpret_cast<CppOperatorPluginDestroyCapabilityFn>(
+            dlsym(handle, kCppOperatorPluginDestroyCapabilitySymbol));
         Check(version && version() == 2 && create && destroy, "baseliner ABI");
-        provider = static_cast<IBlockTransformOperatorV2*>(create(0, querier.get()));
+        provider = static_cast<IBlockTransformOperator*>(create(0, querier.get()));
         Check(provider != nullptr, "baseliner provider");
     }
     ~Library() {
@@ -95,12 +95,12 @@ struct Library {
         if (handle) dlclose(handle);
     }
 };
-using TaskOwner = std::unique_ptr<IBlockTransformTaskV2, std::function<void(IBlockTransformTaskV2*)>>;
+using TaskOwner = std::unique_ptr<IBlockTransformTask, std::function<void(IBlockTransformTask*)>>;
 inline TaskOwner Task(const std::shared_ptr<Library>& library, const ConfigSnapshot& config, bool model = true) {
     auto with = With(config.original_json, model);
-    BlockTransformTaskConfigV2 c{kBlockTransformTaskConfigV2Size, kBlockTransformContractVersionV2, "batch-test",
-                                 with.c_str(), ""};
-    IBlockTransformTaskV2* task = nullptr;
+    BlockTransformTaskConfig c{kBlockTransformTaskConfigSize, kBlockTransformContractVersion, "batch-test",
+                               with.c_str(), ""};
+    IBlockTransformTask* task = nullptr;
     Check(library->provider->CreateTask(c, &task) == 0 && task, "create task");
     return TaskOwner(task, [library](auto* value) { library->provider->ReleaseTask(value); });
 }

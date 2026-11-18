@@ -102,7 +102,7 @@ inline int ParseFlowLabelingStartupOptions(const char* arg, FlowLabelingStartupO
     return 0;
 }
 
-class FlowLabelingPlugin final : public IPlugin, public IFlowLabelingProviderV1 {
+class FlowLabelingPlugin final : public IPlugin, public IFlowLabelingProvider {
  public:
     int Option(const char* arg) override;
     int Load(IQuerier* querier) override;
@@ -110,9 +110,9 @@ class FlowLabelingPlugin final : public IPlugin, public IFlowLabelingProviderV1 
     int Start() override;
     int Stop() override;
 
-    FlowLabelingErrorV1 RuntimeStatus(FlowLabelingDiagnosticV1* diagnostic) const override;
-    FlowLabelingErrorV1 CreateMatcher(const FlowLabelingCompileRequestV1& request, IFlowLabelMatcherV1** output,
-                                      FlowLabelingDiagnosticV1* diagnostic) override;
+    FlowLabelingError RuntimeStatus(FlowLabelingDiagnostic* diagnostic) const override;
+    FlowLabelingError CreateMatcher(const FlowLabelingCompileRequest& request, IFlowLabelMatcher** output,
+                                    FlowLabelingDiagnostic* diagnostic) override;
 
  private:
     class Matcher;

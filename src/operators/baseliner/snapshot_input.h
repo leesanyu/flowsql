@@ -15,13 +15,13 @@ class SnapshotInput : public IBlockStreamChannel {
     ~SnapshotInput() override { Close(); }
     int Initialize(ConfigSnapshot config, std::shared_ptr<IDatabaseChannel> source, std::string_view exact_source,
                    std::function<int(const SnapshotPage&)> page_guard = {});
-    int InitializeDataFrame(ConfigSnapshot config, const BlockDataFrameInputBindingV1& binding);
+    int InitializeDataFrame(ConfigSnapshot config, const BlockDataFrameInputBinding& binding);
     const std::string& SourceFingerprint() const { return dataframe_reader_->SourceFingerprint(); }
-    int ReadInputProgress(BlockInputProgressV1* output) const;
+    int ReadInputProgress(BlockInputProgress* output) const;
     const char* Category() override { return "baseliner"; }
     const char* Name() override { return "snapshot"; }
     const char* Type() override { return ChannelType::kBlockStream; }
-    const char* Schema() override { return "baseline_observation_v1"; }
+    const char* Schema() override { return "baseline_observation"; }
     int Open() override { return opened_ ? 0 : -1; }
     int Close() override;
     bool IsOpened() const override { return opened_; }
@@ -37,7 +37,7 @@ class SnapshotInput : public IBlockStreamChannel {
  private:
     std::shared_ptr<SnapshotReader> reader_;
     std::shared_ptr<DataFrameReader> dataframe_reader_;
-    BlockInputProgressV1 dataframe_progress_;
+    BlockInputProgress dataframe_progress_;
     bool boundary_emitted_ = false;
     bool progress_readable_ = false;
     std::unique_ptr<BucketAggregator> aggregator_;
@@ -52,9 +52,9 @@ class SnapshotInput : public IBlockStreamChannel {
     std::function<int(const SnapshotPage&)> page_guard_;
 };
 // Only DataFrame snapshots advertise progress; legacy database snapshot runners need no progress consumer.
-class DataFrameSnapshotInput final : public SnapshotInput, public IBlockStreamInputProgressV1 {
+class DataFrameSnapshotInput final : public SnapshotInput, public IBlockStreamInputProgress {
  public:
-    int ReadInputProgress(BlockInputProgressV1* output) const override {
+    int ReadInputProgress(BlockInputProgress* output) const override {
         return SnapshotInput::ReadInputProgress(output);
     }
 };

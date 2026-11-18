@@ -64,7 +64,7 @@ std::shared_ptr<arrow::MemoryPool> MakeNpmResultMemoryPool(std::shared_ptr<INpmT
     return std::make_shared<ResultMemoryPool>(std::move(budget));
 }
 
-NpmResultContextV1 MakeNpmResultContext(std::string task_id) {
+NpmResultContext MakeNpmResultContext(std::string task_id) {
     static std::atomic<uint64_t> sequence{0};
     std::random_device random;
     std::ostringstream id;
@@ -73,9 +73,9 @@ NpmResultContextV1 MakeNpmResultContext(std::string task_id) {
     id << '-' << ++sequence;
     return {std::move(task_id), id.str()};
 }
-NpmResultRouter::NpmResultRouter(std::vector<NpmEntityDescriptorV1> entities, std::string observing,
-                                 NpmResultContextV1 context, std::shared_ptr<INpmTaskBudget> budget,
-                                 std::unique_ptr<INpmResultConsumerV1> consumer, Invoke invoke)
+NpmResultRouter::NpmResultRouter(std::vector<NpmEntityDescriptor> entities, std::string observing,
+                                 NpmResultContext context, std::shared_ptr<INpmTaskBudget> budget,
+                                 std::unique_ptr<INpmResultConsumer> consumer, Invoke invoke)
     : entities_(std::move(entities)),
       observing_(std::move(observing)),
       context_(std::move(context)),
@@ -104,12 +104,12 @@ int NpmResultRouter::Status() const noexcept {
 }
 int NpmResultRouter::Emit(std::string_view module, std::string_view entity_id, const arrow::RecordBatch& rows) {
     if (const int rc = Status()) return rc;
-    const NpmEntityDescriptorV1* entity = nullptr;
+    const NpmEntityDescriptor* entity = nullptr;
     for (const auto& candidate : entities_)
         if (candidate.entity_id == entity_id) entity = &candidate;
     if (!entity) return Fail(EINVAL, std::string(module) + "/" + std::string(entity_id) + ": unknown entity");
-    const auto status = ValidateNpmEntityRowsV1(module, *entity, rows);
-    if (status.error != NpmProtocolContractErrorV1::kNone)
+    const auto status = ValidateNpmEntityRows(module, *entity, rows);
+    if (status.error != NpmProtocolContractError::kNone)
         return Fail(EINVAL, entity->entity_id + "/" + status.field + ": invalid entity/Schema/rows");
     if (rows.num_rows() == 0) return 0;
     if (entity_id == observing_) {
@@ -170,10 +170,7 @@ int NpmResultRouter::PublishProgress(int64_t period_ns, int64_t closed_before_ns
     for (const auto& entity : entities_) {
         if (entity.entity_id != "basic_ipv4" && entity.entity_id != "basic_ipv6") continue;
         NpmFamilyPublicationRequest request{
-            {entity.entity_id, "npm_" + entity.entity_id + "_history_v" + std::to_string(entity.schema_version),
-             context_.run_id},
-            period_ns,
-            closed_before_ns};
+            {entity.entity_id, "npm_" + entity.entity_id + "_history", context_.run_id}, period_ns, closed_before_ns};
         auto& cursor = publications_[entity.entity_id];
         if (cursor.last_confirmed && cursor.last_confirmed->publication.period_ns == period_ns &&
             cursor.last_confirmed->publication.closed_before_ns == closed_before_ns)
@@ -209,9 +206,9 @@ int NpmResultRouter::Finish() {
 }
 int NpmResultRouter::FailRun(int32_t code, std::string stage, std::string message) noexcept {
     if (finished_ || failure_finalized_.exchange(true)) return 0;
-    auto* managed = dynamic_cast<INpmManagedResultConsumerV1*>(consumer_.get());
+    auto* managed = dynamic_cast<INpmManagedResultConsumer*>(consumer_.get());
     if (!managed) return 0;
-    NpmResultFailureV1 failure;
+    NpmResultFailure failure;
     failure.code = code;
     failure.stage = stage.c_str();
     failure.message = message.c_str();
@@ -222,7 +219,7 @@ int NpmResultRouter::FailRun(int32_t code, std::string stage, std::string messag
     }
 }
 std::string NpmResultRouter::ResultJson() const {
-    const auto* managed = dynamic_cast<const INpmManagedResultConsumerV1*>(consumer_.get());
+    const auto* managed = dynamic_cast<const INpmManagedResultConsumer*>(consumer_.get());
     return managed ? managed->ResultJson() : std::string();
 }
 void NpmResultRouter::Cancel() noexcept {

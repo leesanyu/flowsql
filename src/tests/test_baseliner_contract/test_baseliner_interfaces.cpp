@@ -13,26 +13,24 @@
 #include <type_traits>
 
 using namespace flowsql;
-static_assert(std::is_abstract_v<IBaselineCheckpointV1>);
-static_assert(std::is_abstract_v<IBaselineCheckpointServiceV1>);
-static_assert(std::is_abstract_v<IDatabaseAtomicSessionV1>);
-static_assert(std::is_abstract_v<IDatabaseAtomicTargetV1>);
-static_assert(std::is_abstract_v<IBlockTransformDatabaseInputTaskV1>);
-static_assert(std::is_abstract_v<IBlockStreamInputProgressV1>);
-static_assert(std::is_abstract_v<IBlockTransformInputProgressTaskV1>);
-static_assert(std::has_virtual_destructor_v<IBaselineCheckpointV1>);
-static_assert(std::has_virtual_destructor_v<IDatabaseAtomicSessionV1>);
-static_assert(!std::is_base_of_v<IBaselineTask, IBaselineCheckpointV1>);
-static_assert(!std::is_base_of_v<IDatabaseChannel, IDatabaseAtomicTargetV1>);
-static_assert(!std::is_base_of_v<IBlockTransformTaskV2, IBlockTransformDatabaseInputTaskV1>);
-using CheckpointBind = std::pair<BaselineStatus, std::shared_ptr<IBaselineCheckpointV1>> (
-    IBaselineCheckpointServiceV1::*)(std::shared_ptr<IBaselineTask>, std::shared_ptr<IBaselineTaskStateControlV1>,
-                                     const BaselineCheckpointBindingV1&);
-static_assert(std::is_same_v<decltype(&IBaselineCheckpointServiceV1::Bind), CheckpointBind>);
-using CreateInput = int (IBlockTransformDatabaseInputTaskV1::*)(const BlockDatabaseInputBindingV1&,
-                                                                BlockDatabaseInputV1*);
-static_assert(std::is_same_v<decltype(&IBlockTransformDatabaseInputTaskV1::CreateDatabaseInput), CreateInput>);
-static_assert(std::is_same_v<decltype(&IDatabaseAtomicSessionV1::Cancel), void (IDatabaseAtomicSessionV1::*)()>);
+static_assert(std::is_abstract_v<IBaselineCheckpoint>);
+static_assert(std::is_abstract_v<IBaselineCheckpointService>);
+static_assert(std::is_abstract_v<IDatabaseAtomicSession>);
+static_assert(std::is_abstract_v<IDatabaseAtomicTarget>);
+static_assert(std::is_abstract_v<IBlockTransformDatabaseInputTask>);
+static_assert(std::is_abstract_v<IBlockStreamInputProgress>);
+static_assert(std::is_abstract_v<IBlockTransformInputProgressTask>);
+static_assert(std::has_virtual_destructor_v<IBaselineCheckpoint>);
+static_assert(std::has_virtual_destructor_v<IDatabaseAtomicSession>);
+static_assert(!std::is_base_of_v<IBaselineTask, IBaselineCheckpoint>);
+static_assert(!std::is_base_of_v<IDatabaseChannel, IDatabaseAtomicTarget>);
+static_assert(!std::is_base_of_v<IBlockTransformTask, IBlockTransformDatabaseInputTask>);
+using CheckpointBind = std::pair<BaselineStatus, std::shared_ptr<IBaselineCheckpoint>> (IBaselineCheckpointService::*)(
+    std::shared_ptr<IBaselineTask>, std::shared_ptr<IBaselineTaskStateControl>, const BaselineCheckpointBinding&);
+static_assert(std::is_same_v<decltype(&IBaselineCheckpointService::Bind), CheckpointBind>);
+using CreateInput = int (IBlockTransformDatabaseInputTask::*)(const BlockDatabaseInputBinding&, BlockDatabaseInput*);
+static_assert(std::is_same_v<decltype(&IBlockTransformDatabaseInputTask::CreateDatabaseInput), CreateInput>);
+static_assert(std::is_same_v<decltype(&IDatabaseAtomicSession::Cancel), void (IDatabaseAtomicSession::*)()>);
 
 namespace {
 // Lifecycle probe only: no database/transaction behavior is claimed by this fixture.
@@ -62,102 +60,101 @@ class LeaseProbe final : public IDatabaseChannel {
     bool* destroyed_;
 };
 void TestIndependentIds() {
-    const Guid ids[] = {IID_BLOCK_TRANSFORM_DATABASE_INPUT_TASK_V1,
-                        IID_BLOCK_STREAM_INPUT_PROGRESS_V1,
-                        IID_BLOCK_TRANSFORM_INPUT_PROGRESS_TASK_V1,
-                        IID_DATABASE_ATOMIC_TARGET_V1,
-                        IID_BASELINE_CHECKPOINT_SERVICE_V1,
+    const Guid ids[] = {IID_BLOCK_TRANSFORM_DATABASE_INPUT_TASK,
+                        IID_BLOCK_STREAM_INPUT_PROGRESS,
+                        IID_BLOCK_TRANSFORM_INPUT_PROGRESS_TASK,
+                        IID_DATABASE_ATOMIC_TARGET,
+                        IID_BASELINE_CHECKPOINT_SERVICE,
                         IID_DATABASE_CHANNEL,
-                        IID_BLOCK_TRANSFORM_OPERATOR_V1,
-                        IID_BLOCK_TRANSFORM_OPERATOR_V2,
+                        IID_BLOCK_TRANSFORM_OPERATOR,
                         IID_BASELINE_SERVICE,
-                        IID_BASELINE_STATE_CONTROL_SERVICE_V1};
+                        IID_BASELINE_STATE_CONTROL_SERVICE};
     for (size_t i = 0; i < std::size(ids); ++i)
         for (size_t j = i + 1; j < std::size(ids); ++j) assert(std::memcmp(&ids[i], &ids[j], sizeof(Guid)) != 0);
 }
 void TestInputLeaseAndVersions() {
     bool destroyed = false;
     auto owner = std::make_shared<LeaseProbe>(&destroyed);
-    BlockDatabaseInputBindingV1 binding;
-    assert(!ValidBlockDatabaseInputBindingV1(binding));
+    BlockDatabaseInputBinding binding;
+    assert(!ValidBlockDatabaseInputBinding(binding));
     binding.source = owner;
     binding.exact_source = "sqlite.probe";
     owner.reset();
-    assert(!destroyed && ValidBlockDatabaseInputBindingV1(binding));
+    assert(!destroyed && ValidBlockDatabaseInputBinding(binding));
     --binding.struct_size;
-    assert(!ValidBlockDatabaseInputBindingV1(binding));
+    assert(!ValidBlockDatabaseInputBinding(binding));
     binding.struct_size = sizeof(binding);
     binding.contract_version = 2;
-    assert(!ValidBlockDatabaseInputBindingV1(binding));
+    assert(!ValidBlockDatabaseInputBinding(binding));
     binding.contract_version = 1;
     binding.operation_timeout_ms = 0;
-    assert(!ValidBlockDatabaseInputBindingV1(binding));
+    assert(!ValidBlockDatabaseInputBinding(binding));
     binding.operation_timeout_ms = 1;
     binding.max_cursor_bytes = 1024 * 1024 + 1;
-    assert(!ValidBlockDatabaseInputBindingV1(binding));
+    assert(!ValidBlockDatabaseInputBinding(binding));
     binding.source.reset();
     assert(destroyed);
-    BlockDatabaseInputV1 result;
+    BlockDatabaseInput result;
     assert(result.input == nullptr && !result.schema && result.struct_size == sizeof(result));
-    BlockInputProgressV1 progress{1, {{"d", "epoch", "prefix", 4}}};
+    BlockInputProgress progress{1, {{"d", "epoch", "prefix", 4}}};
     auto owned = progress;
     progress.datasets[0].committed_position = "new-prefix";
     assert(owned.datasets[0].committed_position == "prefix");
 }
 void TestAtomicOutcomes() {
-    DatabaseAtomicSessionOptionsV1 options;
-    assert(ValidDatabaseAtomicSessionOptionsV1(options));
+    DatabaseAtomicSessionOptions options;
+    assert(ValidDatabaseAtomicSessionOptions(options));
     ++options.struct_size;
-    assert(!ValidDatabaseAtomicSessionOptionsV1(options));
+    assert(!ValidDatabaseAtomicSessionOptions(options));
     options.struct_size = sizeof(options);
     options.contract_version = 2;
-    assert(!ValidDatabaseAtomicSessionOptionsV1(options));
+    assert(!ValidDatabaseAtomicSessionOptions(options));
     options.contract_version = 1;
     options.operation_timeout_ms = 0;
-    assert(!ValidDatabaseAtomicSessionOptionsV1(options));
+    assert(!ValidDatabaseAtomicSessionOptions(options));
     options.operation_timeout_ms = 3600001;
-    assert(!ValidDatabaseAtomicSessionOptionsV1(options));
-    DatabaseCommitResultV1 result;
-    assert(!ValidDatabaseCommitResultV1(result));
-    result.status.code = DatabaseAtomicCodeV1::kCommitUnknown;
-    assert(ValidDatabaseCommitResultV1(result));
-    result.outcome = DatabaseCommitOutcomeV1::kCommitted;
-    assert(!ValidDatabaseCommitResultV1(result));
-    result.status.code = DatabaseAtomicCodeV1::kOk;
-    assert(ValidDatabaseCommitResultV1(result));
-    result.outcome = DatabaseCommitOutcomeV1::kRolledBack;
-    assert(!ValidDatabaseCommitResultV1(result));
-    result.status.code = DatabaseAtomicCodeV1::kCancelled;
-    assert(ValidDatabaseCommitResultV1(result));
-    result.status.code = DatabaseAtomicCodeV1::kCommitUnknown;
-    assert(!ValidDatabaseCommitResultV1(result));
+    assert(!ValidDatabaseAtomicSessionOptions(options));
+    DatabaseCommitResult result;
+    assert(!ValidDatabaseCommitResult(result));
+    result.status.code = DatabaseAtomicCode::kCommitUnknown;
+    assert(ValidDatabaseCommitResult(result));
+    result.outcome = DatabaseCommitOutcome::kCommitted;
+    assert(!ValidDatabaseCommitResult(result));
+    result.status.code = DatabaseAtomicCode::kOk;
+    assert(ValidDatabaseCommitResult(result));
+    result.outcome = DatabaseCommitOutcome::kRolledBack;
+    assert(!ValidDatabaseCommitResult(result));
+    result.status.code = DatabaseAtomicCode::kCancelled;
+    assert(ValidDatabaseCommitResult(result));
+    result.status.code = DatabaseAtomicCode::kCommitUnknown;
+    assert(!ValidDatabaseCommitResult(result));
 }
 void TestCheckpointFraming() {
-    BaselineCheckpointBindingV1 binding;
-    assert(ValidBaselineCheckpointBindingV1(binding));
+    BaselineCheckpointBinding binding;
+    assert(ValidBaselineCheckpointBinding(binding));
     ++binding.contract_version;
-    assert(!ValidBaselineCheckpointBindingV1(binding));
+    assert(!ValidBaselineCheckpointBinding(binding));
     binding.contract_version = 1;
     binding.max_payload_bytes = 0;
-    assert(!ValidBaselineCheckpointBindingV1(binding));
-    binding.max_payload_bytes = kBaselineCheckpointMaxBytesV1 + 1;
-    assert(!ValidBaselineCheckpointBindingV1(binding));
-    BaselineCheckpointRestoreV1 restore;
-    assert(!ValidBaselineCheckpointRestoreV1(restore, 2));
+    assert(!ValidBaselineCheckpointBinding(binding));
+    binding.max_payload_bytes = kBaselineCheckpointMaxBytes + 1;
+    assert(!ValidBaselineCheckpointBinding(binding));
+    BaselineCheckpointRestore restore;
+    assert(!ValidBaselineCheckpointRestore(restore, 2));
     restore.content = "{}";
-    assert(ValidBaselineCheckpointRestoreV1(restore, 2));
-    assert(!ValidBaselineCheckpointRestoreV1(restore, 1));
+    assert(ValidBaselineCheckpointRestore(restore, 2));
+    assert(!ValidBaselineCheckpointRestore(restore, 1));
     --restore.struct_size;
-    assert(!ValidBaselineCheckpointRestoreV1(restore, 2));
+    assert(!ValidBaselineCheckpointRestore(restore, 2));
     restore.struct_size = sizeof(restore);
     ++restore.payload_version;
-    assert(!ValidBaselineCheckpointRestoreV1(restore, 2));
+    assert(!ValidBaselineCheckpointRestore(restore, 2));
     restore.payload_version = 1;
     ++restore.contract_version;
-    assert(!ValidBaselineCheckpointRestoreV1(restore, 2));
+    assert(!ValidBaselineCheckpointRestore(restore, 2));
     restore.contract_version = 1;
     restore.format = static_cast<BaselineSerializationFormat>(99);
-    assert(!ValidBaselineCheckpointRestoreV1(restore, 2));
+    assert(!ValidBaselineCheckpointRestore(restore, 2));
 }
 }  // namespace
 int main() {

@@ -9,7 +9,7 @@
 using namespace flowsql;
 using namespace flowsql::dataset;
 namespace {
-class OutputOperator final : public IOperator, public IOperatorConfigAdapterV1, public IOperatorOutputObservationV1 {
+class OutputOperator final : public IOperator, public IOperatorConfigAdapter, public IOperatorOutputObservation {
  public:
     std::string Category() override { return "contractdemo"; }
     std::string Name() override { return "output"; }
@@ -20,7 +20,7 @@ class OutputOperator final : public IOperator, public IOperatorConfigAdapterV1, 
         if (std::string(k) == "column") column_ = v;
         return 0;
     }
-    int ResolveInvocation(const char* text, std::string* out, DataSemanticsErrorV1*) override {
+    int ResolveInvocation(const char* text, std::string* out, DataSemanticsError*) override {
         Json request;
         request.Parse(text);
         auto& a = request.GetAllocator();
@@ -101,7 +101,7 @@ class OutputOperator final : public IOperator, public IOperatorConfigAdapterV1, 
 std::string Declaration() {
     Json d;
     d.Parse(
-        R"({"schema_id":"flowsql.operator-data-contract.v1","title":"Numerical fixture","operator":{"category":"contractdemo","name":"output","version":"1"},"configuration":{"invocation_schema":{"type":"object","properties":{"operation":{"type":"string"},"column":{"type":"string"}},"additionalProperties":true},"affects":{}},"inputs":[{"port_id":"input","min_count":1,"max_count":1,"shape":"dataframe","roles":[{"role_id":"measure","required":true,"types":[{"system":"arrow","name":"double","parameters":{}}],"nullable":null,"semantic_requirements":{},"selector":{"kind":"parameter","key":"column"}}]}],"outputs":[{"port_id":"main","shape":"dataframe","mode":"configured","rules":[],"variants":[]},{"port_id":"secondary","shape":"dataframe","mode":"unknown","rules":[],"structure_ref":"#/resources/count","availability":{"scope":"config","pointer":"/secondary","equals":true}}],"resources":{"count":{"fields":[{"name":"count","type":{"system":"arrow","name":"int64","parameters":{}},"nullable":false}]}},"limitations":["Structure observation never proves row quality."]})");
+        R"({"schema_id":"flowsql.operator-data-contract","title":"Numerical fixture","operator":{"category":"contractdemo","name":"output","version":"1"},"configuration":{"invocation_schema":{"type":"object","properties":{"operation":{"type":"string"},"column":{"type":"string"}},"additionalProperties":true},"affects":{}},"inputs":[{"port_id":"input","min_count":1,"max_count":1,"shape":"dataframe","roles":[{"role_id":"measure","required":true,"types":[{"system":"arrow","name":"double","parameters":{}}],"nullable":null,"semantic_requirements":{},"selector":{"kind":"parameter","key":"column"}}]}],"outputs":[{"port_id":"main","shape":"dataframe","mode":"configured","rules":[],"variants":[]},{"port_id":"secondary","shape":"dataframe","mode":"unknown","rules":[],"structure_ref":"#/resources/count","availability":{"scope":"config","pointer":"/secondary","equals":true}}],"resources":{"count":{"fields":[{"name":"count","type":{"system":"arrow","name":"int64","parameters":{}},"nullable":false}]}},"limitations":["Structure observation never proves row quality."]})");
     auto& a = d.GetAllocator();
     for (const char* op : {"copy", "rename", "scale", "sum", "count", "mean", "min", "max", "unknown", "dual", "drift",
                            "fail_metadata"}) {
@@ -148,11 +148,27 @@ std::string Declaration() {
     return Encode(d);
 }
 }  // namespace
-extern "C" int flowsql_abi_version() { return 1; }
+extern "C" int flowsql_abi_version() { return flowsql::kCppOperatorPluginAbiVersion; }
 extern "C" int flowsql_operator_count() { return 1; }
-extern "C" IOperator* flowsql_create_operator(int index) { return index ? nullptr : new OutputOperator; }
-extern "C" void flowsql_destroy_operator(IOperator* op) { delete op; }
-extern "C" const char* flowsql_operator_data_contract_v1(int index) {
+extern "C" const char* flowsql_operator_data_contract(int index) {
     static const auto text = Declaration();
     return index ? nullptr : text.c_str();
+}
+
+extern "C" int flowsql_describe_operator(int index, flowsql::CppOperatorDescriptor* descriptor) {
+    if (index != 0 || !descriptor || descriptor->struct_size < flowsql::kCppOperatorDescriptorSize) return -1;
+    *descriptor = {flowsql::kCppOperatorDescriptorSize, "contractdemo", "output", "Current operator fixture",
+                   flowsql::IID_OPERATOR};
+    return 0;
+}
+extern "C" void* flowsql_create_operator_capability(int index, flowsql::IQuerier*) {
+    if (index != 0) return nullptr;
+    try {
+        return static_cast<flowsql::IOperator*>(new OutputOperator);
+    } catch (...) {
+        return nullptr;
+    }
+}
+extern "C" void flowsql_destroy_operator_capability(int, void* capability) {
+    delete static_cast<flowsql::IOperator*>(capability);
 }

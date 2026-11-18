@@ -66,7 +66,7 @@ class ContextProtocol final : public flowsql::IProtocol {
     flowsql::protocol::IDictionary* dictionary_ = nullptr;
 };
 
-class ContextPool final : public flowsql::IProtocolPipelinePoolV1 {
+class ContextPool final : public flowsql::IProtocolPipelinePool {
  public:
     explicit ContextPool(flowsql::IProtocol* protocol,
                          flowsql::ProtocolPipelinePoolError acquire_result = flowsql::ProtocolPipelinePoolError::kNone)
@@ -104,10 +104,10 @@ class ContextPool final : public flowsql::IProtocolPipelinePoolV1 {
 
 class Querier final : public IQuerier {
  public:
-    IProtocolPipelinePoolV1* pool;
-    explicit Querier(IProtocolPipelinePoolV1* p) : pool(p) {}
+    IProtocolPipelinePool* pool;
+    explicit Querier(IProtocolPipelinePool* p) : pool(p) {}
     void* First(const Guid& id) override {
-        return !(id < IID_PROTOCOL_PIPELINE_POOL_V1) && !(IID_PROTOCOL_PIPELINE_POOL_V1 < id) ? pool : nullptr;
+        return !(id < IID_PROTOCOL_PIPELINE_POOL) && !(IID_PROTOCOL_PIPELINE_POOL < id) ? pool : nullptr;
     }
     int Traverse(const Guid& id, fntraverse fn) override {
         auto p = First(id);

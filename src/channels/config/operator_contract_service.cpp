@@ -7,7 +7,7 @@
 #include <common/channel_dataset.hpp>
 #include <regex>
 #include <set>
-#include "data_semantics_api_schema.h"
+#include "compiled_semantics_schema.h"
 #include "operator_contract_derivation.h"
 #include "operator_data_contract_model.h"
 
@@ -26,12 +26,8 @@ const Value* Find(const Value& fields, const std::string& name) {
             if (Get(f, "name") == name) return &f;
     return nullptr;
 }
-int Validate(const Value& request, DataSemanticsErrorV1* e) {
-    Json schema;
-    schema.Parse(kSemanticsApiSchema);
-    Set(schema, "$ref", "#/%24defs/operatorResolvedInvocation", schema.GetAllocator());
-    rapidjson::SchemaDocument compiled(schema);
-    rapidjson::SchemaValidator validator(compiled);
+int Validate(const Value& request, DataSemanticsError* e) {
+    rapidjson::SchemaValidator validator(CompiledSemanticsApiSchema("operatorResolvedInvocation"));
     if (request.Accept(validator)) return 0;
     rapidjson::StringBuffer path;
     validator.GetInvalidDocumentPointer().Stringify(path);
@@ -64,13 +60,13 @@ struct Check {
         if (!violation) result["semantic_gaps"].PushBack(Copy(reason, a), a);
         result["reasons"].PushBack(reason, a);
     }
-    int Binding(const Value& input, Json* binding, Json* dictionary, DataSemanticsErrorV1* e) {
+    int Binding(const Value& input, Json* binding, Json* dictionary, DataSemanticsError* e) {
         if (!input.HasMember("binding_ref")) return 0;
         const auto ref = Get(input, "binding_ref");
         SemanticsIdentity id;
         if (!ParseSemanticsReference(ref, &id) || id.kind != "binding")
             return Fail(e, "INVALID_REFERENCE", "exact input binding required");
-        DataSemanticsSnapshotV1 snapshot;
+        DataSemanticsSnapshot snapshot;
         if (registry.Resolve(ref.c_str(), &snapshot, e)) return -1;
         binding->Parse(snapshot.document_json->c_str());
         const auto& source = input["snapshot"];
@@ -243,7 +239,7 @@ struct Check {
             }
         }
     }
-    int Inputs(const Value& contract, DataSemanticsErrorV1* e) {
+    int Inputs(const Value& contract, DataSemanticsError* e) {
         std::set<std::string> ports;
         for (const auto& port : contract["inputs"].GetArray()) {
             const auto id = Get(port, "port_id"), path = "/inputs/" + id;
@@ -300,24 +296,24 @@ struct Check {
     }
 };
 }  // namespace
-int OperatorContractService::Resolve(const char* ref, OperatorContractSnapshotV1* out, DataSemanticsErrorV1* e) {
+int OperatorContractService::Resolve(const char* ref, OperatorContractSnapshot* out, DataSemanticsError* e) {
     if (out) *out = {};
     if (e) *e = {};
     SemanticsIdentity id;
     if (!out || !ParseSemanticsReference(ref ? ref : "", &id) || id.kind != "operator_contract")
         return dataset::Fail(e, "INVALID_REFERENCE", "exact operator contract required");
-    DataSemanticsSnapshotV1 snapshot;
+    DataSemanticsSnapshot snapshot;
     if (registry_.Resolve(ref, &snapshot, e)) return -1;
     *out = {snapshot.exact_reference, snapshot.sha256, snapshot.document_json};
     return 0;
 }
-int OperatorContractService::CheckAndDerive(const char* text, std::string* out, DataSemanticsErrorV1* e) {
+int OperatorContractService::CheckAndDerive(const char* text, std::string* out, DataSemanticsError* e) {
     if (out) out->clear();
     if (e) *e = {};
     if (!out) return dataset::Fail(e, "CONTRACT_INVALID", "result required");
     Json invocation;
     if (ParseSemanticsJson(text ? text : "", &invocation, e) || Validate(invocation, e)) return -1;
-    OperatorContractSnapshotV1 snapshot;
+    OperatorContractSnapshot snapshot;
     if (Resolve(Get(invocation, "contract_ref").c_str(), &snapshot, e)) return -1;
     Json contract;
     contract.Parse(snapshot.document_json->c_str());
@@ -341,7 +337,7 @@ int OperatorContractService::CheckAndDerive(const char* text, std::string* out, 
         check.refs.insert(ref);
     }
 
-    DataSemanticsErrorV1 invalid;
+    DataSemanticsError invalid;
     if (ValidateOperatorParameters(contract, invocation["effective_parameters"], &invalid))
         check.Reason(true, "PARAMETERS_INVALID", "/effective_parameters" + invalid.field_path);
     const auto& config_schema = At(contract["configuration"], "normalized_config_schema");

@@ -65,76 +65,76 @@ bool ValidSni(std::string_view name) {
     return label_length > 0 && label_length <= 63 && previous != '-';
 }
 
-NpmTlsHelloErrorV1 ParseSni(std::string_view bytes, NpmTlsHelloFactsV1* facts) {
+NpmTlsHelloError ParseSni(std::string_view bytes, NpmTlsHelloFacts* facts) {
     Reader reader(bytes);
     uint16_t length = 0;
-    if (!reader.U16(&length) || length != reader.Remaining() || length == 0) return NpmTlsHelloErrorV1::kMalformed;
+    if (!reader.U16(&length) || length != reader.Remaining() || length == 0) return NpmTlsHelloError::kMalformed;
     uint8_t type = 0;
     uint16_t name_length = 0;
     std::string_view name;
     if (!reader.U8(&type) || type != 0 || !reader.U16(&name_length) || !reader.Take(name_length, &name) ||
         !reader.Empty()) {
-        return NpmTlsHelloErrorV1::kMalformed;
+        return NpmTlsHelloError::kMalformed;
     }
-    if (name_length > kMaxSniBytes) return NpmTlsHelloErrorV1::kLimit;
-    if (!ValidSni(name)) return NpmTlsHelloErrorV1::kMalformed;
+    if (name_length > kMaxSniBytes) return NpmTlsHelloError::kLimit;
+    if (!ValidSni(name)) return NpmTlsHelloError::kMalformed;
     facts->sni = std::string(name);
-    return NpmTlsHelloErrorV1::kNone;
+    return NpmTlsHelloError::kNone;
 }
 
-NpmTlsHelloErrorV1 ParseAlpn(std::string_view bytes, bool server, NpmTlsHelloFactsV1* facts) {
+NpmTlsHelloError ParseAlpn(std::string_view bytes, bool server, NpmTlsHelloFacts* facts) {
     Reader reader(bytes);
     uint16_t length = 0;
-    if (!reader.U16(&length) || length != reader.Remaining() || length == 0) return NpmTlsHelloErrorV1::kMalformed;
+    if (!reader.U16(&length) || length != reader.Remaining() || length == 0) return NpmTlsHelloError::kMalformed;
     while (!reader.Empty()) {
         uint8_t protocol_length = 0;
         std::string_view protocol;
         if (!reader.U8(&protocol_length) || protocol_length == 0 || !reader.Take(protocol_length, &protocol)) {
-            return NpmTlsHelloErrorV1::kMalformed;
+            return NpmTlsHelloError::kMalformed;
         }
         if (server) {
-            if (facts->selected_alpn) return NpmTlsHelloErrorV1::kMalformed;
+            if (facts->selected_alpn) return NpmTlsHelloError::kMalformed;
             facts->selected_alpn = std::string(protocol);
         } else {
             if (std::find(facts->offered_alpn.begin(), facts->offered_alpn.end(), protocol) !=
                 facts->offered_alpn.end()) {
-                return NpmTlsHelloErrorV1::kMalformed;
+                return NpmTlsHelloError::kMalformed;
             }
             facts->offered_alpn.emplace_back(protocol);
         }
     }
     std::string encoded;
-    const auto error = EncodeNpmTlsAlpnJsonV1(
-        server ? std::vector<std::string>{*facts->selected_alpn} : facts->offered_alpn, &encoded);
+    const auto error =
+        EncodeNpmTlsAlpnJson(server ? std::vector<std::string>{*facts->selected_alpn} : facts->offered_alpn, &encoded);
     return error;
 }
 
-NpmTlsHelloErrorV1 ParseVersions(std::string_view bytes, bool server, NpmTlsHelloFactsV1* facts) {
+NpmTlsHelloError ParseVersions(std::string_view bytes, bool server, NpmTlsHelloFacts* facts) {
     Reader reader(bytes);
     if (server) {
         uint16_t version = 0;
-        if (!reader.U16(&version) || !reader.Empty()) return NpmTlsHelloErrorV1::kMalformed;
+        if (!reader.U16(&version) || !reader.Empty()) return NpmTlsHelloError::kMalformed;
         facts->selected_version = version;
     } else {
         uint8_t length = 0;
         if (!reader.U8(&length) || length != reader.Remaining() || length == 0 || (length & 1) != 0) {
-            return NpmTlsHelloErrorV1::kMalformed;
+            return NpmTlsHelloError::kMalformed;
         }
         while (!reader.Empty()) {
             uint16_t version = 0;
-            if (!reader.U16(&version)) return NpmTlsHelloErrorV1::kMalformed;
+            if (!reader.U16(&version)) return NpmTlsHelloError::kMalformed;
             facts->offered_versions.push_back(version);
         }
     }
-    return NpmTlsHelloErrorV1::kNone;
+    return NpmTlsHelloError::kNone;
 }
 
-NpmTlsHelloErrorV1 ParseExtensions(Reader* hello, bool server, NpmTlsHelloFactsV1* facts) {
-    if (hello->Empty()) return NpmTlsHelloErrorV1::kNone;
+NpmTlsHelloError ParseExtensions(Reader* hello, bool server, NpmTlsHelloFacts* facts) {
+    if (hello->Empty()) return NpmTlsHelloError::kNone;
     uint16_t length = 0;
     std::string_view bytes;
     if (!hello->U16(&length) || length != hello->Remaining() || !hello->Take(length, &bytes)) {
-        return NpmTlsHelloErrorV1::kMalformed;
+        return NpmTlsHelloError::kMalformed;
     }
     Reader extensions(bytes);
     bool seen_sni = false;
@@ -146,31 +146,31 @@ NpmTlsHelloErrorV1 ParseExtensions(Reader* hello, bool server, NpmTlsHelloFactsV
         std::string_view value;
         if (!extensions.U16(&type) || !extensions.U16(&extension_length) ||
             !extensions.Take(extension_length, &value)) {
-            return NpmTlsHelloErrorV1::kMalformed;
+            return NpmTlsHelloError::kMalformed;
         }
-        NpmTlsHelloErrorV1 error = NpmTlsHelloErrorV1::kNone;
+        NpmTlsHelloError error = NpmTlsHelloError::kNone;
         if (type == 0) {
-            if (seen_sni) return NpmTlsHelloErrorV1::kMalformed;
+            if (seen_sni) return NpmTlsHelloError::kMalformed;
             seen_sni = true;
             if (server)
-                error = value.empty() ? NpmTlsHelloErrorV1::kNone : NpmTlsHelloErrorV1::kMalformed;
+                error = value.empty() ? NpmTlsHelloError::kNone : NpmTlsHelloError::kMalformed;
             else
                 error = ParseSni(value, facts);
         } else if (type == 16) {
-            if (seen_alpn) return NpmTlsHelloErrorV1::kMalformed;
+            if (seen_alpn) return NpmTlsHelloError::kMalformed;
             seen_alpn = true;
             error = ParseAlpn(value, server, facts);
         } else if (type == 43) {
-            if (seen_versions) return NpmTlsHelloErrorV1::kMalformed;
+            if (seen_versions) return NpmTlsHelloError::kMalformed;
             seen_versions = true;
             error = ParseVersions(value, server, facts);
         }
-        if (error != NpmTlsHelloErrorV1::kNone) return error;
+        if (error != NpmTlsHelloError::kNone) return error;
     }
-    return NpmTlsHelloErrorV1::kNone;
+    return NpmTlsHelloError::kNone;
 }
 
-NpmTlsHelloErrorV1 ParseClient(std::string_view body, NpmTlsHelloFactsV1* facts) {
+NpmTlsHelloError ParseClient(std::string_view body, NpmTlsHelloFacts* facts) {
     Reader reader(body);
     std::string_view random;
     uint8_t session_length = 0;
@@ -181,13 +181,13 @@ NpmTlsHelloErrorV1 ParseClient(std::string_view body, NpmTlsHelloFactsV1* facts)
         session_length > 32 || !reader.Take(session_length, &ignored) || !reader.U16(&cipher_length) ||
         cipher_length < 2 || (cipher_length & 1) != 0 || !reader.Take(cipher_length, &ignored) ||
         !reader.U8(&compression_length) || compression_length == 0 || !reader.Take(compression_length, &ignored)) {
-        return NpmTlsHelloErrorV1::kMalformed;
+        return NpmTlsHelloError::kMalformed;
     }
-    if (ignored.find('\0') == std::string_view::npos) return NpmTlsHelloErrorV1::kMalformed;
+    if (ignored.find('\0') == std::string_view::npos) return NpmTlsHelloError::kMalformed;
     return ParseExtensions(&reader, false, facts);
 }
 
-NpmTlsHelloErrorV1 ParseServer(std::string_view body, NpmTlsHelloFactsV1* facts) {
+NpmTlsHelloError ParseServer(std::string_view body, NpmTlsHelloFacts* facts) {
     Reader reader(body);
     std::string_view random;
     uint8_t session_length = 0;
@@ -197,7 +197,7 @@ NpmTlsHelloErrorV1 ParseServer(std::string_view body, NpmTlsHelloFactsV1* facts)
     if (!reader.U16(&facts->legacy_version) || !reader.Take(32, &random) || !reader.U8(&session_length) ||
         session_length > 32 || !reader.Take(session_length, &ignored) || !reader.U16(&cipher) ||
         !reader.U8(&compression) || compression != 0) {
-        return NpmTlsHelloErrorV1::kMalformed;
+        return NpmTlsHelloError::kMalformed;
     }
     facts->cipher_suite = cipher;
     facts->hello_retry_request =
@@ -208,13 +208,13 @@ NpmTlsHelloErrorV1 ParseServer(std::string_view body, NpmTlsHelloFactsV1* facts)
 
 }  // namespace
 
-NpmTlsHelloErrorV1 EncodeNpmTlsAlpnJsonV1(const std::vector<std::string>& protocols, std::string* output) {
-    if (output == nullptr) return NpmTlsHelloErrorV1::kInvalidOutput;
+NpmTlsHelloError EncodeNpmTlsAlpnJson(const std::vector<std::string>& protocols, std::string* output) {
+    if (output == nullptr) return NpmTlsHelloError::kInvalidOutput;
     try {
         std::string next = "[";
         constexpr char kHex[] = "0123456789abcdef";
         for (const auto& protocol : protocols) {
-            if (protocol.empty() || protocol.size() > 255) return NpmTlsHelloErrorV1::kMalformed;
+            if (protocol.empty() || protocol.size() > 255) return NpmTlsHelloError::kMalformed;
             if (next.size() > 1) next += ',';
             next += '"';
             for (unsigned char byte : protocol) {
@@ -228,31 +228,31 @@ NpmTlsHelloErrorV1 EncodeNpmTlsAlpnJsonV1(const std::vector<std::string>& protoc
                 } else {
                     next += static_cast<char>(byte);
                 }
-                if (next.size() + 2 > kMaxAlpnJsonBytes) return NpmTlsHelloErrorV1::kLimit;
+                if (next.size() + 2 > kMaxAlpnJsonBytes) return NpmTlsHelloError::kLimit;
             }
             next += '"';
         }
         next += ']';
-        if (next.size() > kMaxAlpnJsonBytes) return NpmTlsHelloErrorV1::kLimit;
+        if (next.size() > kMaxAlpnJsonBytes) return NpmTlsHelloError::kLimit;
         *output = std::move(next);
-        return NpmTlsHelloErrorV1::kNone;
+        return NpmTlsHelloError::kNone;
     } catch (const std::bad_alloc&) {
-        return NpmTlsHelloErrorV1::kAllocationFailed;
+        return NpmTlsHelloError::kAllocationFailed;
     }
 }
 
-NpmTlsHelloErrorV1 ParseNpmTlsHelloV1(uint8_t message_type, std::string_view body,
-                                      std::optional<int64_t> complete_at_ns, NpmTlsHelloFactsV1* output) {
-    if (output == nullptr) return NpmTlsHelloErrorV1::kInvalidOutput;
-    if (message_type != 1 && message_type != 2) return NpmTlsHelloErrorV1::kMalformed;
+NpmTlsHelloError ParseNpmTlsHello(uint8_t message_type, std::string_view body, std::optional<int64_t> complete_at_ns,
+                                  NpmTlsHelloFacts* output) {
+    if (output == nullptr) return NpmTlsHelloError::kInvalidOutput;
+    if (message_type != 1 && message_type != 2) return NpmTlsHelloError::kMalformed;
     try {
-        NpmTlsHelloFactsV1 next;
+        NpmTlsHelloFacts next;
         next.complete_at_ns = complete_at_ns;
         const auto error = message_type == 1 ? ParseClient(body, &next) : ParseServer(body, &next);
-        if (error == NpmTlsHelloErrorV1::kNone) *output = std::move(next);
+        if (error == NpmTlsHelloError::kNone) *output = std::move(next);
         return error;
     } catch (const std::bad_alloc&) {
-        return NpmTlsHelloErrorV1::kAllocationFailed;
+        return NpmTlsHelloError::kAllocationFailed;
     }
 }
 

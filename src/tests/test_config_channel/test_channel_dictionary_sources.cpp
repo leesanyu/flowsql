@@ -14,9 +14,9 @@
 using namespace flowsql;
 using namespace flowsql::dataset;
 namespace fs = std::filesystem;
-Json Describe(IChannelDatasetDescriptorV1& p, const std::string& locator) {
-    ChannelDatasetSnapshotV1 result;
-    DataSemanticsErrorV1 e;
+Json Describe(IChannelDatasetDescriptor& p, const std::string& locator) {
+    ChannelDatasetSnapshot result;
+    DataSemanticsError e;
     assert(p.Describe({locator, 5000}, &result, &e) == 0);
     assert(result.document_json && e.code.empty());
     Json d;
@@ -69,8 +69,8 @@ int main() {
         auto sink = channels::kafka::Parse(
             R"({"name":"sink","connection_name":"cluster","role":"sink","topic":"out","payload_kind":"structured"})");
         store.Mutate("channels", "add", std::move(sink));
-        ChannelDatasetSnapshotV1 out;
-        DataSemanticsErrorV1 error;
+        ChannelDatasetSnapshot out;
+        DataSemanticsError error;
         assert(plugin.Describe({R"({"kind":"kafka_source","name":"sink"})"}, &out, &error) != 0);
         assert(error.code == "UNSUPPORTED_SOURCE" && !out.document_json);
         store.Mutate(

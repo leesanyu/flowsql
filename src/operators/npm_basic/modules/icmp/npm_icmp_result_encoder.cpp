@@ -71,8 +71,8 @@ bool ValidRow(const NpmIcmpFamilyEvent<Address>& event) {
 }  // namespace
 
 template <typename Address>
-int EmitNpmIcmpEventV1(const NpmIcmpFamilyEvent<Address>& event, const std::shared_ptr<INpmTaskBudget>& budget,
-                       INpmResultEmitterV1& emitter, arrow::MemoryPool* pool) {
+int EmitNpmIcmpEvent(const NpmIcmpFamilyEvent<Address>& event, const std::shared_ptr<INpmTaskBudget>& budget,
+                     INpmResultEmitter& emitter, arrow::MemoryPool* pool) {
     if (!budget || !ValidRow(event)) return EINVAL;
     BuildCharge charge(budget);
     if (!charge.Reserve()) return ENOSPC;
@@ -114,16 +114,16 @@ int EmitNpmIcmpEventV1(const NpmIcmpFamilyEvent<Address>& event, const std::shar
             columns.push_back(std::move(column));
         }
         auto rows = arrow::RecordBatch::Make(
-            NpmIcmpEventEntityDescriptorV1(NpmAddressArrowBuilder<Address>::family).schema, 1, std::move(columns));
-        return emitter.Emit(NpmIcmpEventEntityDescriptorV1(NpmAddressArrowBuilder<Address>::family).entity_id, *rows);
+            NpmIcmpEventEntityDescriptor(NpmAddressArrowBuilder<Address>::family).schema, 1, std::move(columns));
+        return emitter.Emit(NpmIcmpEventEntityDescriptor(NpmAddressArrowBuilder<Address>::family).entity_id, *rows);
     } catch (const std::bad_alloc&) {
         return ENOMEM;
     }
 }
 
-template int EmitNpmIcmpEventV1(const NpmIcmpEvent4&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitterV1&,
-                                arrow::MemoryPool*);
-template int EmitNpmIcmpEventV1(const NpmIcmpEvent6&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitterV1&,
-                                arrow::MemoryPool*);
+template int EmitNpmIcmpEvent(const NpmIcmpEvent4&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitter&,
+                              arrow::MemoryPool*);
+template int EmitNpmIcmpEvent(const NpmIcmpEvent6&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitter&,
+                              arrow::MemoryPool*);
 
 }  // namespace flowsql::npm

@@ -53,7 +53,7 @@ struct NpmBasicTaskRuntimeStatus {
     NpmObservationDomainLookupError domain_error = NpmObservationDomainLookupError::kNone;
     NpmTimeCapabilityError time_error = NpmTimeCapabilityError::kNone;
     NpmProtocolContextError protocol_error = NpmProtocolContextError::kNone;
-    NpmProtocolContractStatusV1 module_status;
+    NpmProtocolContractStatus module_status;
     std::string consumer_error;
 };
 
@@ -126,20 +126,20 @@ class NpmBasicTaskRuntime final {
     static NpmBasicTaskRuntimeStatus Create(
         const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
         std::shared_ptr<arrow::Schema>* output_schema, std::unique_ptr<NpmBasicTaskRuntime>* output,
-        std::shared_ptr<NpmTaskBudget> budget = {}, IFlowLabelMatcherV1* matcher = nullptr,
-        const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1(),
-        std::unique_ptr<INpmResultConsumerV1> consumer = {}, std::string task_id = {},
-        INpmResultConsumerFactoryV1* consumer_factory = nullptr, uint64_t matcher_reserved_bytes = 0);
+        std::shared_ptr<NpmTaskBudget> budget = {}, IFlowLabelMatcher* matcher = nullptr,
+        const NpmModuleCatalog& catalog = ProductionNpmModuleCatalog(),
+        std::unique_ptr<INpmResultConsumer> consumer = {}, std::string task_id = {},
+        INpmResultConsumerFactory* consumer_factory = nullptr, uint64_t matcher_reserved_bytes = 0);
     static NpmBasicTaskRuntimeStatus CreateWithTimeCapabilities(
         const NpmBasicTaskConfig& config, IQuerier* querier, const std::shared_ptr<arrow::Schema>& input_schema,
         const NpmTimeCapabilities& time_capabilities, std::shared_ptr<arrow::Schema>* output_schema,
         std::unique_ptr<NpmBasicTaskRuntime>* output, std::shared_ptr<NpmTaskBudget> budget = {},
-        IFlowLabelMatcherV1* matcher = nullptr, const NpmModuleCatalogV1& catalog = ProductionNpmModuleCatalogV1(),
-        std::unique_ptr<INpmResultConsumerV1> consumer = {}, std::string task_id = {},
-        INpmResultConsumerFactoryV1* consumer_factory = nullptr, uint64_t matcher_reserved_bytes = 0);
+        IFlowLabelMatcher* matcher = nullptr, const NpmModuleCatalog& catalog = ProductionNpmModuleCatalog(),
+        std::unique_ptr<INpmResultConsumer> consumer = {}, std::string task_id = {},
+        INpmResultConsumerFactory* consumer_factory = nullptr, uint64_t matcher_reserved_bytes = 0);
 
     ~NpmBasicTaskRuntime();
-    const NpmResultContextV1& ResultContext() const { return router_->Context(); }
+    const NpmResultContext& ResultContext() const { return router_->Context(); }
     NpmBasicTaskRuntime(const NpmBasicTaskRuntime&) = delete;
     NpmBasicTaskRuntime& operator=(const NpmBasicTaskRuntime&) = delete;
     NpmBasicTaskRuntime(NpmBasicTaskRuntime&&) = delete;
@@ -151,7 +151,7 @@ class NpmBasicTaskRuntime final {
     NpmBasicRealtimeMaintenanceStatus DriveRealtimeMaintenance(const NpmBasicRealtimeMaintenanceInput& input,
                                                                std::shared_ptr<arrow::RecordBatch>* output);
     NpmEofFlushStatus FlushOffline(int64_t observed_at, std::shared_ptr<arrow::RecordBatch>* output);
-    NpmMaintenancePlanV1 MaintenancePlan() const;
+    NpmMaintenancePlan MaintenancePlan() const;
     void Cancel() noexcept;
     std::string LastError() const;
     std::string ManagedResultJson() const;
@@ -170,12 +170,12 @@ class NpmBasicTaskRuntime final {
     struct MatcherReleaser {
         std::shared_ptr<INpmTaskBudget> budget;
         uint64_t reserved_bytes = 0;
-        void operator()(IFlowLabelMatcherV1* matcher) const noexcept {
+        void operator()(IFlowLabelMatcher* matcher) const noexcept {
             matcher->Release();
             if (reserved_bytes != 0) budget->Release(NpmBudgetCategory::kModuleState, reserved_bytes);
         }
     };
-    using MatcherLease = std::unique_ptr<IFlowLabelMatcherV1, MatcherReleaser>;
+    using MatcherLease = std::unique_ptr<IFlowLabelMatcher, MatcherReleaser>;
 
     NpmBasicTaskRuntime(NpmBasicTaskConfig config, std::unique_ptr<NpmProtocolContext> protocol_context,
                         std::shared_ptr<NpmTaskBudget> budget, MatcherLease matcher);
@@ -193,7 +193,7 @@ class NpmBasicTaskRuntime final {
     std::unique_ptr<NpmBasicResultCollector> collector_;
     std::unique_ptr<NpmBasicResultProjector> projector_;
     NpmEofFlusher eof_flusher_;
-    std::vector<NpmPreparedModuleV1> prepared_modules_;
+    std::vector<NpmPreparedModule> prepared_modules_;
     std::vector<std::unique_ptr<INpmAnalysisModule>> owned_modules_;
     std::vector<NpmProtocolModuleAdapter*> protocol_modules_;
     std::unique_ptr<NpmTcpStreamProvider> streams_;

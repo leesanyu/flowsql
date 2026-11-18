@@ -1,5 +1,5 @@
 {
-  "schema_id": "flowsql.operator-data-contract.v1",
+  "schema_id": "flowsql.operator-data-contract",
   "title": "Baseliner",
   "operator": {
     "category": "explore",

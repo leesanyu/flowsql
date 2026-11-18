@@ -16,39 +16,39 @@
 
 namespace flowsql::channels::kafka {
 class Plugin final : public IPlugin,
-                     public IKafkaConnectionServiceV1,
+                     public IKafkaConnectionService,
                      public IRouterHandle,
-                     public IKafkaChannelCatalogV1,
+                     public IKafkaChannelCatalog,
                      public IBlockStreamFactory,
-                     public IBlockStreamReaderFactoryV1,
-                     public IBlockStreamChannelDescriptorV1,
-                     public IResultSinkFactoryV1,
-                     public IPacketSinkFactoryV1,
-                     public IFilterDomainResolverV1,
-                     public IChannelDatasetDescriptorV1 {
+                     public IBlockStreamReaderFactory,
+                     public IBlockStreamChannelDescriptor,
+                     public IResultSinkFactory,
+                     public IPacketSinkFactory,
+                     public IFilterDomainResolver,
+                     public IChannelDatasetDescriptor {
  public:
     int Option(const char* options) override;
     int Load(IQuerier*) override;
     int Start() override;
     int Stop() override;
     int Unload() override;
-    int OpenSession(const char* name, const char* usage, IKafkaClientSessionV1** session, std::string* error) override;
-    void ReleaseSession(IKafkaClientSessionV1* session) override;
+    int OpenSession(const char* name, const char* usage, IKafkaClientSession** session, std::string* error) override;
+    void ReleaseSession(IKafkaClientSession* session) override;
     void EnumRoutes(std::function<void(const RouteItem&)> callback) override;
     ~Plugin() override { Unload(); }
-    int CreateWriter(const ResultSinkContextV1&, std::unique_ptr<IResultSinkWriterV1>*) override;
-    int CreateWriter(const PacketSinkContextV1&, std::unique_ptr<IPacketSinkWriterV1>*) override;
-    int DescribeChannel(const char* name, KafkaChannelDescriptionV1* description) override;
+    int CreateWriter(const ResultSinkContext&, std::unique_ptr<IResultSinkWriter>*) override;
+    int CreateWriter(const PacketSinkContext&, std::unique_ptr<IPacketSinkWriter>*) override;
+    int DescribeChannel(const char* name, KafkaChannelDescription* description) override;
     const char* ProviderId() const override { return "kafka"; }
-    int Describe(const ChannelDatasetRequestV1&, ChannelDatasetSnapshotV1*, DataSemanticsErrorV1*) override;
+    int Describe(const ChannelDatasetRequest&, ChannelDatasetSnapshot*, DataSemanticsError*) override;
     Store& Definitions() { return store_; }
     const Deployment& Environment() const { return deployment_; }
     IBlockStreamChannel* Get(const char* type, const char* name) override;
     void List(std::function<void(const char*, const char*, IBlockStreamChannel*)> callback) override;
-    int CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** output) override;
+    int CreateReader(const BlockStreamReaderConfig& config, IBlockStreamChannel** output) override;
     void ReleaseReader(IBlockStreamChannel* reader) override;
-    void DescribeChannelTypes(std::function<void(const BlockStreamChannelTypeDescriptorV1&)> callback) const override;
-    int Resolve(const FilterDomainResolveRequestV1&, FilterDomainResolveResultV1*) const override;
+    void DescribeChannelTypes(std::function<void(const BlockStreamChannelTypeDescriptor&)> callback) const override;
+    int Resolve(const FilterDomainResolveRequest&, FilterDomainResolveResult*) const override;
 
  private:
     struct Verification {
@@ -57,7 +57,7 @@ class Plugin final : public IPlugin,
         std::shared_ptr<Client> client;
         bool done = false, cancelled = false, draft = false;
         Json result;
-        KafkaBindingSnapshotV1 snapshot;
+        KafkaBindingSnapshot snapshot;
         std::string target, name, files_stamp;
         std::chrono::steady_clock::time_point completed;
     };

@@ -133,8 +133,8 @@ class Broker {
     std::vector<std::string> topics_;
 };
 // Test-only analysis provider: preserve schema/data, stop on positive rows, or fail on request.
-class Collector final : public IBlockTransformOperatorV1 {
-    class Task final : public IBlockTransformTaskV1 {
+class Collector final : public IBlockTransformOperator {
+    class Task final : public IBlockTransformTask {
      public:
         explicit Task(bool fail) : fail_(fail) {}
         int Open(std::shared_ptr<arrow::Schema> input, std::shared_ptr<arrow::Schema>* output) override {
@@ -143,13 +143,13 @@ class Collector final : public IBlockTransformOperatorV1 {
             return 0;
         }
         int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t timestamp,
-                         std::vector<BlockTransformOutputV1>* outputs) override {
+                         std::vector<BlockTransformOutput>* outputs) override {
             if (fail_) return -1;
             if (!input->num_rows()) return 0;
             outputs->push_back({input, timestamp});
             return 1;
         }
-        int Flush(std::vector<BlockTransformOutputV1>*) override { return 0; }
+        int Flush(std::vector<BlockTransformOutput>*) override { return 0; }
         void Cancel() override {}
         std::string LastError() const override { return "requested fixture failure"; }
 
@@ -161,12 +161,12 @@ class Collector final : public IBlockTransformOperatorV1 {
     std::string Category() const override { return "test"; }
     std::string Name() const override { return "kafka_collect"; }
     std::string Description() const override { return "Kafka acceptance fixture"; }
-    int CreateTask(const BlockTransformTaskConfigV1& config, IBlockTransformTaskV1** output) override {
+    int CreateTask(const BlockTransformTaskConfig& config, IBlockTransformTask** output) override {
         auto params = Parse(config.with_params_json ? config.with_params_json : "{}");
         *output = new Task(Text(params, "fail") == "yes");
         return 0;
     }
-    void ReleaseTask(IBlockTransformTaskV1* task) override { delete task; }
+    void ReleaseTask(IBlockTransformTask* task) override { delete task; }
 };
 class Runtime {
  public:
@@ -189,17 +189,18 @@ class Runtime {
         const auto catalog =
             "data_dir=" + (root / "dataframes").string() + ";operator_db_path=" + (root / "operators.db").string();
         const auto task = "db_path=" + (root / "tasks.db").string();
-        const char* libraries[] = {"libflowsql_kafka.so", "libflowsql_builtin.so", "libflowsql_catalog.so",
-                                   "libflowsql_scheduler.so", "libflowsql_task.so"};
-        const char* configs[] = {kafka.c_str(), nullptr, catalog.c_str(), "stream_workers=1;batch_workers=1",
-                                 task.c_str()};
-        loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, &collector_);
-        Check(loader->Load(get_absolute_process_path(), libraries, configs, 5) == 0, "runtime_load");
+        const char* libraries[] = {"libflowsql_config_channel.so", "libflowsql_kafka.so",     "libflowsql_builtin.so",
+                                   "libflowsql_catalog.so",        "libflowsql_scheduler.so", "libflowsql_task.so"};
+        const std::string semantics_option = "db_path=" + (root / "semantics.db").string();
+        const char* configs[] = {semantics_option.c_str(),           kafka.c_str(), nullptr, catalog.c_str(),
+                                 "stream_workers=1;batch_workers=1", task.c_str()};
+        loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR, &collector_);
+        Check(loader->Load(get_absolute_process_path(), libraries, configs, 6) == 0, "runtime_load");
         loaded_ = true;
         Check(loader->StartAll() == 0, "runtime_start");
         auto connection = Parse(Encode(profile["connection"]));
         Call("/channels/kafka/connections/add", connection);
-        factory = static_cast<IBlockStreamReaderFactoryV1*>(loader->First(IID_BLOCK_STREAM_READER_FACTORY_V1));
+        factory = static_cast<IBlockStreamReaderFactory*>(loader->First(IID_BLOCK_STREAM_READER_FACTORY));
         Check(factory, "reader_factory_missing");
     }
     ~Runtime() {
@@ -237,7 +238,7 @@ class Runtime {
         source.AddMember("max_message_bytes", limit, a);
         Call("/channels/kafka/channels/add", request);
     }
-    IBlockStreamReaderFactoryV1* factory = nullptr;
+    IBlockStreamReaderFactory* factory = nullptr;
     PluginLoader* loader = PluginLoader::Single();
 
  private:
@@ -247,7 +248,7 @@ class Runtime {
 class Reader {
  public:
     Reader(Runtime& runtime, const char* name) : factory_(runtime.factory) {
-        BlockStreamReaderConfigV1 config;
+        BlockStreamReaderConfig config;
         config.source_category = "kafka";
         config.source_name = name;
         config.task_id = "acceptance";
@@ -266,13 +267,13 @@ class Reader {
         return result;
     }
     void Ack(const BlockPollEvent& event) {
-        auto* ack = dynamic_cast<IBlockStreamAcknowledgementV1*>(reader_);
+        auto* ack = dynamic_cast<IBlockStreamAcknowledgement*>(reader_);
         Check(ack && ack->AcknowledgeBlock(event.batch) == 0, "acknowledge");
         Check(reader_->ReleaseBlock(event.batch) == 0, "release");
     }
 
  private:
-    IBlockStreamReaderFactoryV1* factory_;
+    IBlockStreamReaderFactory* factory_;
     IBlockStreamChannel* reader_ = nullptr;
 };
 std::pair<int32_t, int64_t> Identity(const BlockPollEvent& event) {

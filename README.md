@@ -175,17 +175,17 @@ docker compose -f docker-compose.yml -f docker-compose.databases.yml ps
 
 **通过镜像仓库跨机器发布**：将镜像推送到镜像仓库，并把所用的 Compose 文件复制到部署机器；使用数据库叠加文件时还需复制 ClickHouse XML 文件。
 产品服务统一使用 `FLOWSQL_IMAGE` 选择镜像，默认 `flowsql:latest`；部署具体版本时直接指定完整镜像名：
-发布前先按[版本说明](docs/versioning.md)完成对应版本的提交、构建验收和标签校验。以下以 `0.1.0` 为例：
+发布前先按[版本说明](docs/versioning.md)完成对应版本的提交、构建验收和标签校验。以下以 `0.5.0` 为例：
 
 ```bash
 # 构建机器：将地址与版本号替换为实际值
-python3 tools/release.py verify --version 0.1.0
-python3 tools/release.py image --tag registry.example.com/flowsql:0.1.0
-docker push registry.example.com/flowsql:0.1.0
+python3 tools/release.py verify --version 0.5.0
+python3 tools/release.py image --tag registry.example.com/flowsql:0.5.0
+docker push registry.example.com/flowsql:0.5.0
 
 # 部署机器
-docker pull registry.example.com/flowsql:0.1.0
-FLOWSQL_IMAGE=registry.example.com/flowsql:0.1.0 \
+docker pull registry.example.com/flowsql:0.5.0
+FLOWSQL_IMAGE=registry.example.com/flowsql:0.5.0 \
   docker compose -f docker-compose.yml -f docker-compose.databases.yml up -d
 ```
 
@@ -348,13 +348,13 @@ IPlugin（生命周期）
 │   ├── IDatabaseChannel（数据库 Reader/Writer 工厂）
 │   ├── IStreamChannel（流式）
 │   └── IBlockStreamChannel（批次数据流，如 pcapfile、netadapter、kafka）
-├── ICaptureBlockStreamReaderV2（原始包与同次采集进度、身份、计数）
-├── IBlockStreamAcknowledgementV1（处理及当次投递成功后显式确认）
+├── ICaptureBlockStreamReader（原始包与同次采集进度、身份、计数）
+├── IBlockStreamAcknowledgement（处理及当次投递成功后显式确认）
 ├── IOperator（数据算子：Work(in, out)）
-├── IBlockTransformOperatorV1/V2（创建任务私有的批次变换会话）
-├── IConfigChannelRegistryV1（精确版本的配置快照）
-├── IKafkaConnectionServiceV1（连接、通道与验证控制面）
-├── IFlowLabelingProviderV1（会话主标签匹配能力）
+├── IBlockTransformOperator（创建任务私有的批次变换会话）
+├── IConfigChannelRegistry（精确版本的配置快照）
+├── IKafkaConnectionService（连接、通道与验证控制面）
+├── IFlowLabelingProvider（会话主标签匹配能力）
 └── IBaselineService（进程内在线基线能力，不直接暴露 HTTP 路由）
 ```
 
@@ -599,8 +599,8 @@ GSSAPI、OAUTHBEARER；配置保存、连接验证和数据读写授权分别判
 | --- | --- | --- |
 | 结构化 source | UTF-8 JSON 对象、显式字段/类型/单位映射，保留 Topic、分区、位点等元数据 | `FROM kafka.metrics ... INTO dataframe.metric_samples` |
 | 结果 sink | 带实体、Schema 版本、业务身份和可选 revision 的 JSON 信封 | `FROM dataframe.alert_results INTO kafka.alerts` |
-| 原始包 source | `flowsql_packet_v1`，保留原始包、采集身份与同次进度 | `FROM kafka.remote_packets USING npm.basic ... INTO mysql.npm` |
-| 原始包 sink | 网卡采集批次与事实封装为 `flowsql_packet_v1` | `SELECT * FROM netadapter.edge_capture INTO kafka.packet_upload` |
+| 原始包 source | `flowsql_packet`，保留原始包、采集身份与同次进度 | `FROM kafka.remote_packets USING npm.basic ... INTO mysql.npm` |
+| 原始包 sink | 网卡采集批次与事实封装为 `flowsql_packet` | `SELECT * FROM netadapter.edge_capture INTO kafka.packet_upload` |
 
 通道、Topic、消费组与目标数据库需按 [Kafka 使用说明](docs/kafka.md)准备。
 所有 Kafka source 都是持续来源，使用异步 Batch 入口；有限 DataFrame 或数据库查询发布到结果 sink 可同步或异步执行。
@@ -780,12 +780,12 @@ DNS Schema 固定为 v1，与 Basic/Session 的标签 Schema 版本独立。未�
 
 ```sql
 SELECT *
-FROM sqlite.local.npm_dns_transaction_ipv4_final_v1
+FROM sqlite.local.npm_dns_transaction_ipv4_final
 WHERE __npm_run_id='替换为本次响应中的run_id'
 INTO dataframe.dns_final
 ```
 
-同一实体还有 `npm_dns_transaction_ipv4_history_v1` 和 `npm_dns_transaction_ipv4_latest_v1`。每次运行的
+同一实体还有 `npm_dns_transaction_ipv4_history` 和 `npm_dns_transaction_ipv4_latest`。每次运行的
 `__npm_run_id` 相互隔离；查询时按本次响应的关系名和运行 ID 过滤。
 
 ### HTTP/1 事务分析
@@ -809,13 +809,13 @@ INTO dataframe.http1_transactions
 
 ```sql
 SELECT *
-FROM sqlite.local.npm_http1_transaction_ipv4_final_v1
+FROM sqlite.local.npm_http1_transaction_ipv4_final
 WHERE __npm_run_id='替换为本次响应中的run_id'
 INTO dataframe.http1_final
 ```
 
-Schema 固定为 v1；同一实体还有 `npm_http1_transaction_ipv4_history_v1` 和
-`npm_http1_transaction_ipv4_latest_v1`，三个关系均按 `__npm_run_id` 隔离。
+Schema 固定为 v1；同一实体还有 `npm_http1_transaction_ipv4_history` 和
+`npm_http1_transaction_ipv4_latest`，三个关系均按 `__npm_run_id` 隔离。
 `matched` 仅表示请求头和最终响应头均被完整观察，不表示响应正文完整；`latency_ns` 是两个头部完成捕获时间之差，
 时间缺失或倒序时为 null。`request_only` 与 `response_only` 的 `incomplete_reason` 描述捕获视图中的缺口、
 定界、期限或未配对事实，不能据此推断服务端故障。默认响应期限为 5 秒，仅随合法捕获水位推进；
@@ -843,8 +843,8 @@ INTO dataframe.icmp_events
 `latency_ns` 只计算可见请求与应答的非负时间差；未见应答只表示观测期限或 EOF
 之前未捕获到匹配包，不说明网络确实超时。引用不足时 `quote_status` 标记可见范围，
 `active_quoted_session_id` 为空。托管结果沿用一个数据库目标，提供
-`npm_icmp_event_ipv4_history_v1`、`npm_icmp_event_ipv4_latest_v1` 和
-`npm_icmp_event_ipv4_final_v1`，按 `__npm_run_id` 查询。
+`npm_icmp_event_ipv4_history`、`npm_icmp_event_ipv4_latest` 和
+`npm_icmp_event_ipv4_final`，按 `__npm_run_id` 查询。
 
 ### TLS 握手分析
 
@@ -868,13 +868,13 @@ INTO dataframe.tls_handshakes
 
 ```sql
 SELECT *
-FROM sqlite.local.npm_tls_handshake_ipv4_final_v1
+FROM sqlite.local.npm_tls_handshake_ipv4_final
 WHERE __npm_run_id='替换为本次响应中的run_id'
 INTO dataframe.tls_final
 ```
 
-`tls_handshake_ipv4` 固定为 Schema v1；另有 `npm_tls_handshake_ipv4_history_v1` 和
-`npm_tls_handshake_ipv4_latest_v1`，三个关系都按 `__npm_run_id` 隔离。每个候选最多一条终态事件；
+`tls_handshake_ipv4` 固定为 Schema v1；另有 `npm_tls_handshake_ipv4_history` 和
+`npm_tls_handshake_ipv4_latest`，三个关系都按 `__npm_run_id` 隔离。每个候选最多一条终态事件；
 `server_hello_observed` 仅表示最终 ServerHello 可见，不表示 Finished、证书验证或连接成功。
 `fatal_alert_observed` 只在明文窗口实际看到 fatal alert 时产生；其余 `incomplete` 和
 `incomplete_reason` 描述缺口、期限、终结或定界等捕获视图事实。TLS 1.3 的 ALPN 选择位于加密部分，
@@ -988,17 +988,17 @@ Web 查询与目录预览在展示时转为标准地址文本。每个族独立�
 
 | 关系名 | 查询内容 |
 | --- | --- |
-| `npm_<entity>_history_v<version>` | 可见运行中的全部 revision |
-| `npm_<entity>_latest_v<version>` | 每个运行、每个实体实例的最大 revision |
-| `npm_<entity>_final_v<version>` | `is_final=true` 的终态结果 |
+| `npm_<entity>_history` | 可见运行中的全部 revision |
+| `npm_<entity>_latest` | 每个运行、每个实体实例的最大 revision |
+| `npm_<entity>_final` | `is_final=true` 的终态结果 |
 
-IPv4 Basic 的关系名固定为 `npm_basic_ipv4_history_v1`、`npm_basic_ipv4_latest_v1` 和 `npm_basic_ipv4_final_v1`，
-IPv6 对应 `npm_basic_ipv6_history_v1`、`npm_basic_ipv6_latest_v1` 和 `npm_basic_ipv6_final_v1`。
+IPv4 Basic 的关系名固定为 `npm_basic_ipv4_history`、`npm_basic_ipv4_latest` 和 `npm_basic_ipv4_final`，
+IPv6 对应 `npm_basic_ipv6_history`、`npm_basic_ipv6_latest` 和 `npm_basic_ipv6_final`。
 不随标签开关变化。查看每个周期的时序应读取 history，例如：
 
 ```sql
 SELECT *
-FROM mysql.flowsql-mysql.npm_basic_ipv4_history_v1
+FROM mysql.flowsql-mysql.npm_basic_ipv4_history
 WHERE __npm_run_id='替换为本次响应中的run_id'
 INTO dataframe.basic_timeline
 ```
@@ -1011,7 +1011,7 @@ latest 只保留每个会话最大 revision 的累计状态；final 只保留会
 
 ```sql
 SELECT *
-FROM mysql.flowsql-mysql.npm_session_ipv4_latest_v1
+FROM mysql.flowsql-mysql.npm_session_ipv4_latest
 WHERE __npm_run_id='替换为本次响应中的run_id'
 INTO dataframe.session_latest
 ```
@@ -1200,7 +1200,7 @@ CREATE INDEX samples_baseline_scan ON samples(bucket, link);
 排序键、主键与分区的裁剪效果，例如 run 和时间字段的排序前缀；不能照搬关系数据库的 B-tree 索引建议。
 DataFrame 快照不适用数据库索引要求。
 
-托管出口的 `baseline_results_v1`、`baseline_relation_fusion_v1`、`baseline_maintenance_v1` 则由
+托管出口的 `baseline_results`、`baseline_relation_fusion`、`baseline_maintenance` 则由
 Baseliner 在 SQLite、MySQL、PostgreSQL 上创建并确保 `(task_key, published_generation)` 索引，
 用于按任务查询和代际维护。这些内部结果表索引与用户维护的输入表索引分别服务于输出和输入路径。
 首次为已有大量数据的托管表创建索引时，应按实测 DDL 耗时配置 `persistence.operation_timeout_ms`

@@ -44,12 +44,12 @@ std::shared_ptr<arrow::RecordBatch> MakePacketBatch(uint32_t captured_bytes, uin
 }
 
 void TestCaptureReaderState() {
-    CaptureReaderStateV1 state;
-    CaptureQueueIdentityV1 identity;
+    CaptureReaderState state;
+    CaptureQueueIdentity identity;
     identity.source_name = "eth0";
     identity.generation = 7;
     identity.link_type = 1;
-    CaptureReaderLimitsV1 limits;
+    CaptureReaderLimits limits;
     limits.max_packets_per_batch = 1;
     limits.max_bytes_per_batch = 64;
     limits.max_wait_ms = 10;
@@ -81,7 +81,7 @@ void TestCaptureReaderState() {
     assert(state.Borrow(1, second, 8, next_owner) == 0);
     state.Cancel();
     state.Finish();
-    assert(state.State() == CaptureReaderStateV1::Terminal::kCancelled);
+    assert(state.State() == CaptureReaderState::Terminal::kCancelled);
     assert(state.Borrow(2, batch, 8, next_owner) == EPIPE);
     assert(state.Close() == EBUSY);
     assert(state.Release(second) == 0);
@@ -96,65 +96,65 @@ void TestCaptureReaderState() {
 }
 
 void TestCaptureProgressTracker() {
-    CaptureQueueIdentityV1 identity;
+    CaptureQueueIdentity identity;
     identity.source_name = "eth0";
     identity.source_id = 9;
     identity.queue_id = 2;
     identity.generation = 7;
-    CaptureProgressTrackerV1 tracker(identity);
-    CaptureProgressV1 fact;
+    SingleInputCaptureProgressTracker tracker(identity);
+    CaptureProgress fact;
     fact.source_id = 9;
     fact.queue_id = 2;
     fact.generation = 7;
     fact.fact_sequence = 1;
     fact.capture_time_ns = 100;
     fact.packet_observed = true;
-    fact.backlog = CaptureBacklogV1::kEmpty;
-    assert(tracker.Observe(fact).error == CaptureProgressErrorV1::kUnprocessedPacket);
+    fact.backlog = CaptureBacklog::kEmpty;
+    assert(tracker.Observe(fact).error == CaptureProgressError::kUnprocessedPacket);
     const auto first = tracker.Observe(fact, 100);
-    assert(first.error == CaptureProgressErrorV1::kNone);
-    assert(first.disposition == CaptureProgressDispositionV1::kAdvanced);
+    assert(first.error == CaptureProgressError::kNone);
+    assert(first.disposition == CaptureProgressDisposition::kAdvanced);
     assert(first.capture_progress_ns == 100);
-    assert(tracker.Observe(fact, 100).error == CaptureProgressErrorV1::kInvalidSequence);
+    assert(tracker.Observe(fact, 100).error == CaptureProgressError::kInvalidSequence);
     fact.fact_sequence = 2;
     fact.capture_time_ns = 200;
     fact.packet_observed = false;
-    fact.backlog = CaptureBacklogV1::kUnknown;
-    assert(tracker.Observe(fact).disposition == CaptureProgressDispositionV1::kBacklogUnknown);
+    fact.backlog = CaptureBacklog::kUnknown;
+    assert(tracker.Observe(fact).disposition == CaptureProgressDisposition::kBacklogUnknown);
     fact.fact_sequence = 3;
-    fact.backlog = CaptureBacklogV1::kPresent;
-    assert(tracker.Observe(fact).disposition == CaptureProgressDispositionV1::kBacklogged);
+    fact.backlog = CaptureBacklog::kPresent;
+    assert(tracker.Observe(fact).disposition == CaptureProgressDisposition::kBacklogged);
     fact.fact_sequence = 4;
-    fact.backlog = CaptureBacklogV1::kEmpty;
-    assert(tracker.Observe(fact).disposition == CaptureProgressDispositionV1::kIdleUnconfirmed);
+    fact.backlog = CaptureBacklog::kEmpty;
+    assert(tracker.Observe(fact).disposition == CaptureProgressDisposition::kIdleUnconfirmed);
     fact.fact_sequence = 5;
     fact.source_idle_confirmed = true;
-    assert(tracker.Observe(fact).disposition == CaptureProgressDispositionV1::kAdvanced);
+    assert(tracker.Observe(fact).disposition == CaptureProgressDisposition::kAdvanced);
     assert(tracker.ProgressNs() == 200);
     fact.fact_sequence = 6;
     fact.capture_time_ns = 150;
-    assert(tracker.Observe(fact).disposition == CaptureProgressDispositionV1::kTimeRegressed);
+    assert(tracker.Observe(fact).disposition == CaptureProgressDisposition::kTimeRegressed);
     assert(tracker.ProgressNs() == 200);
     fact.fact_sequence = 7;
     fact.capture_time_ns = 200;
-    assert(tracker.Observe(fact).disposition == CaptureProgressDispositionV1::kUnchanged);
+    assert(tracker.Observe(fact).disposition == CaptureProgressDisposition::kUnchanged);
     fact.fact_sequence = 8;
     fact.queue_id = 3;
-    assert(tracker.Observe(fact).error == CaptureProgressErrorV1::kWrongQueue);
+    assert(tracker.Observe(fact).error == CaptureProgressError::kWrongQueue);
     fact.queue_id = 2;
     fact.generation = 8;
-    assert(tracker.Observe(fact).error == CaptureProgressErrorV1::kWrongQueue);
+    assert(tracker.Observe(fact).error == CaptureProgressError::kWrongQueue);
     fact.generation = 7;
     fact.packet_observed = true;
     fact.capture_time_ns = 210;
     fact.source_idle_confirmed = true;
-    assert(tracker.Observe(fact, 210).error == CaptureProgressErrorV1::kInvalidFact);
+    assert(tracker.Observe(fact, 210).error == CaptureProgressError::kInvalidFact);
     fact.source_idle_confirmed = false;
-    assert(tracker.Observe(fact, 205).error == CaptureProgressErrorV1::kUnprocessedPacket);
-    assert(tracker.Observe(fact, 210).disposition == CaptureProgressDispositionV1::kAdvanced);
+    assert(tracker.Observe(fact, 205).error == CaptureProgressError::kUnprocessedPacket);
+    assert(tracker.Observe(fact, 210).disposition == CaptureProgressDisposition::kAdvanced);
 }
 
-class FakeCaptureReader final : public ICaptureBlockStreamReaderV2 {
+class FakeCaptureReader final : public ICaptureBlockStreamReader {
  public:
     explicit FakeCaptureReader(uint64_t generation, bool packets = true) : packets_(packets) {
         identity_.source_name = "fake0";
@@ -175,7 +175,7 @@ class FakeCaptureReader final : public ICaptureBlockStreamReaderV2 {
     const char* Schema() override { return "packet"; }
     int Open() override { return 0; }
     int Close() override { return state_.Close(); }
-    bool IsOpened() const override { return state_.State() == CaptureReaderStateV1::Terminal::kOpen; }
+    bool IsOpened() const override { return state_.State() == CaptureReaderState::Terminal::kOpen; }
     int Flush() override { return 0; }
     BlockPollEvent PollBlock(int) override { return {BlockPollEvent::kError, nullptr, ENOTSUP}; }
     int ReleaseBlock(const std::shared_ptr<arrow::RecordBatch>& batch) override {
@@ -188,34 +188,34 @@ class FakeCaptureReader final : public ICaptureBlockStreamReaderV2 {
         state_.Cancel();
         wake_.notify_all();
     }
-    bool IsFinished() const override { return state_.State() != CaptureReaderStateV1::Terminal::kOpen; }
-    int DescribeSources(CaptureSourceSetV2* sources) const override {
+    bool IsFinished() const override { return state_.State() != CaptureReaderState::Terminal::kOpen; }
+    int DescribeSources(CaptureSourceSet* sources) const override {
         if (!sources || sources->struct_size < sizeof(*sources) || sources->contract_version != 2) return EINVAL;
         sources->inputs = {identity_};
         sources->limits = limits_;
         return 0;
     }
-    int ReadInputCounters(uint32_t source_id, CaptureCountersV1* counters) const override {
+    int ReadInputCounters(uint32_t source_id, CaptureCounters* counters) const override {
         return source_id == identity_.source_id ? state_.ReadCounters(counters) : EINVAL;
     }
 
-    CapturePollEventV2 PollCapture(int timeout_ms) override {
-        CapturePollEventV2 event;
+    CapturePollEvent PollCapture(int timeout_ms) override {
+        CapturePollEvent event;
         const int effective = state_.EffectiveWaitMs(timeout_ms);
         if (effective < 0) {
             event.block = {BlockPollEvent::kError, nullptr, EINVAL};
             return event;
         }
         std::unique_lock<std::mutex> lock(mutex_);
-        if (state_.State() == CaptureReaderStateV1::Terminal::kCancelled) {
+        if (state_.State() == CaptureReaderState::Terminal::kCancelled) {
             event.block.kind = BlockPollEvent::kCancelled;
             return event;
         }
-        if (state_.State() == CaptureReaderStateV1::Terminal::kError) {
+        if (state_.State() == CaptureReaderState::Terminal::kError) {
             event.block = {BlockPollEvent::kError, nullptr, EIO};
             return event;
         }
-        if (state_.State() == CaptureReaderStateV1::Terminal::kEof) {
+        if (state_.State() == CaptureReaderState::Terminal::kEof) {
             event.block.kind = BlockPollEvent::kEof;
             return event;
         }
@@ -233,24 +233,24 @@ class FakeCaptureReader final : public ICaptureBlockStreamReaderV2 {
             event.block = {BlockPollEvent::kData, batch, 0};
             event.progress.resize(1);
             event.progress[0] = MakeFact(next_packet_, next_packet_ * 100, true, false,
-                                         next_packet_ == 2 ? CaptureBacklogV1::kEmpty : CaptureBacklogV1::kPresent);
+                                         next_packet_ == 2 ? CaptureBacklog::kEmpty : CaptureBacklog::kPresent);
             return event;
         }
         if (packets_ && next_packet_ == 2 && !idle_sent_) {
             idle_sent_ = true;
             event.block.kind = BlockPollEvent::kTimeout;
             event.progress.resize(1);
-            event.progress[0] = MakeFact(3, 300, false, true, CaptureBacklogV1::kEmpty);
+            event.progress[0] = MakeFact(3, 300, false, true, CaptureBacklog::kEmpty);
             return event;
         }
-        if (state_.State() == CaptureReaderStateV1::Terminal::kEof) {
+        if (state_.State() == CaptureReaderState::Terminal::kEof) {
             event.block.kind = BlockPollEvent::kEof;
             return event;
         }
         wake_.wait_for(lock, std::chrono::milliseconds(effective),
-                       [&] { return state_.State() != CaptureReaderStateV1::Terminal::kOpen; });
-        event.block.kind = state_.State() == CaptureReaderStateV1::Terminal::kCancelled ? BlockPollEvent::kCancelled
-                                                                                        : BlockPollEvent::kTimeout;
+                       [&] { return state_.State() != CaptureReaderState::Terminal::kOpen; });
+        event.block.kind = state_.State() == CaptureReaderState::Terminal::kCancelled ? BlockPollEvent::kCancelled
+                                                                                      : BlockPollEvent::kTimeout;
         return event;
     }
 
@@ -266,9 +266,8 @@ class FakeCaptureReader final : public ICaptureBlockStreamReaderV2 {
     int ReleaseCount() const { return release_count_; }
 
  private:
-    CaptureProgressV1 MakeFact(uint64_t sequence, int64_t time_ns, bool packet, bool idle,
-                               CaptureBacklogV1 backlog) const {
-        CaptureProgressV1 fact;
+    CaptureProgress MakeFact(uint64_t sequence, int64_t time_ns, bool packet, bool idle, CaptureBacklog backlog) const {
+        CaptureProgress fact;
         fact.source_id = identity_.source_id;
         fact.queue_id = identity_.queue_id;
         fact.generation = identity_.generation;
@@ -280,9 +279,9 @@ class FakeCaptureReader final : public ICaptureBlockStreamReaderV2 {
         return fact;
     }
 
-    CaptureQueueIdentityV1 identity_;
-    CaptureReaderLimitsV1 limits_;
-    CaptureReaderStateV1 state_;
+    CaptureQueueIdentity identity_;
+    CaptureReaderLimits limits_;
+    CaptureReaderState state_;
     bool packets_ = true;
     uint64_t next_packet_ = 0;
     bool idle_sent_ = false;
@@ -307,17 +306,17 @@ class LegacyBlockReader final : public IBlockStreamChannel {
     bool IsFinished() const override { return false; }
 };
 
-/** Reusable two-packet contract probe for any deterministic ICaptureBlockStreamReaderV2 fixture. */
-void VerifyCaptureReaderContractV1(ICaptureBlockStreamReaderV2& reader, uint32_t source_id, uint64_t generation) {
-    CaptureSourceSetV2 sources;
+/** Reusable two-packet contract probe for any deterministic ICaptureBlockStreamReaderCurrent fixture. */
+void VerifyCaptureReaderContract(ICaptureBlockStreamReader& reader, uint32_t source_id, uint64_t generation) {
+    CaptureSourceSet sources;
     assert(reader.DescribeSources(&sources) == 0);
-    CaptureSourceSetV2 wrong;
+    CaptureSourceSet wrong;
     wrong.contract_version = 1;
     assert(reader.DescribeSources(&wrong) == EINVAL);
-    assert(ValidateCaptureSourceSetV2(sources) == CaptureDescriptionErrorV1::kNone);
+    assert(ValidateCaptureSourceSet(sources) == CaptureDescriptionError::kNone);
     const auto& identity = sources.inputs.front();
     assert(identity.source_id == source_id && identity.generation == generation);
-    CaptureProgressTrackerV1 tracker(identity);
+    SingleInputCaptureProgressTracker tracker(identity);
     auto first = reader.PollCapture(0);
     assert(first.block.kind == BlockPollEvent::kData && !first.progress.empty());
     const auto first_source = std::static_pointer_cast<arrow::UInt32Array>(first.block.batch->column(4));
@@ -325,25 +324,25 @@ void VerifyCaptureReaderContractV1(ICaptureBlockStreamReaderV2& reader, uint32_t
     const auto first_time = std::static_pointer_cast<arrow::Int64Array>(first.block.batch->column(0));
     assert(first_source->Value(0) == source_id && first_sequence->Value(0) == 1);
     assert(first_time->Value(0) == first.progress.front().capture_time_ns);
-    assert(first.progress.front().backlog == CaptureBacklogV1::kPresent);
+    assert(first.progress.front().backlog == CaptureBacklog::kPresent);
     assert(reader.PollCapture(0).block.kind == BlockPollEvent::kTimeout);
     assert(reader.ReleaseBlock(first.block.batch) == 0);
     assert(reader.ReleaseBlock(first.block.batch) == EINVAL);
     assert(tracker.Observe(first.progress.front(), first_time->Value(0)).disposition ==
-           CaptureProgressDispositionV1::kBacklogged);
+           CaptureProgressDisposition::kBacklogged);
     first.block.batch.reset();
     auto second = reader.PollCapture(0);
     assert(second.block.kind == BlockPollEvent::kData && !second.progress.empty());
     assert(reader.ReleaseBlock(second.block.batch) == 0);
     const auto second_time = std::static_pointer_cast<arrow::Int64Array>(second.block.batch->column(0));
     assert(tracker.Observe(second.progress.front(), second_time->Value(0)).disposition ==
-           CaptureProgressDispositionV1::kAdvanced);
+           CaptureProgressDisposition::kAdvanced);
     second.block.batch.reset();
     auto idle = reader.PollCapture(0);
     assert(idle.block.kind == BlockPollEvent::kTimeout && !idle.progress.empty());
-    assert(tracker.Observe(idle.progress.front()).disposition == CaptureProgressDispositionV1::kAdvanced);
+    assert(tracker.Observe(idle.progress.front()).disposition == CaptureProgressDisposition::kAdvanced);
     assert(tracker.ProgressNs() == 300);
-    CaptureCountersV1 counters;
+    CaptureCounters counters;
     assert(reader.ReadInputCounters(source_id, &counters) == 0);
     assert(counters.generation == generation && counters.received_packets == 2);
     assert(counters.delivered_packets == 2 && counters.delivered_bytes == 16);
@@ -354,11 +353,11 @@ void VerifyCaptureReaderContractV1(ICaptureBlockStreamReaderV2& reader, uint32_t
 void TestFakeCaptureReader() {
     LegacyBlockReader legacy;
     IBlockStreamChannel* legacy_base = &legacy;
-    assert(dynamic_cast<ICaptureBlockStreamReaderV2*>(legacy_base) == nullptr);
+    assert(dynamic_cast<ICaptureBlockStreamReader*>(legacy_base) == nullptr);
     FakeCaptureReader reader(17);
-    VerifyCaptureReaderContractV1(reader, 9, 17);
+    VerifyCaptureReaderContract(reader, 9, 17);
     reader.SetSourceDropped(0);
-    CaptureCountersV1 counters;
+    CaptureCounters counters;
     assert(reader.ReadInputCounters(9, &counters) == 0);
     assert((counters.available_mask & kCaptureSourceDroppedPacketsAvailable) != 0);
     reader.Finish();
@@ -378,7 +377,7 @@ void TestFakeCaptureReader() {
     assert(failed.Close() == 0);
 }
 
-class CaptureFactProbeTask final : public IBlockTransformTaskV1, public IBlockTransformCaptureFactTaskV2 {
+class CaptureFactProbeTask final : public IBlockTransformTask, public IBlockTransformCaptureFactTask {
  public:
     explicit CaptureFactProbeTask(FakeCaptureReader* reader, bool emit = false) : reader_(reader), emit_(emit) {}
     int Open(std::shared_ptr<arrow::Schema> schema, std::shared_ptr<arrow::Schema>* output) override {
@@ -386,19 +385,19 @@ class CaptureFactProbeTask final : public IBlockTransformTaskV1, public IBlockTr
         return 0;
     }
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t,
-                     std::vector<BlockTransformOutputV1>* outputs) override {
+                     std::vector<BlockTransformOutput>* outputs) override {
         ++processed;
         if (emit_) outputs->push_back({input, 0});
         return 0;
     }
-    int Flush(std::vector<BlockTransformOutputV1>*) override {
+    int Flush(std::vector<BlockTransformOutput>*) override {
         ++flushed;
         return 0;
     }
     void Cancel() override { ++cancelled; }
     std::string LastError() const override { return {}; }
-    int BindCaptureSources(const CaptureSourceSetV2&) override { return 0; }
-    int AcceptCaptureFacts(const std::vector<CaptureProgressV1>& incoming) override {
+    int BindCaptureSources(const CaptureSourceSet&) override { return 0; }
+    int AcceptCaptureFacts(const std::vector<CaptureProgress>& incoming) override {
         const auto& fact = incoming.front();
         if (fact.packet_observed) assert(reader_->ReleaseCount() + 1 == processed);
         facts.push_back(fact.fact_sequence);
@@ -424,7 +423,7 @@ void TestCapturePipelineFactOrder() {
     config.transform = &task;
     config.capture_fact_task = &task;
     config.poll_timeout_ms = 0;
-    config.output_consumer = [](const BlockTransformOutputV1&) { return 0; };
+    config.output_consumer = [](const BlockTransformOutput&) { return 0; };
     BlockTransformPipelineRunner runner(std::move(config));
     BlockTransformPipelineResult result;
     std::string error;
@@ -441,7 +440,7 @@ void TestCapturePipelineFactOrder() {
     failed_config.source_schema = packet::PacketSchema();
     failed_config.transform = &failed_task;
     failed_config.capture_fact_task = &failed_task;
-    failed_config.output_consumer = [](const BlockTransformOutputV1&) { return EIO; };
+    failed_config.output_consumer = [](const BlockTransformOutput&) { return EIO; };
     BlockTransformPipelineRunner failed_runner(std::move(failed_config));
     assert(failed_runner.Run(&result, &error) == BlockTransformPipelineError::kOutputConsumerFailed);
     assert(failed_reader.ReleaseCount() == 1 && failed_task.facts == std::vector<uint64_t>({1}));
@@ -451,14 +450,14 @@ void TestCapturePipelineFactOrder() {
 }  // namespace
 
 void test_capture_contract_description() {
-    static_assert(std::is_base_of_v<IBlockStreamChannel, ICaptureBlockStreamReaderV2>);
-    static_assert(std::is_abstract_v<ICaptureBlockStreamReaderV2>);
-    static_assert(std::is_abstract_v<IBlockStreamReaderFactoryV1>);
-    static_assert(kBlockStreamReaderContractVersionV1 == 1);
-    static_assert(kCaptureBlockStreamContractVersionV1 == 1);
+    static_assert(std::is_base_of_v<IBlockStreamChannel, ICaptureBlockStreamReader>);
+    static_assert(std::is_abstract_v<ICaptureBlockStreamReader>);
+    static_assert(std::is_abstract_v<IBlockStreamReaderFactory>);
+    static_assert(kBlockStreamReaderContractVersion == 1);
+    static_assert(kCaptureFactContractVersion == 1);
 
-    CaptureQueueIdentityV1 identity;
-    CaptureReaderLimitsV1 limits;
+    CaptureQueueIdentity identity;
+    CaptureReaderLimits limits;
     assert(identity.struct_size == sizeof(identity));
     assert(limits.struct_size == sizeof(limits));
     identity.source_name = "eth0";
@@ -467,32 +466,32 @@ void test_capture_contract_description() {
     limits.max_bytes_per_batch = 4096;
     limits.max_wait_ms = 20;
     limits.max_outstanding_batches = 2;
-    assert(ValidateCaptureReaderDescriptionV1(identity, limits) == CaptureDescriptionErrorV1::kNone);
+    assert(ValidateCaptureReaderDescription(identity, limits) == CaptureDescriptionError::kNone);
 
     identity.contract_version = 2;
-    assert(ValidateCaptureReaderDescriptionV1(identity, limits) == CaptureDescriptionErrorV1::kInvalidVersion);
-    identity.contract_version = kCaptureBlockStreamContractVersionV1;
+    assert(ValidateCaptureReaderDescription(identity, limits) == CaptureDescriptionError::kInvalidVersion);
+    identity.contract_version = kCaptureFactContractVersion;
     limits.struct_size = sizeof(limits) - 1;
-    assert(ValidateCaptureReaderDescriptionV1(identity, limits) == CaptureDescriptionErrorV1::kInvalidVersion);
+    assert(ValidateCaptureReaderDescription(identity, limits) == CaptureDescriptionError::kInvalidVersion);
     limits.struct_size = sizeof(limits);
     identity.source_name = "";
-    assert(ValidateCaptureReaderDescriptionV1(identity, limits) == CaptureDescriptionErrorV1::kInvalidIdentity);
+    assert(ValidateCaptureReaderDescription(identity, limits) == CaptureDescriptionError::kInvalidIdentity);
     identity.source_name = "eth0";
     identity.generation = 0;
-    assert(ValidateCaptureReaderDescriptionV1(identity, limits) == CaptureDescriptionErrorV1::kInvalidIdentity);
+    assert(ValidateCaptureReaderDescription(identity, limits) == CaptureDescriptionError::kInvalidIdentity);
     identity.generation = 1;
     limits.max_wait_ms = 0;
-    assert(ValidateCaptureReaderDescriptionV1(identity, limits) == CaptureDescriptionErrorV1::kInvalidLimits);
+    assert(ValidateCaptureReaderDescription(identity, limits) == CaptureDescriptionError::kInvalidLimits);
 
-    CapturePollEventV2 event;
-    CaptureProgressV1 progress;
-    CaptureCountersV1 counters;
+    CapturePollEvent event;
+    CaptureProgress progress;
+    CaptureCounters counters;
     assert(event.struct_size == sizeof(event));
     assert(progress.struct_size == sizeof(progress));
     assert(counters.struct_size == sizeof(counters));
     assert(event.block.kind == BlockPollEvent::kTimeout);
     assert(event.progress.empty());
-    assert(progress.backlog == CaptureBacklogV1::kUnknown);
+    assert(progress.backlog == CaptureBacklog::kUnknown);
     assert(counters.available_mask == 0);
     assert((kCaptureSourceDroppedPacketsAvailable & kCaptureQueueDroppedPacketsAvailable) == 0);
     TestCaptureReaderState();

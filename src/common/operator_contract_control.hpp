@@ -9,12 +9,12 @@ namespace flowsql::contracts {
 // Invoke the existing in-process control capability, outside any caller-owned lock.
 // Cross-process callers continue to use the same HTTP JSON protocol.
 inline int Control(IQuerier* querier, const std::string& operation, const rapidjson::Value& request,
-                   rapidjson::Document* response, DataSemanticsErrorV1* error) {
+                   rapidjson::Document* response, DataSemanticsError* error) {
     if (error) *error = {};
     if (!response) return dataset::Fail(error, "INVALID_REQUEST", "control output required");
     response->SetNull();
     fnRouterHandler handler;
-    const auto path = "/semantics/v1/" + operation;
+    const auto path = "/semantics/" + operation;
     if (querier)
         querier->Traverse(IID_ROUTER_HANDLE, [&](void* ptr) {
             static_cast<IRouterHandle*>(ptr)->EnumRoutes([&](const RouteItem& route) {

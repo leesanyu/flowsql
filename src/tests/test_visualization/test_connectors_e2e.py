@@ -55,6 +55,8 @@ def main():
             for backend in backends:
                 values = config.database(backend, 'driver', os.environ.get('FLOWSQL_TEST_LOCATION', 'native'))
                 data.append(dict(type=backend, name=backend, **values))
+            for channel in data:
+                channel['dataset_instance_id'] = uuid.uuid4().hex
             channels.write_text(json.dumps(dict(channels=dict(database_channels=data))))
             channels.chmod(0o600)
             original = hashlib.sha256(channels.read_bytes()).hexdigest()

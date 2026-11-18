@@ -132,7 +132,7 @@ std::shared_ptr<arrow::Schema> StructuredSchema(const StructuredConfig& config) 
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> DecodeStructured(const StructuredConfig& config,
-                                                                    const std::vector<KafkaMessageV1>& messages) {
+                                                                    const std::vector<KafkaMessage>& messages) {
     if (messages.size() > config.max_batch_rows) return arrow::Status::Invalid("BATCH_LIMIT_EXCEEDED");
     auto schema = StructuredSchema(config);
     std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders;

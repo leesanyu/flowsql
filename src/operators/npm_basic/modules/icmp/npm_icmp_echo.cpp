@@ -31,14 +31,14 @@ NpmIcmpFamilyEchoKey<Address> MakeKey(const NpmIcmpFamilyParsed<Address>& messag
 
 }  // namespace
 
-NpmIcmpEchoTrackerV1::NpmIcmpEchoTrackerV1(NpmIcmpConfigV1 config, std::shared_ptr<INpmTaskBudget> budget)
+NpmIcmpEchoTracker::NpmIcmpEchoTracker(NpmIcmpConfig config, std::shared_ptr<INpmTaskBudget> budget)
     : config_(config), budget_(std::move(budget)) {}
 
-NpmIcmpEchoTrackerV1::~NpmIcmpEchoTrackerV1() { Abort(); }
+NpmIcmpEchoTracker::~NpmIcmpEchoTracker() { Abort(); }
 
 template <typename Address>
-bool NpmIcmpEchoTrackerV1::EchoKeyLess<Address>::operator()(const NpmIcmpFamilyEchoKey<Address>& left,
-                                                            const NpmIcmpFamilyEchoKey<Address>& right) const {
+bool NpmIcmpEchoTracker::EchoKeyLess<Address>::operator()(const NpmIcmpFamilyEchoKey<Address>& left,
+                                                          const NpmIcmpFamilyEchoKey<Address>& right) const {
     if (left.observation_domain_id != right.observation_domain_id)
         return left.observation_domain_id < right.observation_domain_id;
     const int src = std::memcmp(left.src_ip.bytes, right.src_ip.bytes, sizeof(Address));
@@ -48,15 +48,15 @@ bool NpmIcmpEchoTrackerV1::EchoKeyLess<Address>::operator()(const NpmIcmpFamilyE
     return std::tie(left.identifier, left.sequence) < std::tie(right.identifier, right.sequence);
 }
 
-uint64_t NpmIcmpEchoTrackerV1::AllocateEventId() noexcept {
+uint64_t NpmIcmpEchoTracker::AllocateEventId() noexcept {
     if (next_event_id_ == 0) return 0;
     return next_event_id_++;
 }
 
 template <typename Address>
-NpmIcmpFamilyEvent<Address> NpmIcmpEchoTrackerV1::MakeEchoEvent(const NpmIcmpFamilyEchoKey<Address>& key,
-                                                                const NpmIcmpPendingEchoV1& pending,
-                                                                int64_t observed_at_ns, std::string outcome) const {
+NpmIcmpFamilyEvent<Address> NpmIcmpEchoTracker::MakeEchoEvent(const NpmIcmpFamilyEchoKey<Address>& key,
+                                                              const NpmIcmpPendingEcho& pending, int64_t observed_at_ns,
+                                                              std::string outcome) const {
     NpmIcmpFamilyEvent<Address> event;
     event.entity_instance_id = pending.entity_instance_id;
     event.observed_at = observed_at_ns;
@@ -73,20 +73,19 @@ NpmIcmpFamilyEvent<Address> NpmIcmpEchoTrackerV1::MakeEchoEvent(const NpmIcmpFam
 }
 
 template <typename Address>
-void NpmIcmpEchoTrackerV1::Erase(const NpmIcmpFamilyEchoKey<Address>& key,
-                                 const NpmIcmpPendingEchoV1& pending) noexcept {
+void NpmIcmpEchoTracker::Erase(const NpmIcmpFamilyEchoKey<Address>& key, const NpmIcmpPendingEcho& pending) noexcept {
     deadlines_.erase({pending.deadline_ns, pending.entity_instance_id});
     Pending<Address>().erase(key);
     if (budget_) budget_->Release(NpmBudgetCategory::kModuleState, PendingCharge<Address>());
 }
 
 template <typename Address>
-int NpmIcmpEchoTrackerV1::OnEcho(const NpmIcmpFamilyParsed<Address>& message, uint64_t observation_domain_id,
-                                 int64_t captured_at_ns, const Emit& emit) {
+int NpmIcmpEchoTracker::OnEcho(const NpmIcmpFamilyParsed<Address>& message, uint64_t observation_domain_id,
+                               int64_t captured_at_ns, const Emit& emit) {
     if (finished_ || !emit ||
-        (message.kind != NpmIcmpMessageKindV1::kEchoRequest && message.kind != NpmIcmpMessageKindV1::kEchoReply))
+        (message.kind != NpmIcmpMessageKind::kEchoRequest && message.kind != NpmIcmpMessageKind::kEchoReply))
         return EINVAL;
-    const bool request = message.kind == NpmIcmpMessageKindV1::kEchoRequest;
+    const bool request = message.kind == NpmIcmpMessageKind::kEchoRequest;
     const auto key = MakeKey(message, observation_domain_id, !request);
     if (message.outer_truncated) {
         const uint64_t id = AllocateEventId();
@@ -124,7 +123,7 @@ int NpmIcmpEchoTrackerV1::OnEcho(const NpmIcmpFamilyParsed<Address>& message, ui
         if (!budget_ ||
             budget_->Reserve(NpmBudgetCategory::kModuleState, PendingCharge<Address>()) != NpmBudgetError::kNone)
             return ENOMEM;
-        NpmIcmpPendingEchoV1 pending;
+        NpmIcmpPendingEcho pending;
         pending.entity_instance_id = AllocateEventId();
         if (pending.entity_instance_id == 0) {
             budget_->Release(NpmBudgetCategory::kModuleState, PendingCharge<Address>());
@@ -173,7 +172,7 @@ int NpmIcmpEchoTrackerV1::OnEcho(const NpmIcmpFamilyParsed<Address>& message, ui
     return result;
 }
 
-int NpmIcmpEchoTrackerV1::EmitDeadline(int64_t observed_at_ns, const char* reason, const Emit& emit) {
+int NpmIcmpEchoTracker::EmitDeadline(int64_t observed_at_ns, const char* reason, const Emit& emit) {
     const auto target = deadlines_.begin()->second;
     return std::visit(
         [&](const auto* key) {
@@ -190,7 +189,7 @@ int NpmIcmpEchoTrackerV1::EmitDeadline(int64_t observed_at_ns, const char* reaso
         target);
 }
 
-int NpmIcmpEchoTrackerV1::OnTime(std::optional<int64_t> watermark_ns, const Emit& emit) {
+int NpmIcmpEchoTracker::OnTime(std::optional<int64_t> watermark_ns, const Emit& emit) {
     if (finished_ || !watermark_ns || (last_watermark_ns_ && *watermark_ns <= *last_watermark_ns_)) return 0;
     if (!emit) return EINVAL;
     last_watermark_ns_ = watermark_ns;
@@ -201,7 +200,7 @@ int NpmIcmpEchoTrackerV1::OnTime(std::optional<int64_t> watermark_ns, const Emit
     return 0;
 }
 
-int NpmIcmpEchoTrackerV1::Finish(int64_t observed_at_ns, const Emit& emit) {
+int NpmIcmpEchoTracker::Finish(int64_t observed_at_ns, const Emit& emit) {
     if (finished_) return 0;
     if (!emit) return EINVAL;
     while (!deadlines_.empty()) {
@@ -212,7 +211,7 @@ int NpmIcmpEchoTrackerV1::Finish(int64_t observed_at_ns, const Emit& emit) {
     return 0;
 }
 
-void NpmIcmpEchoTrackerV1::Abort() noexcept {
+void NpmIcmpEchoTracker::Abort() noexcept {
     if (budget_) {
         budget_->Release(NpmBudgetCategory::kModuleState, pending4_.size() * PendingCharge<network::IPv4Address>());
         budget_->Release(NpmBudgetCategory::kModuleState, pending6_.size() * PendingCharge<network::IPv6Address>());
@@ -223,12 +222,12 @@ void NpmIcmpEchoTrackerV1::Abort() noexcept {
     finished_ = true;
 }
 
-std::optional<int64_t> NpmIcmpEchoTrackerV1::NextEventDeadlineNs() const {
+std::optional<int64_t> NpmIcmpEchoTracker::NextEventDeadlineNs() const {
     if (deadlines_.empty()) return {};
     return deadlines_.begin()->first.first;
 }
 
-template int NpmIcmpEchoTrackerV1::OnEcho(const NpmIcmpParsed4&, uint64_t, int64_t, const Emit&);
-template int NpmIcmpEchoTrackerV1::OnEcho(const NpmIcmpParsed6&, uint64_t, int64_t, const Emit&);
+template int NpmIcmpEchoTracker::OnEcho(const NpmIcmpParsed4&, uint64_t, int64_t, const Emit&);
+template int NpmIcmpEchoTracker::OnEcho(const NpmIcmpParsed6&, uint64_t, int64_t, const Emit&);
 
 }  // namespace flowsql::npm

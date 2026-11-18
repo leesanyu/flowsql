@@ -5,23 +5,19 @@
 #include <rapidjson/schema.h>
 #include <common/channel_dataset.hpp>
 #include <set>
-#include "data_semantics_api_schema.h"
+#include "compiled_semantics_schema.h"
 
 namespace flowsql::channels::config {
 namespace {
 using namespace dataset;
-int Validate(const std::string& key, const Value& v, DataSemanticsErrorV1* e) {
-    Json schema;
-    schema.Parse(kSemanticsApiSchema);
-    Set(schema, "$ref", "#/%24defs/" + key, schema.GetAllocator());
-    rapidjson::SchemaDocument compiled(schema);
-    rapidjson::SchemaValidator validator(compiled);
+int Validate(const std::string& key, const Value& v, DataSemanticsError* e) {
+    rapidjson::SchemaValidator validator(CompiledSemanticsApiSchema(key));
     if (v.Accept(validator)) return 0;
     rapidjson::StringBuffer path;
     validator.GetInvalidDocumentPointer().Stringify(path);
     return Fail(e, "INVALID_DOCUMENT", "payload does not match " + key, path.GetString());
 }
-int32_t Error(const DataSemanticsErrorV1& e, std::string& response) {
+int32_t Error(const DataSemanticsError& e, std::string& response) {
     Json d(rapidjson::kObjectType);
     auto& a = d.GetAllocator();
     Value v(rapidjson::kObjectType);
@@ -81,11 +77,10 @@ void Differences(const Value* binding, const Value* dictionary, const Value& sou
                  const Value& renames, Value& diffs, Value& required, Alloc& a) {
     if (Get(source, "identity_state") == "unknown") required.PushBack("identity", a);
     if (!dictionary) return;
-    const Value* old_source =
-        binding && binding->HasMember("source_snapshot") ? &(*binding)["source_snapshot"] : nullptr;
+    const Value* old_source = binding ? &(*binding)["source_snapshot"] : nullptr;
     const Value& previous_map = binding ? (*binding)["field_map"] : map;
-    if (binding && (!old_source || (*binding)["object_key"] != source["object_key"] ||
-                    (old_source && Get(*old_source, "source_revision") != Get(source, "source_revision") &&
+    if (binding && ((*binding)["object_key"] != source["object_key"] ||
+                    (Get(*old_source, "source_revision") != Get(source, "source_revision") &&
                      (*old_source)["schema_fingerprint"] == source["schema_fingerprint"] &&
                      (*old_source)["producer_metadata"] == source["producer_metadata"]))) {
         Difference(diffs, required, "identity_changed", "", "", binding->operator[]("object_key"), source["object_key"],
@@ -131,11 +126,11 @@ bool Has(const Value& values, const std::string& s) {
         if (Text(x) == s) return true;
     return false;
 }
-int LoadDictionary(DataSemanticsRegistry& registry, const std::string& ref, Json* d, DataSemanticsErrorV1* e) {
+int LoadDictionary(DataSemanticsRegistry& registry, const std::string& ref, Json* d, DataSemanticsError* e) {
     SemanticsIdentity id;
     if (!ParseSemanticsReference(ref, &id) || id.kind != "dictionary")
         return Fail(e, "INVALID_REFERENCE", "exact dictionary required");
-    DataSemanticsSnapshotV1 snap;
+    DataSemanticsSnapshot snap;
     if (registry.Resolve(ref.c_str(), &snap, e)) return -1;
     d->Parse(snap.document_json->c_str());
     return 0;
@@ -144,16 +139,16 @@ int LoadDictionary(DataSemanticsRegistry& registry, const std::string& ref, Json
 int32_t ChannelDictionaryService::Control(const std::string& op, const std::string& text, std::string& response) {
     using namespace dataset;
     const auto started = std::chrono::steady_clock::now();
-    DataSemanticsErrorV1 e;
+    DataSemanticsError e;
     Json r;
     if (ParseSemanticsJson(text, &r, &e) || Validate("channels_" + op + "Request", r, &e)) return Error(e, response);
     const auto deadline =
         started + std::chrono::milliseconds(r.HasMember("timeout_ms") ? r["timeout_ms"].GetUint() : 5000);
-    ChannelDatasetSnapshotV1 snapshot;
+    ChannelDatasetSnapshot snapshot;
     const auto remaining =
         std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
     if (remaining <= 0) return Error({"SOURCE_TIMEOUT", "metadata deadline exceeded", ""}, response);
-    ChannelDatasetRequestV1 request{Encode(r["locator"]), static_cast<uint32_t>(remaining)};
+    ChannelDatasetRequest request{Encode(r["locator"]), static_cast<uint32_t>(remaining)};
     if (!describe_) return Error({"UNAVAILABLE", "dataset descriptor unavailable", ""}, response);
     if (describe_(request, &snapshot, &e)) return Error(e, response);
     if (std::chrono::steady_clock::now() >= deadline)
@@ -175,7 +170,7 @@ int32_t ChannelDictionaryService::Control(const std::string& op, const std::stri
     if (op == "describe") {
         data.AddMember("source_snapshot", Copy(source, a), a).AddMember("checked_at", Now(), a);
     } else {
-        DataSemanticsSnapshotV1 bound;
+        DataSemanticsSnapshot bound;
         Json binding, dictionary;
         const auto& key = source["object_key"];
         if (registry_.BindingLookup(Get(key, "provider_id"), Get(key, "object_id"), &bound, &e) == 0)
@@ -198,11 +193,9 @@ int32_t ChannelDictionaryService::Control(const std::string& op, const std::stri
         Value diffs(rapidjson::kArrayType), required(rapidjson::kArrayType);
         const bool known = Get(source, "schema_state") == "known";
         bool observation_trusted = false;
-        if (binding.IsObject() && binding.HasMember("source_snapshot") &&
-            registry_.ObservationTrusted(bound.exact_reference, &observation_trusted, &e))
+        if (binding.IsObject() && registry_.ObservationTrusted(bound.exact_reference, &observation_trusted, &e))
             return Error(e, response);
-        if (known && binding.IsObject() && binding.HasMember("source_snapshot") && !observation_trusted)
-            required.PushBack("observation", a);
+        if (known && binding.IsObject() && !observation_trusted) required.PushBack("observation", a);
         if (known)
             Differences(binding.IsObject() ? &binding : nullptr, dictionary.IsObject() ? &dictionary : nullptr, source,
                         map, renames, diffs, required, a);
@@ -215,7 +208,7 @@ int32_t ChannelDictionaryService::Control(const std::string& op, const std::stri
                 else if (source["producer_metadata"].HasMember("default_dictionary"))
                     candidate.CopyFrom(source["producer_metadata"]["default_dictionary"], ca);
                 else {
-                    Set(candidate, "schema_id", "flowsql.data-dictionary.v1", ca);
+                    Set(candidate, "schema_id", "flowsql.data-dictionary", ca);
                     Set(candidate, "title", Get(r["locator"], "table", Get(r["locator"], "name")), ca);
                     candidate.AddMember("entity", Value(rapidjson::kObjectType), ca)
                         .AddMember("fields", Value(rapidjson::kArrayType), ca);
@@ -286,16 +279,12 @@ int32_t ChannelDictionaryService::Control(const std::string& op, const std::stri
                 if (LoadDictionary(registry_, Get(r, "dictionary_ref"), &target, &e)) return Error(e, response);
                 Json b(rapidjson::kObjectType);
                 auto& ba = b.GetAllocator();
-                Set(b, "schema_id", "flowsql.data-binding.v2", ba);
+                Set(b, "schema_id", "flowsql.data-binding", ba);
                 Set(b, "object_label", Get(r["locator"], "table", Get(r["locator"], "name")), ba);
                 Set(b, "dictionary_ref", Get(r, "dictionary_ref"), ba);
                 b.AddMember("object_key", Copy(key, ba), ba)
                     .AddMember("field_map", Copy(r["field_map"], ba), ba)
-                    .AddMember("declared_schema",
-                               binding.IsObject() && binding.HasMember("declared_schema")
-                                   ? Copy(binding["declared_schema"], ba)
-                                   : Value(),
-                               ba)
+                    .AddMember("declared_schema", Value(), ba)
                     .AddMember("source_snapshot", Copy(source, ba), ba);
                 Value confirmation(rapidjson::kObjectType);
                 Set(confirmation, "source_revision", Get(source, "source_revision"), ba);
@@ -335,9 +324,10 @@ int32_t ChannelDictionaryService::Control(const std::string& op, const std::stri
             } else if (known && binding.IsObject()) {
                 Json check_binding;
                 check_binding.CopyFrom(binding, check_binding.GetAllocator());
-                Set(check_binding, "declared_schema", Copy(source["fields"], check_binding.GetAllocator()),
+                Set(check_binding, "source_snapshot", Copy(source, check_binding.GetAllocator()),
                     check_binding.GetAllocator());
-                check_binding.RemoveMember("source_snapshot");
+                Set(check_binding["confirmation"], "source_revision", Get(source, "source_revision"),
+                    check_binding.GetAllocator());
                 std::string check;
                 if (CheckSemanticsBinding(check_binding, dictionary, &check, &e))
                     state = "mismatch";

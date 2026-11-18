@@ -62,11 +62,10 @@ struct Trace {
     int cancels = 0;
     std::function<void()> consume;
 };
-class Consumer final : public INpmResultConsumerV1 {
+class Consumer final : public INpmResultConsumer {
  public:
     explicit Consumer(Trace& trace) : trace_(trace) {}
-    int Consume(const NpmResultContextV1&, const NpmEntityDescriptorV1& entity,
-                const arrow::RecordBatch& rows) override {
+    int Consume(const NpmResultContext&, const NpmEntityDescriptor& entity, const arrow::RecordBatch& rows) override {
         ++trace_.attempts;
         if (trace_.consume) trace_.consume();
         if (trace_.attempts == trace_.fail_at) return EIO;
@@ -118,15 +117,15 @@ struct Fixture {
         features.basic_enabled = true;
         features.session_enabled = true;
         features.observing_entity = observing;
-        std::vector<NpmEntityDescriptorV1> entities;
+        std::vector<NpmEntityDescriptor> entities;
         for (auto family : {AddressFamily::kIPv4, AddressFamily::kIPv6}) {
-            entities.push_back(NpmBasicEntityDescriptorV1(family));
-            entities.push_back(NpmSessionEntityDescriptorV1(family));
+            entities.push_back(NpmBasicEntityDescriptor(family));
+            entities.push_back(NpmSessionEntityDescriptor(family));
         }
-        std::unique_ptr<INpmResultConsumerV1> consumer;
+        std::unique_ptr<INpmResultConsumer> consumer;
         if (consuming) consumer = std::make_unique<Consumer>(trace);
         router = std::make_shared<NpmResultRouter>(std::move(entities), std::move(observing),
-                                                   NpmResultContextV1{"task", "run"}, budget, std::move(consumer),
+                                                   NpmResultContext{"task", "run"}, budget, std::move(consumer),
                                                    [](const std::function<int()>& callback) { return callback(); });
         collector = std::make_unique<NpmBasicResultCollector>(features, budget, router);
     }

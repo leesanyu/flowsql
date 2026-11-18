@@ -22,10 +22,10 @@
 #include <iostream>
 using namespace flowsql;
 using namespace flowsql::dataset;
-class Blocks final : public IBlockStreamFactory, public IBlockStreamReaderFactoryV1 {
+class Blocks final : public IBlockStreamFactory, public IBlockStreamReaderFactory {
  public:
     bool empty = false;
-    class Reader final : public IBlockStreamChannel, public IBlockStreamSchemaV1 {
+    class Reader final : public IBlockStreamChannel, public IBlockStreamSchema {
      public:
         bool empty = false, done = false;
         const char* Category() override { return "fixture"; }
@@ -57,7 +57,7 @@ class Blocks final : public IBlockStreamFactory, public IBlockStreamReaderFactor
     void List(std::function<void(const char*, const char*, IBlockStreamChannel*)> f) override {
         f("fixture", "source", &source);
     }
-    int CreateReader(const BlockStreamReaderConfigV1& c, IBlockStreamChannel** out) override {
+    int CreateReader(const BlockStreamReaderConfig& c, IBlockStreamChannel** out) override {
         *out = nullptr;
         if (!Get(c.source_category, c.source_name)) return ENOTSUP;
         auto* reader = new Reader;
@@ -76,7 +76,7 @@ int main() {
     auto* loader = PluginLoader::Single();
     Blocks blocks;
     loader->Regist(IID_BLOCK_STREAM_FACTORY, static_cast<IBlockStreamFactory*>(&blocks));
-    loader->Regist(IID_BLOCK_STREAM_READER_FACTORY_V1, static_cast<IBlockStreamReaderFactoryV1*>(&blocks));
+    loader->Regist(IID_BLOCK_STREAM_READER_FACTORY, static_cast<IBlockStreamReaderFactory*>(&blocks));
     struct Owner {
         PluginLoader* loader;
         ~Owner() { loader->Unload(); }
@@ -144,21 +144,21 @@ int main() {
         assert(!channels->Get((std::string("drift_") + phase).c_str()));
     }
     // Time callbacks are checked at the same boundary, including THEN wrappers.
-    class TimeDrift final : public IBlockTransformTaskV2 {
+    class TimeDrift final : public IBlockTransformTask, public IBlockTransformTimeDrivenTask {
      public:
         int Open(std::shared_ptr<arrow::Schema> in, std::shared_ptr<arrow::Schema>* out) override {
             *out = in;
             return 0;
         }
         int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>&, int64_t,
-                         std::vector<BlockTransformOutputV1>*) override {
+                         std::vector<BlockTransformOutput>*) override {
             return 0;
         }
-        int Flush(std::vector<BlockTransformOutputV1>*) override { return 0; }
+        int Flush(std::vector<BlockTransformOutput>*) override { return 0; }
         void Cancel() override {}
         std::string LastError() const override { return {}; }
-        int GetTimeDriveState(BlockTransformTimeDriveStateV1*) override { return 0; }
-        int OnTime(const BlockTransformTimeEventV1&, std::vector<BlockTransformOutputV1>* out) override {
+        int GetTimeDriveState(BlockTransformTimeDriveState*) override { return 0; }
+        int OnTime(const BlockTransformTimeEvent&, std::vector<BlockTransformOutput>* out) override {
             arrow::StringBuilder builder;
             out->push_back({arrow::RecordBatch::Make(arrow::schema({arrow::field("x", arrow::utf8())}), 0,
                                                      {builder.Finish().ValueOrDie()}),
@@ -168,16 +168,16 @@ int main() {
     } time_drift;
     auto state = std::make_shared<contracts::BlockInvocation>();
     state->querier = loader;
-    DataSemanticsErrorV1 time_error;
-    auto* contract_catalog = static_cast<IOperatorContractCatalogV1*>(loader->First(IID_OPERATOR_CONTRACT_CATALOG_V1));
+    DataSemanticsError time_error;
+    auto* contract_catalog = static_cast<IOperatorContractCatalog*>(loader->First(IID_OPERATOR_CONTRACT_CATALOG));
     assert(contract_catalog &&
            contract_catalog->Lookup("contractdemo", "block", &state->invocation.component, &time_error) == 0);
     Set(state->parameters, "column", "x", state->parameters.GetAllocator());
     contracts::CheckedBlockTask guarded(&time_drift, nullptr, state);
     std::shared_ptr<arrow::Schema> time_schema;
     assert(guarded.Open(arrow::schema({arrow::field("x", arrow::int64())}), &time_schema) == 0);
-    std::vector<BlockTransformOutputV1> time_outputs;
-    BlockTransformTimeEventV1 event{};
+    std::vector<BlockTransformOutput> time_outputs;
+    BlockTransformTimeEvent event{};
     assert(guarded.OnTime(event, &time_outputs) != 0 && state->error.code == "OUTPUT_SCHEMA_MISMATCH" &&
            time_outputs.empty());
     blocks.empty = true;
@@ -221,7 +221,7 @@ int main() {
         Set(locator, "name", "example", locator.GetAllocator());
         Set(locator, "table", table, locator.GetAllocator());
         Set(request, "locator", Copy(locator, a), a);
-        DataSemanticsErrorV1 error;
+        DataSemanticsError error;
         assert(contracts::Control(loader, "channels/preview", request, &preview, &error) == 0);
         auto& dictionary = preview["data"]["dictionary"];
         for (auto& field : dictionary["fields"].GetArray()) {
@@ -398,7 +398,7 @@ int main() {
     auto& pa = publish.GetAllocator();
     Set(publish, "name", "block_input", pa);
     Set(publish, "format", "json", pa);
-    Set(publish, "schema_id", "flowsql.baseliner.task.v1", pa);
+    Set(publish, "schema_id", "flowsql.baseliner.task", pa);
     Set(publish, "content_base64", encoded, pa);
     publish.AddMember("expected_current_revision", 0, pa);
     bool published = false;

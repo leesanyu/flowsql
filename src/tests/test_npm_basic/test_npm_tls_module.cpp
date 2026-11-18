@@ -34,14 +34,14 @@ class Budget final : public npm::INpmTaskBudget {
     uint64_t limit = 1024 * 1024;
 };
 
-class Emitter final : public npm::INpmResultEmitterV1 {
+class Emitter final : public npm::INpmResultEmitter {
  public:
     int Emit(std::string_view entity, const arrow::RecordBatch& rows) override {
         assert(entity ==
                    (family == flowsql::packet::AddressFamily::kIPv4 ? "tls_handshake_ipv4" : "tls_handshake_ipv6") &&
                rows.num_rows() == 1);
-        assert(npm::ValidateNpmEntityRowsV1("tls", npm::NpmTlsHandshakeEntityDescriptorV1(family), rows).error ==
-               npm::NpmProtocolContractErrorV1::kNone);
+        assert(npm::ValidateNpmEntityRows("tls", npm::NpmTlsHandshakeEntityDescriptor(family), rows).error ==
+               npm::NpmProtocolContractError::kNone);
         ++calls;
         auto ids = std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("entity_instance_id"));
         auto domains = std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("observation_domain_id"));
@@ -64,13 +64,13 @@ class Emitter final : public npm::INpmResultEmitterV1 {
     std::string outcome;
 };
 
-class Cursor final : public npm::INpmTcpStreamCursorV1 {
+class Cursor final : public npm::INpmTcpStreamCursor {
  public:
     explicit Cursor(std::string bytes, int64_t time, uint64_t begin)
         : bytes_(std::move(bytes)), time_(time), begin_(begin) {}
-    bool Peek(npm::NpmTcpStreamEventV1* event) const override {
+    bool Peek(npm::NpmTcpStreamEvent* event) const override {
         if (offset_ == bytes_.size()) return false;
-        event->kind = npm::NpmTcpStreamEventKindV1::kData;
+        event->kind = npm::NpmTcpStreamEventKind::kData;
         event->begin = begin_ + offset_;
         event->end = begin_ + bytes_.size();
         event->bytes = {reinterpret_cast<const uint8_t*>(bytes_.data() + offset_), bytes_.size() - offset_};
@@ -156,12 +156,12 @@ KeyType Key() {
     return key;
 }
 
-int Send(npm::NpmTlsProtocolModuleV1* module, const npm::NpmSessionView& session, npm::NpmPacketDirection direction,
+int Send(npm::NpmTlsProtocolModule* module, const npm::NpmSessionView& session, npm::NpmPacketDirection direction,
          std::string bytes, int64_t time, Emitter* emitter, uint64_t begin = 0) {
-    npm::NpmTcpStreamContextV1 context;
+    npm::NpmTcpStreamContext context;
     context.session = &session;
     context.direction = direction;
-    context.origin = npm::NpmTcpStreamOriginV1::kSyn;
+    context.origin = npm::NpmTcpStreamOrigin::kSyn;
     context.observed_at_ns = time;
     Cursor cursor(std::move(bytes), time, begin);
     const int error = module->OnTcpStreamReadable(context, cursor, *emitter);
@@ -172,7 +172,7 @@ int Send(npm::NpmTlsProtocolModuleV1* module, const npm::NpmSessionView& session
 template <typename KeyType>
 void TestModule() {
     auto budget = std::make_shared<Budget>();
-    npm::NpmTlsConfigV1 config;
+    npm::NpmTlsConfig config;
     config.primary_label_ids = {1001};
     auto key = Key<KeyType>();
     npm::NpmSessionView session;
@@ -181,10 +181,10 @@ void TestModule() {
     Emitter emitter;
     emitter.family =
         sizeof(key.a_ip) == 4 ? flowsql::packet::AddressFamily::kIPv4 : flowsql::packet::AddressFamily::kIPv6;
-    npm::NpmTlsProtocolModuleV1 module(config, budget);
-    npm::NpmInputEventV1 input;
+    npm::NpmTlsProtocolModule module(config, budget);
+    npm::NpmInputEvent input;
     npm::NpmPacketView packet;
-    input.kind = npm::NpmInputKindV1::kTcpPacket;
+    input.kind = npm::NpmInputKind::kTcpPacket;
     input.session = &session;
     input.transport = &packet;
     assert(module.OnInput(input, emitter) == 0 && budget->used == 0);
@@ -206,46 +206,46 @@ void TestModule() {
     assert(Send(&module, session, npm::NpmPacketDirection::kBToA, Record(true), 200, &emitter) == 0);
     assert(emitter.calls == 1 && emitter.outcome == "server_hello_observed");
     assert(!module.NextEventDeadlineNs() && budget->used == sizeof(npm::NpmTransactionIdentity) +
-                                                                sizeof(std::unique_ptr<npm::NpmTlsHandshakeTrackerV1>) +
+                                                                sizeof(std::unique_ptr<npm::NpmTlsHandshakeTracker>) +
                                                                 sizeof(uint64_t) + 6 * sizeof(void*) + sizeof(KeyType) +
                                                                 key.input_namespace.capacity() + 1);
     assert(module.OnSessionEnd(session, npm::NpmSessionEndReason::kEof, 300, emitter) == 0);
     assert(module.Finish(300, emitter) == 0 && budget->used == 0);
 
     budget->limit = 1;
-    npm::NpmTlsProtocolModuleV1 rejected(config, budget);
+    npm::NpmTlsProtocolModule rejected(config, budget);
     assert(Send(&rejected, session, npm::NpmPacketDirection::kAToB, Record(false), 400, &emitter) == ENOSPC);
     rejected.Abort();
     assert(budget->used == 0);
 
     budget->limit = 1024 * 1024;
-    npm::NpmTlsProtocolModuleV1 failing(config, budget);
+    npm::NpmTlsProtocolModule failing(config, budget);
     emitter.error = EIO;
     assert(Send(&failing, session, npm::NpmPacketDirection::kAToB, Record(false), 500, &emitter) == 0);
     assert(Send(&failing, session, npm::NpmPacketDirection::kBToA, Record(true), 600, &emitter) == EIO);
     failing.Abort();
     assert(budget->used == 0);
 
-    npm::NpmTlsProtocolModuleV1 cancelled(config, budget);
+    npm::NpmTlsProtocolModule cancelled(config, budget);
     emitter.error = 0;
     assert(Send(&cancelled, session, npm::NpmPacketDirection::kAToB, Record(false), 700, &emitter) == 0);
     cancelled.Abort();
     assert(budget->used == 0);
 
-    npm::NpmTlsProtocolModuleV1 non_tls(config, budget);
+    npm::NpmTlsProtocolModule non_tls(config, budget);
     const int prior_calls = emitter.calls;
     assert(Send(&non_tls, session, npm::NpmPacketDirection::kAToB, "GET /", 800, &emitter) == 0);
     assert(budget->used > 512);
     assert(Send(&non_tls, session, npm::NpmPacketDirection::kBToA, "GET /", 801, &emitter) == 0);
-    assert(budget->used == sizeof(npm::NpmTransactionIdentity) +
-                               sizeof(std::unique_ptr<npm::NpmTlsHandshakeTrackerV1>) + sizeof(uint64_t) +
-                               6 * sizeof(void*) + sizeof(KeyType) + key.input_namespace.capacity() + 1 &&
+    assert(budget->used == sizeof(npm::NpmTransactionIdentity) + sizeof(std::unique_ptr<npm::NpmTlsHandshakeTracker>) +
+                               sizeof(uint64_t) + 6 * sizeof(void*) + sizeof(KeyType) + key.input_namespace.capacity() +
+                               1 &&
            emitter.calls == prior_calls);
     assert(Send(&non_tls, session, npm::NpmPacketDirection::kAToB, std::string(1024 * 1024, 'x'), 802, &emitter, 5) ==
            0);
-    assert(budget->used == sizeof(npm::NpmTransactionIdentity) +
-                               sizeof(std::unique_ptr<npm::NpmTlsHandshakeTrackerV1>) + sizeof(uint64_t) +
-                               6 * sizeof(void*) + sizeof(KeyType) + key.input_namespace.capacity() + 1 &&
+    assert(budget->used == sizeof(npm::NpmTransactionIdentity) + sizeof(std::unique_ptr<npm::NpmTlsHandshakeTracker>) +
+                               sizeof(uint64_t) + 6 * sizeof(void*) + sizeof(KeyType) + key.input_namespace.capacity() +
+                               1 &&
            emitter.calls == prior_calls);
     assert(non_tls.OnSessionEnd(session, npm::NpmSessionEndReason::kEof, 803, emitter) == 0);
     assert(non_tls.Finish(803, emitter) == 0 && budget->used == 0 && emitter.calls == prior_calls);

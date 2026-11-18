@@ -7,7 +7,7 @@
 #include <iostream>
 #include <stdexcept>
 using namespace flowsql;
-struct Source final : IBlockStreamChannel, IBlockStreamAcknowledgementV1 {
+struct Source final : IBlockStreamChannel, IBlockStreamAcknowledgement {
     std::shared_ptr<arrow::RecordBatch> batch;
     int polls = 0, acknowledges = 0, releases = 0, ack_error = 0;
     bool ack_throws = false;
@@ -40,7 +40,7 @@ struct Source final : IBlockStreamChannel, IBlockStreamAcknowledgementV1 {
     void Cancel() override {}
     bool IsFinished() const override { return polls > 1; }
 };
-struct Transform final : IBlockTransformTaskV1 {
+struct Transform final : IBlockTransformTask {
     Source* source;
     int status = 0;
     bool fail = false;
@@ -50,13 +50,13 @@ struct Transform final : IBlockTransformTaskV1 {
         return 0;
     }
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t,
-                     std::vector<BlockTransformOutputV1>* outputs) override {
+                     std::vector<BlockTransformOutput>* outputs) override {
         source->operations.push_back("process");
         if (fail) return EIO;
         outputs->push_back({input, 0});
         return status;
     }
-    int Flush(std::vector<BlockTransformOutputV1>*) override { return 0; }
+    int Flush(std::vector<BlockTransformOutput>*) override { return 0; }
     void Cancel() override {}
     std::string LastError() const override { return "failure"; }
 };
@@ -77,7 +77,7 @@ int main() {
         config.source = &source;
         config.source_schema = schema;
         config.transform = &transform;
-        config.output_consumer = [&](const BlockTransformOutputV1&) {
+        config.output_consumer = [&](const BlockTransformOutput&) {
             source.operations.push_back("deliver");
             assert(source.acknowledges == 0);
             return mode == 2 ? EIO : 0;

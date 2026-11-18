@@ -25,7 +25,7 @@
 
 namespace {
 
-constexpr const char* kSchemaId = "flowsql.io/flow-labeling/v1alpha1";
+constexpr const char* kSchemaId = "flowsql.io/flow-labeling";
 constexpr uint64_t kSnapshotLimitBytes = 8ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kMebibyte = 1024ULL * 1024ULL;
 constexpr uint32_t kBatchSize = 256;
@@ -42,7 +42,7 @@ void Require(bool condition, std::string_view message) {
 }
 
 std::string BuildConfig(const BenchmarkCase& benchmark) {
-    std::string yaml = R"(api_version: flowsql.io/flow-labeling/v1alpha1
+    std::string yaml = R"(api_version: flowsql.io/flow-labeling
 kind: FlowLabelingSet
 spec:
   engine:
@@ -88,9 +88,9 @@ flowsql::ConfigChannelSnapshot MakeSnapshot(std::string content) {
     return snapshot;
 }
 
-flowsql::FlowLabelingCompileRequestV1 MakeRequest(const flowsql::ConfigChannelSnapshot* snapshot,
-                                                  uint64_t reserved_bytes) {
-    flowsql::FlowLabelingCompileRequestV1 request;
+flowsql::FlowLabelingCompileRequest MakeRequest(const flowsql::ConfigChannelSnapshot* snapshot,
+                                                uint64_t reserved_bytes) {
+    flowsql::FlowLabelingCompileRequest request;
     request.snapshot = snapshot;
     request.reserved_module_state_bytes = reserved_bytes;
     request.max_labels = 10000;
@@ -117,8 +117,8 @@ uint64_t PeakRssKiB() {
     return getrusage(RUSAGE_SELF, &usage) == 0 ? static_cast<uint64_t>(usage.ru_maxrss) : 0;
 }
 
-std::vector<flowsql::FlowLabelFactsV1> MakeFacts(uint32_t logical_rules) {
-    std::vector<flowsql::FlowLabelFactsV1> facts(kBatchSize);
+std::vector<flowsql::FlowLabelFacts> MakeFacts(uint32_t logical_rules) {
+    std::vector<flowsql::FlowLabelFacts> facts(kBatchSize);
     for (uint32_t index = 0; index < kBatchSize; ++index) {
         facts[index].observation_domain_id = (index % logical_rules) + 1U;
         facts[index].source.port = 443;
@@ -129,7 +129,7 @@ std::vector<flowsql::FlowLabelFactsV1> MakeFacts(uint32_t logical_rules) {
 
 int RunCase(const char* plugin_path, const BenchmarkCase& benchmark) {
     flowsql::PluginLoader* loader = flowsql::PluginLoader::Single();
-    flowsql::IFlowLabelMatcherV1* matcher = nullptr;
+    flowsql::IFlowLabelMatcher* matcher = nullptr;
     bool loaded = false;
     try {
         const uint64_t reserved_bytes = static_cast<uint64_t>(benchmark.reserved_mib) * kMebibyte;
@@ -146,10 +146,10 @@ int RunCase(const char* plugin_path, const BenchmarkCase& benchmark) {
         loaded = true;
         Require(loader->StartAll() == 0, "Flow Labeling plugin start failed");
         auto* provider =
-            static_cast<flowsql::IFlowLabelingProviderV1*>(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER_V1));
+            static_cast<flowsql::IFlowLabelingProvider*>(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER));
         Require(provider != nullptr, "Flow Labeling provider interface is unavailable");
 
-        flowsql::FlowLabelingDiagnosticV1 diagnostic;
+        flowsql::FlowLabelingDiagnostic diagnostic;
         const auto request = MakeRequest(&snapshot, reserved_bytes);
         const auto build_start = std::chrono::steady_clock::now();
         const auto build_status = provider->CreateMatcher(request, &matcher, &diagnostic);
@@ -157,12 +157,12 @@ int RunCase(const char* plugin_path, const BenchmarkCase& benchmark) {
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - build_start).count();
         const uint64_t rss_after_build_kib = ReadStatusKiB("VmRSS:");
         if (!benchmark.expect_success) {
-            Require(build_status == flowsql::FlowLabelingErrorV1::kBudgetExceeded,
+            Require(build_status == flowsql::FlowLabelingError::kBudgetExceeded,
                     "expected matcher budget rejection did not occur");
             Require(matcher == nullptr, "failed matcher build published a lease");
             Require(diagnostic.path != nullptr && std::string_view(diagnostic.path) == "/spec/engine/max_runtime_bytes",
                     "budget rejection returned an unexpected diagnostic path");
-        } else if (build_status != flowsql::FlowLabelingErrorV1::kNone) {
+        } else if (build_status != flowsql::FlowLabelingError::kNone) {
             throw std::runtime_error("matcher build failed with error " +
                                      std::to_string(static_cast<int>(build_status)) + " at " +
                                      (diagnostic.path ? diagnostic.path : "<none>") + ": " +
@@ -180,7 +180,7 @@ int RunCase(const char* plugin_path, const BenchmarkCase& benchmark) {
                     "classification warm-up failed");
             for (uint32_t label : labels) Require(label == 1, "forward match result is incorrect");
 
-            flowsql::FlowLabelFactsV1 reverse;
+            flowsql::FlowLabelFacts reverse;
             reverse.observation_domain_id = 1;
             reverse.destination.port = 443;
             reverse.destination.port_valid = 1;
@@ -188,7 +188,7 @@ int RunCase(const char* plugin_path, const BenchmarkCase& benchmark) {
             Require(matcher->ClassifyBatch(&reverse, 1, &reverse_label) == 0 && reverse_label == 1,
                     "reverse match result is incorrect");
 
-            flowsql::FlowLabelFactsV1 unmatched;
+            flowsql::FlowLabelFacts unmatched;
             unmatched.observation_domain_id = static_cast<uint64_t>(benchmark.logical_rules) + 1U;
             unmatched.source.port = 443;
             unmatched.source.port_valid = 1;
@@ -233,7 +233,7 @@ int RunCase(const char* plugin_path, const BenchmarkCase& benchmark) {
             static_cast<int64_t>(rss_after_build_kib) - static_cast<int64_t>(rss_before_build_kib);
         std::cout << "exact_observation_domain_asymmetric_port," << benchmark.logical_rules << ',' << physical_rules
                   << ',' << config_bytes << ',' << reserved_bytes << ',' << runtime_bytes << ','
-                  << (build_status == flowsql::FlowLabelingErrorV1::kNone ? "success" : "budget_exceeded") << ','
+                  << (build_status == flowsql::FlowLabelingError::kNone ? "success" : "budget_exceeded") << ','
                   << static_cast<int>(build_status) << ',' << diagnostic_path << ',' << std::fixed
                   << std::setprecision(3) << build_ms << ',' << rss_before_config_kib << ',' << rss_before_build_kib
                   << ',' << rss_after_build_kib << ',' << rss_build_delta_kib << ',' << rss_after_release_kib << ','

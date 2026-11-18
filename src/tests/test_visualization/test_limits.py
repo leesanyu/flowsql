@@ -21,7 +21,7 @@ def running(output, directory, db, limits, report):
     endpoint = f'http://127.0.0.1:{port()}'
     options = dict(port=int(endpoint.rsplit(':', 1)[1]), static_dir=str(output / 'exploration'), limits=limits)
     config = directory / 'channels.yaml'
-    config.write_text('channels:\n  database_channels:\n    - type: sqlite\n      name: fixture\n      path: ' + str(db) + '\n      readonly: "true"\n')
+    config.write_text('channels:\n  database_channels:\n    - type: sqlite\n      name: fixture\n      dataset_instance_id: exploration-limits-fixture\n      path: ' + str(db) + '\n      readonly: "true"\n')
     plugins = f'{output}/libflowsql_database.so:config_file={config},{output}/libflowsql_visualization.so'
     env = dict(os.environ, LD_LIBRARY_PATH=str(output) + ':' + os.environ.get('LD_LIBRARY_PATH', ''))
     with report.open('w+') as log:

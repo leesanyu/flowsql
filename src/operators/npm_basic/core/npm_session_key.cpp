@@ -70,7 +70,7 @@ NpmSessionPacketError ValidateIpv6Fragments(const packet::PacketView& packet,
 }
 
 void PopulateLabelEndpoint(const network::EthernetAddress& mac, bool mac_valid, const uint8_t* ip, uint16_t port,
-                           FlowLabelEndpointFactsV1* output) {
+                           FlowLabelEndpointFacts* output) {
     if (mac_valid) {
         std::memcpy(output->mac, mac.bytes, sizeof(output->mac));
         output->mac_valid = 1;
@@ -96,7 +96,7 @@ uint16_t VlanTpid(const packet::PacketView& packet, const packet::PacketFamilyLa
 }
 
 void PopulateLabelVlans(const packet::PacketView& packet, const packet::PacketFamilyLayerView& layer,
-                        uint8_t network_index, FlowLabelFactsV1* output) {
+                        uint8_t network_index, FlowLabelFacts* output) {
     size_t fact_index = 0;
     for (uint8_t index = 0; index < network_index && fact_index < 2; ++index) {
         if (layer.layers[index].kind != static_cast<uint16_t>(eLayer::VLAN)) continue;
@@ -192,7 +192,7 @@ NpmSessionPacketError ValidateNetworkRange(const NpmObservationDomainLookup& dom
 }  // namespace
 
 NpmSessionPacketError BuildNpmControlInput(const NpmObservationDomainLookup& domains, const packet::PacketView& packet,
-                                           packet::PacketFamilyLayerView& layer, NpmInputEventV1* output) {
+                                           packet::PacketFamilyLayerView& layer, NpmInputEvent* output) {
     if (!output) return NpmSessionPacketError::kNullOutput;
     NetworkRange range;
     auto error = ValidateNetworkRange(domains, packet, layer, &range);
@@ -239,8 +239,8 @@ NpmSessionPacketError BuildNpmControlInput(const NpmObservationDomainLookup& dom
             return NpmSessionPacketError::kInvalidLayerSelection;
     }
     layer.transport_protocol = expected;
-    NpmInputEventV1 next;
-    next.kind = NpmInputKindV1::kControlPacket;
+    NpmInputEvent next;
+    next.kind = NpmInputKind::kControlPacket;
     next.observation_domain_id = range.domain;
     next.packet = packet;
     next.layer = &layer;

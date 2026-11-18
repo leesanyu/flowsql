@@ -11,9 +11,9 @@
 #include <memory>
 namespace flowsql::database {
 namespace {
-using Code = DatabaseAtomicCodeV1;
-using Status = DatabaseAtomicStatusV1;
-using Outcome = DatabaseCommitOutcomeV1;
+using Code = DatabaseAtomicCode;
+using Status = DatabaseAtomicStatus;
+using Outcome = DatabaseCommitOutcome;
 class MaterializedReader final : public IBatchReader {
  public:
     MaterializedReader(std::shared_ptr<arrow::Schema> schema, std::shared_ptr<arrow::RecordBatch> batch,
@@ -62,7 +62,7 @@ class MaterializedReader final : public IBatchReader {
     bool closed_ = false, read_ = false;
     std::string error_;
 };
-class SqliteAtomic final : public IDatabaseAtomicSessionV1 {
+class SqliteAtomic final : public IDatabaseAtomicSession {
  public:
     SqliteAtomic(sqlite3* db, uint32_t timeout) : db_(db), timeout_(timeout) {
         sqlite3_busy_handler(
@@ -90,7 +90,7 @@ class SqliteAtomic final : public IDatabaseAtomicSessionV1 {
         if (s.ok()) active_ = true;
         return s;
     }
-    Status ExecutePrepared(const char* sql, const DatabaseParameterV1* p, size_t count, uint64_t* affected) override {
+    Status ExecutePrepared(const char* sql, const DatabaseParameter* p, size_t count, uint64_t* affected) override {
         if (affected) *affected = 0;
         if (!affected || !active_) return {Code::kInvalidArgument, "transaction/affected required"};
         if (auto s = Available(); !s.ok()) return s;
@@ -106,7 +106,7 @@ class SqliteAtomic final : public IDatabaseAtomicSessionV1 {
                         : static_cast<uint64_t>(sqlite3_changes64(db_));
         return {};
     }
-    Status CreateReader(const char* sql, const DatabaseParameterV1* p, size_t count, IBatchReader** out) override {
+    Status CreateReader(const char* sql, const DatabaseParameter* p, size_t count, IBatchReader** out) override {
         if (!out) return {Code::kInvalidArgument, "reader required"};
         *out = nullptr;
         if (auto s = Available(); !s.ok()) return s;
@@ -187,7 +187,7 @@ class SqliteAtomic final : public IDatabaseAtomicSessionV1 {
         *out = sqlite3_column_int64(raw, 0);
         return {};
     }
-    DatabaseCommitResultV1 Commit() override {
+    DatabaseCommitResult Commit() override {
         if (!active_) return {{Code::kInvalidArgument, "active transaction required"}, Outcome::kRolledBack};
         if (*readers_) {
             Deadline();
@@ -256,7 +256,7 @@ class SqliteAtomic final : public IDatabaseAtomicSessionV1 {
         int rc = sqlite3_exec(db_, sql, nullptr, nullptr, nullptr);
         return rc == SQLITE_OK ? Status{} : Error(rc);
     }
-    Status Prepare(const char* sql, const DatabaseParameterV1* p, size_t count, sqlite3_stmt** out) {
+    Status Prepare(const char* sql, const DatabaseParameter* p, size_t count, sqlite3_stmt** out) {
         if (!sql || (count && !p) || count > INT_MAX) return {Code::kInvalidArgument, "invalid parameters"};
         Deadline();
         const char* tail = nullptr;
@@ -269,26 +269,26 @@ class SqliteAtomic final : public IDatabaseAtomicSessionV1 {
             int n = i + 1;
             if (v.size > INT_MAX || (v.size && !v.data)) return {Code::kInvalidArgument, "invalid parameter size"};
             switch (v.kind) {
-                case DatabaseParameterKindV1::kNull:
+                case DatabaseParameterKind::kNull:
                     rc = sqlite3_bind_null(*out, n);
                     break;
-                case DatabaseParameterKindV1::kInt64:
+                case DatabaseParameterKind::kInt64:
                     rc = sqlite3_bind_int64(*out, n, v.int64_value);
                     break;
-                case DatabaseParameterKindV1::kUInt64: {
+                case DatabaseParameterKind::kUInt64: {
                     auto text = std::to_string(v.uint64_value);
                     rc = sqlite3_bind_text(*out, n, text.c_str(), text.size(), SQLITE_TRANSIENT);
                     break;
                 }
-                case DatabaseParameterKindV1::kDouble:
+                case DatabaseParameterKind::kDouble:
                     if (!std::isfinite(v.double_value)) return {Code::kInvalidArgument, "nonfinite parameter"};
                     rc = sqlite3_bind_double(*out, n, v.double_value);
                     break;
-                case DatabaseParameterKindV1::kString:
+                case DatabaseParameterKind::kString:
                     rc = sqlite3_bind_text(*out, n, v.data ? static_cast<const char*>(v.data) : "", v.size,
                                            SQLITE_TRANSIENT);
                     break;
-                case DatabaseParameterKindV1::kBlob:
+                case DatabaseParameterKind::kBlob:
                     rc = sqlite3_bind_blob(*out, n, v.data ? v.data : "", v.size, SQLITE_TRANSIENT);
                     break;
                 default:
@@ -311,13 +311,13 @@ IBatchReader* MakeAtomicBufferedReader(std::shared_ptr<arrow::RecordBatch> batch
     auto schema = batch->schema();
     return new MaterializedReader(schema, std::move(batch), std::move(readers));
 }
-DatabaseAtomicStatusV1 MakeAtomicSession(const std::string& backend,
-                                         const std::unordered_map<std::string, std::string>& params,
-                                         const DatabaseAtomicSessionOptionsV1& options,
-                                         std::shared_ptr<IDatabaseAtomicSessionV1>* output) {
+DatabaseAtomicStatus MakeAtomicSession(const std::string& backend,
+                                       const std::unordered_map<std::string, std::string>& params,
+                                       const DatabaseAtomicSessionOptions& options,
+                                       std::shared_ptr<IDatabaseAtomicSession>* output) {
     if (!output) return {Code::kInvalidArgument, "session required"};
     output->reset();
-    if (!ValidDatabaseAtomicSessionOptionsV1(options)) return {Code::kInvalidArgument, "invalid session options"};
+    if (!ValidDatabaseAtomicSessionOptions(options)) return {Code::kInvalidArgument, "invalid session options"};
     if (backend != "sqlite") return MakeServerAtomicSession(backend, params, options, output);
     auto path = params.find("path");
     if (path == params.end() || path->second == ":memory:")

@@ -16,12 +16,12 @@ int64_t Deadline(int64_t timestamp, int64_t timeout) {
 }
 }  // namespace
 
-NpmTcpStreamDirection::NpmTcpStreamDirection(NpmTcpStreamConfigV1 config, std::shared_ptr<INpmTaskBudget> budget)
+NpmTcpStreamDirection::NpmTcpStreamDirection(NpmTcpStreamConfig config, std::shared_ptr<INpmTaskBudget> budget)
     : config_(config), budget_owner_(std::move(budget)), budget_(budget_owner_.get()) {
     Initialize(true);
 }
 
-NpmTcpStreamDirection::NpmTcpStreamDirection(NpmTcpStreamConfigV1 config, INpmTaskBudget& budget)
+NpmTcpStreamDirection::NpmTcpStreamDirection(NpmTcpStreamConfig config, INpmTaskBudget& budget)
     : config_(config), budget_(&budget) {
     Initialize(false);
 }
@@ -163,7 +163,7 @@ bool NpmTcpStreamDirection::MapSequence(uint32_t sequence, uint64_t* begin, uint
     return true;
 }
 
-void NpmTcpStreamDirection::Emit(const NpmTcpStreamEventV1& event, INpmTcpStreamEventSink& sink) {
+void NpmTcpStreamDirection::Emit(const NpmTcpStreamEvent& event, INpmTcpStreamEventSink& sink) {
     if (sink.Emit(event) != 0) throw NpmTcpStreamError::kSinkError;
     published_ = event.end;
 }
@@ -171,17 +171,17 @@ void NpmTcpStreamDirection::Emit(const NpmTcpStreamEventV1& event, INpmTcpStream
 void NpmTcpStreamDirection::Drain(bool forced, INpmTcpStreamEventSink& sink) {
     while (!ranges_.empty()) {
         auto at = ranges_.begin();
-        NpmTcpStreamEventV1 event;
+        NpmTcpStreamEvent event;
         event.begin = at->begin;
         event.end = at->end;
         if (at->data) {
-            event.kind = NpmTcpStreamEventKindV1::kData;
+            event.kind = NpmTcpStreamEventKind::kData;
             event.bytes = {at->data.get(), static_cast<size_t>(at->end - at->begin)};
             event.captured_at_ns = at->timestamp_ns;
         } else {
             if (!forced && (!watermark_ || *watermark_ < at->timestamp_ns)) break;
-            event.kind = NpmTcpStreamEventKindV1::kGap;
-            event.gap_reason = forced ? NpmTcpStreamGapReasonV1::kTermination : NpmTcpStreamGapReasonV1::kWaitExpired;
+            event.kind = NpmTcpStreamEventKind::kGap;
+            event.gap_reason = forced ? NpmTcpStreamGapReason::kTermination : NpmTcpStreamGapReason::kWaitExpired;
             event.includes_capture_truncation = at->truncated;
         }
         if (at->data) {
@@ -199,11 +199,11 @@ void NpmTcpStreamDirection::Drain(bool forced, INpmTcpStreamEventSink& sink) {
     }
 }
 
-void NpmTcpStreamDirection::Finish(NpmTcpStreamEndReasonV1 reason, std::optional<NpmSessionEndReason> session_reason,
+void NpmTcpStreamDirection::Finish(NpmTcpStreamEndReason reason, std::optional<NpmSessionEndReason> session_reason,
                                    INpmTcpStreamEventSink& sink) {
     Drain(true, sink);
-    NpmTcpStreamEventV1 event;
-    event.kind = NpmTcpStreamEventKindV1::kEnd;
+    NpmTcpStreamEvent event;
+    event.kind = NpmTcpStreamEventKind::kEnd;
     event.begin = event.end = published_;
     event.end_reason = reason;
     event.session_end_reason = session_reason;
@@ -222,33 +222,33 @@ void NpmTcpStreamDirection::Ingest(const NpmPacketView& packet, INpmTcpStreamEve
     }
     truncated_ = truncated_ || !facts.payload_complete;
     if (!tcp.syn && !tcp.fin && facts.payload_wire_bytes == 0) {
-        if (tcp.rst) Finish(NpmTcpStreamEndReasonV1::kReset, {}, sink);
+        if (tcp.rst) Finish(NpmTcpStreamEndReason::kReset, {}, sink);
         return;
     }
     const uint32_t sequence = tcp.sequence + static_cast<uint32_t>(tcp.syn);
-    if (origin_ == NpmTcpStreamOriginV1::kUnknown) {
+    if (origin_ == NpmTcpStreamOrigin::kUnknown) {
         base_sequence_ = sequence;
-        origin_ = tcp.syn ? NpmTcpStreamOriginV1::kSyn : NpmTcpStreamOriginV1::kMidstream;
+        origin_ = tcp.syn ? NpmTcpStreamOrigin::kSyn : NpmTcpStreamOrigin::kMidstream;
     }
     uint64_t begin = 0, prefix = 0;
     const uint64_t wire = facts.payload_wire_bytes;
     if (wire + static_cast<unsigned>(tcp.syn) + static_cast<unsigned>(tcp.fin) >= 0x80000000ULL ||
         !MapSequence(sequence, &begin, &prefix) || begin > std::numeric_limits<uint64_t>::max() - wire) {
-        Finish(NpmTcpStreamEndReasonV1::kSequenceAmbiguous, {}, sink);
+        Finish(NpmTcpStreamEndReason::kSequenceAmbiguous, {}, sink);
         return;
     }
     if (prefix > wire) {
-        if (tcp.rst) Finish(NpmTcpStreamEndReasonV1::kReset, {}, sink);
+        if (tcp.rst) Finish(NpmTcpStreamEndReason::kReset, {}, sink);
         return;  // Captured before the immutable origin; no negative offsets or invented prefix.
     }
     const uint64_t declared_end = begin + wire - prefix;
     const uint64_t bounded_end = fin_ ? std::min(declared_end, *fin_) : declared_end;
     if (bounded_end >= published_ && bounded_end - published_ >= 0x80000000ULL) {
-        Finish(NpmTcpStreamEndReasonV1::kSequenceAmbiguous, {}, sink);
+        Finish(NpmTcpStreamEndReason::kSequenceAmbiguous, {}, sink);
         return;
     }
     if (tcp.fin && ((fin_ && *fin_ != declared_end) || declared_end < published_)) {
-        Finish(NpmTcpStreamEndReasonV1::kSequenceAmbiguous, {}, sink);
+        Finish(NpmTcpStreamEndReason::kSequenceAmbiguous, {}, sink);
         return;
     }
     if (tcp.fin && !fin_) {
@@ -271,10 +271,10 @@ void NpmTcpStreamDirection::Ingest(const NpmPacketView& packet, INpmTcpStreamEve
     }
     if (!facts.payload_complete) MarkTruncated(std::max(captured_end, published_), end);
     if (tcp.rst) {
-        Finish(NpmTcpStreamEndReasonV1::kReset, {}, sink);
+        Finish(NpmTcpStreamEndReason::kReset, {}, sink);
     } else {
         Drain(false, sink);
-        if (fin_ && published_ == *fin_) Finish(NpmTcpStreamEndReasonV1::kFin, {}, sink);
+        if (fin_ && published_ == *fin_) Finish(NpmTcpStreamEndReason::kFin, {}, sink);
     }
 }
 
@@ -296,7 +296,7 @@ NpmTcpStreamError NpmTcpStreamDirection::AdvanceWatermark(int64_t watermark_ns, 
     watermark_ = watermark_ns;
     try {
         Drain(false, sink);
-        if (fin_ && published_ == *fin_) Finish(NpmTcpStreamEndReasonV1::kFin, {}, sink);
+        if (fin_ && published_ == *fin_) Finish(NpmTcpStreamEndReason::kFin, {}, sink);
     } catch (NpmTcpStreamError error) {
         return Fail(error);
     } catch (const std::bad_alloc&) {
@@ -305,13 +305,13 @@ NpmTcpStreamError NpmTcpStreamDirection::AdvanceWatermark(int64_t watermark_ns, 
     return error_;
 }
 
-NpmTcpStreamError NpmTcpStreamDirection::End(NpmTcpStreamEndReasonV1 reason,
+NpmTcpStreamError NpmTcpStreamDirection::End(NpmTcpStreamEndReason reason,
                                              std::optional<NpmSessionEndReason> session_reason,
                                              INpmTcpStreamEventSink& sink) {
     if (error_ != NpmTcpStreamError::kNone || ended_) return error_;
-    if (reason > NpmTcpStreamEndReasonV1::kSequenceAmbiguous ||
-        (reason == NpmTcpStreamEndReasonV1::kSessionEnd) != session_reason.has_value() ||
-        (session_reason && *session_reason > NpmSessionEndReason::kEof) || reason == NpmTcpStreamEndReasonV1::kFin) {
+    if (reason > NpmTcpStreamEndReason::kSequenceAmbiguous ||
+        (reason == NpmTcpStreamEndReason::kSessionEnd) != session_reason.has_value() ||
+        (session_reason && *session_reason > NpmSessionEndReason::kEof) || reason == NpmTcpStreamEndReason::kFin) {
         return Fail(NpmTcpStreamError::kInvalidInput);
     }
     try {

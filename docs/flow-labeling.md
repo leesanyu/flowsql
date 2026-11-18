@@ -1,7 +1,7 @@
 # Flow Labeling 构建、部署与容量指引
 
 Flow Labeling 是 Scheduler 进程内的通用会话流标签能力。它用固定 IID
-`IID_FLOW_LABELING_PROVIDER_V1` 暴露 `libflowsql_flow_labeling.so`，当前由显式启用 `labeling` 的
+`IID_FLOW_LABELING_PROVIDER` 暴露 `libflowsql_flow_labeling.so`，当前由显式启用 `labeling` 的
 `npm.basic` 任务消费。一个任务在打开时解析一个不可变 `FlowLabelingSet` 快照并创建私有 matcher；后续同一
 双向会话复用一个稳定的 `primary_label_id`。未命中值是 0，标签 ID 0 不得出现在配置中。
 
@@ -98,7 +98,7 @@ matcher。
 从 [严格配置模板](../config/flow-labeling-template.yaml) 复制并替换示例值。快照的关键元数据是：
 
 ```yaml
-api_version: flowsql.io/flow-labeling/v1alpha1
+api_version: flowsql.io/flow-labeling
 kind: FlowLabelingSet
 ```
 
@@ -107,7 +107,7 @@ priority 都会在 matcher 发布前失败。标签 ID 0 保留给未命中；�
 越高。所有规则只能是 `bidirectional`，每条非对称逻辑规则会展开成端点互换的两个物理规则，相同物理规则会
 去重。规则内多个 match 是 AND；需要 OR 时写多条逻辑规则；全局规则必须显式写 `match_all: true`。
 
-V1 只使用 NPM 唯一 Layer decode 产生的早期类型化事实：
+当前实现只使用 NPM 唯一 Layer decode 产生的早期类型化事实：
 
 - observation domain；
 - 源/目的 MAC；
@@ -118,7 +118,7 @@ V1 只使用 NPM 唯一 Layer decode 产生的早期类型化事实：
 模板列出了各字段支持的 `RANGE`、`MASK/prefix_bits` 和 `BITMASK` 形式。未出现的字段是 wildcard；带有效位的
 MAC、IP、VLAN、协议和端口会自动增加 presence 条件，因此“事实缺失”不会误匹配数值 0。
 
-V1 不消费原始 payload、DNS qname、HTTP Host、TLS SNI、NPI protocol 结果、TCP flags、TCP 重组内容或其他
+当前实现不消费原始 payload、DNS qname、HTTP Host、TLS SNI、NPI protocol 结果、TCP flags、TCP 重组内容或其他
 解析后应用字段。Protocol 是 NPI 识别维度，Label 是网络自定义归属维度；二者在同一会话结果中并列存在，互不
 改写。插件本身不解包、不建立会话、不访问 HTTP/SQLite，也不在逐包路径 Resolve 配置。
 
@@ -128,7 +128,7 @@ V1 不消费原始 payload、DNS qname、HTTP Host、TLS SNI、NPI protocol 结�
 FLOW_LABEL_B64=$(base64 -w0 config/flow-labeling-template.yaml)
 curl -sS http://127.0.0.1:8081/api/channels/config/publish \
   -H 'Content-Type: application/json' \
-  --data-binary "{\"name\":\"corp-labels\",\"expected_current_revision\":0,\"format\":\"yaml\",\"schema_id\":\"flowsql.io/flow-labeling/v1alpha1\",\"content_base64\":\"${FLOW_LABEL_B64}\",\"original_filename\":\"flow-labeling-template.yaml\",\"change_note\":\"initial labels\"}"
+  --data-binary "{\"name\":\"corp-labels\",\"expected_current_revision\":0,\"format\":\"yaml\",\"schema_id\":\"flowsql.io/flow-labeling\",\"content_base64\":\"${FLOW_LABEL_B64}\",\"original_filename\":\"flow-labeling-template.yaml\",\"change_note\":\"initial labels\"}"
 ```
 
 响应包含类似 `"exact_reference":"config.corp-labels@1"`。后续更新必须带实际

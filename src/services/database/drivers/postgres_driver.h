@@ -100,26 +100,26 @@ class PostgresResultSet : public IResultSet {
 
 class PostgresSession : public RelationDbSessionBase<PostgresTraits>,
                         public IDbSnapshotSession,
-                        public IDatabaseExplorationSessionV1 {
+                        public IDatabaseExplorationSession {
  public:
     PostgresSession(PostgresDriver* driver, PGconn* conn);
     ~PostgresSession() override;
 
     int ExecuteQuery(const char* sql, IResultSet** result) override;
     int ExecuteSql(const char* sql) override;
-    int BeginSnapshot(const DatabaseSnapshotOptionsV1& options) override;
-    int SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+    int BeginSnapshot(const DatabaseSnapshotOptions& options) override;
+    int SnapshotPage(const char* sql, const DatabaseParameter* parameters, size_t count,
                      std::shared_ptr<arrow::Schema> expected, uint32_t rows, uint64_t bytes,
                      std::shared_ptr<arrow::RecordBatch>* output) override;
     void CancelSnapshot() override;
-    int Query(const char* sql, const DatabaseParameterV1* parameters, size_t count, uint32_t rows, uint64_t bytes,
-              ExplorationResultV1* output) override;
+    int Query(const char* sql, const DatabaseParameter* parameters, size_t count, uint32_t rows, uint64_t bytes,
+              ExplorationResult* output) override;
     void Cancel() override {
         if (!snapshot_cancelled_.exchange(true)) CancelSnapshot();
     }
     std::string QueryError() const override { return last_error_; }
-    int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) override;
-    int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t parameters_per_execution,
+    int ExecutePrepared(const char* sql, const DatabaseParameter* parameters, size_t parameter_count) override;
+    int ExecutePreparedBatch(const char* sql, const DatabaseParameter* parameters, size_t parameters_per_execution,
                              size_t execution_count) override;
 
  private:

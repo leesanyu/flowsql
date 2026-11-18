@@ -35,8 +35,8 @@ const Value* NamedField(const Value& fields, const std::string& name) {
 }
 int Bind(IQuerier* querier, const Value& locator, const Value* domain, const std::string& view,
          const std::string& marker, const std::string& run_dictionary, const std::string& session_target,
-         Value* relation, Alloc& a, DataSemanticsErrorV1* error) {
-    Json request(rapidjson::kObjectType), preview;
+         Value* relation, Alloc& a, DataSemanticsError* error) {
+    Json request(rapidjson::kObjectType), preview, check;
     request.AddMember("locator", Copy(locator, request.GetAllocator()), request.GetAllocator());
     if (contracts::Control(querier, "channels/preview", request, &preview, error)) return -1;
     const auto& data = preview["data"];
@@ -46,7 +46,6 @@ int Bind(IQuerier* querier, const Value& locator, const Value* domain, const std
     const bool bound = data["binding_ref"].IsString();
     const auto& old = data["dictionary"];
     if (bound) {
-        Json check;
         if (contracts::Control(querier, "channels/check", request, &check, error)) return -1;
         const auto& metadata = source["producer_metadata"];
         const bool same_component =
@@ -83,8 +82,21 @@ int Bind(IQuerier* querier, const Value& locator, const Value* domain, const std
     // references; the ordinary editor still creates its own object-local copies.
     Json save(rapidjson::kObjectType), saved;
     auto& sa = save.GetAllocator();
+    const auto dictionary_name = "npm." + Hash(Canonical(source["object_key"]) + Canonical(dictionary));
+    const auto candidate_reference = "dictionary." + dictionary_name + "@1";
+    if (bound && Get(check["data"], "binding_ref") == Get(data, "binding_ref") &&
+        Get(data, "base_dictionary_ref") == candidate_reference && data["field_map"] == field_map) {
+        // The live source/component checks above still run for every invocation.
+        // An identical content-addressed declaration needs no new save/apply transaction.
+        relation->SetObject();
+        Set(*relation, "view", view, a);
+        relation->AddMember("locator", Copy(locator, a), a);
+        Set(*relation, "dictionary_ref", candidate_reference, a);
+        Set(*relation, "binding_ref", Get(data, "binding_ref"), a);
+        return 0;
+    }
     Set(save, "kind", "dictionary", sa);
-    Set(save, "name", "npm." + Hash(Canonical(source["object_key"]) + Canonical(dictionary)), sa);
+    Set(save, "name", dictionary_name, sa);
     save.AddMember("expected_current_revision", uint64_t{0}, sa).AddMember("document", Copy(dictionary, sa), sa);
     if (contracts::Control(querier, "save", save, &saved, error)) return -1;
     const auto exact = Get(saved["data"], "exact_reference");
@@ -118,16 +130,15 @@ int Bind(IQuerier* querier, const Value& locator, const Value* domain, const std
 }
 }  // namespace
 
-int PublishNpmResultSemantics(IQuerier* querier, const OperatorComponentContractV1& component,
+int PublishNpmResultSemantics(IQuerier* querier, const OperatorComponentContract& component,
                               const std::string& category, const std::string& name, const std::string& input_namespace,
                               const std::string& actual_result_json, std::string* context_json,
-                              DataSemanticsErrorV1* error) {
+                              DataSemanticsError* error) {
     context_json->clear();
     if (error) *error = {};
-    auto* service =
-        querier ? static_cast<IOperatorDataContractV1*>(querier->First(IID_OPERATOR_DATA_CONTRACT_V1)) : nullptr;
+    auto* service = querier ? static_cast<IOperatorDataContract*>(querier->First(IID_OPERATOR_DATA_CONTRACT)) : nullptr;
     if (!service) return Fail(error, "UNAVAILABLE", "NPM contract service unavailable");
-    OperatorContractSnapshotV1 snapshot;
+    OperatorContractSnapshot snapshot;
     if (service->Resolve(component.contract_ref.c_str(), &snapshot, error)) return -1;
     Json contract, result;
     contract.Parse(snapshot.document_json->c_str());

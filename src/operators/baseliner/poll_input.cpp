@@ -6,7 +6,7 @@
 
 namespace flowsql::baseliner {
 int PollInput::Initialize(ConfigSnapshot config, std::shared_ptr<IDatabaseChannel> source,
-                          std::string_view exact_source, const BlockInputProgressV1& restore,
+                          std::string_view exact_source, const BlockInputProgress& restore,
                           const std::map<std::string, int64_t>& pending_starts,
                           const std::map<std::string, std::string>& source_epochs) {
     if (opened_ || source_ || cancelled_ || !source || config.config.mode != Mode::kPoll ||
@@ -21,14 +21,14 @@ int PollInput::Initialize(ConfigSnapshot config, std::shared_ptr<IDatabaseChanne
         error_ = "invalid poll restore envelope";
         return -1;
     }
-    auto* capability = dynamic_cast<IDatabasePublishedSourceV1*>(source.get());
+    auto* capability = dynamic_cast<IDatabasePublishedSource*>(source.get());
     if (!capability) {
         error_ = "source lacks published progress capability";
         return -1;
     }
-    DatabaseSnapshotOptionsV1 options;
+    DatabaseSnapshotOptions options;
     options.operation_timeout_ms = config.config.persistence.operation_timeout_ms;
-    std::shared_ptr<IDatabasePublishedProgressReaderV1> reader;
+    std::shared_ptr<IDatabasePublishedProgressReader> reader;
     if (capability->CreatePublishedProgressReader(options, &reader) != 0 || !reader) {
         error_ = "cannot create published progress reader";
         return -1;
@@ -53,7 +53,7 @@ int PollInput::Initialize(ConfigSnapshot config, std::shared_ptr<IDatabaseChanne
             state.request = {d.id,    d.schema,
                              d.table, d.scope.run_ids.empty() ? "" : d.scope.run_ids[0],
                              width,   d.row_semantics == "npm_period_increment"};
-            PublishedDatasetProgressV1 latest;
+            PublishedDatasetProgress latest;
             if (progress_->ReadProgress(state.request, "", &latest) != 0) {
                 error_ = progress_->LastError();
                 return -1;
@@ -81,7 +81,7 @@ int PollInput::Initialize(ConfigSnapshot config, std::shared_ptr<IDatabaseChanne
             auto old = std::find_if(restore.datasets.begin(), restore.datasets.end(),
                                     [&](const auto& p) { return p.dataset_id == d.id; });
             if (old != restore.datasets.end()) {
-                PublishedDatasetProgressV1 saved;
+                PublishedDatasetProgress saved;
                 if (progress_->ReadProgress(state.request, old->committed_position, &saved) != 0) {
                     error_ = progress_->LastError();
                     return -1;
@@ -133,7 +133,7 @@ std::map<std::string, std::string> PollInput::SourceEpochs() const {
     for (const auto& state : states_) result.emplace(state.request.dataset_id, state.epoch);
     return result;
 }
-int PollInput::Validate(size_t dataset, const std::string& position, PublishedDatasetProgressV1* output) {
+int PollInput::Validate(size_t dataset, const std::string& position, PublishedDatasetProgress* output) {
     if (progress_->ReadProgress(states_[dataset].request, position, output) != 0) {
         error_ = progress_->LastError();
         return -1;
@@ -200,7 +200,7 @@ BlockPollEvent PollInput::PollBlock(int timeout_ms) {
                 window.sha256_hex = states_[dataset_].epoch;
                 auto created = std::make_shared<SnapshotInput>();
                 auto guard = [this](const SnapshotPage& page) {
-                    PublishedDatasetProgressV1 valid;
+                    PublishedDatasetProgress valid;
                     if (Validate(dataset_, frozen_.progress.committed_position, &valid) != 0 ||
                         valid.progress.closed_before_bucket != frozen_.progress.closed_before_bucket)
                         return -1;
@@ -239,7 +239,7 @@ BlockPollEvent PollInput::PollBlock(int timeout_ms) {
                                                             : event;
             std::atomic_store(&cycle_, std::shared_ptr<SnapshotInput>{});
         }
-        PublishedDatasetProgressV1 boundary;
+        PublishedDatasetProgress boundary;
         if (Validate(dataset_, frozen_.progress.committed_position, &boundary) != 0 ||
             boundary.progress.closed_before_bucket != frozen_.progress.closed_before_bucket)
             return Fail(error_.empty() ? "frozen publication changed before confirmation" : error_);
@@ -267,7 +267,7 @@ int PollInput::ReleaseBlock(const std::shared_ptr<arrow::RecordBatch>& block) {
     progress_readable_ = true;
     return 0;
 }
-int PollInput::ReadInputProgress(BlockInputProgressV1* output) const {
+int PollInput::ReadInputProgress(BlockInputProgress* output) const {
     // This reads the released batch's confirmed snapshot without starting another database call.
     if (!output || !progress_readable_ || outstanding_ || !error_.empty()) return -1;
     *output = {};
@@ -292,7 +292,7 @@ int PollInput::Close() {
     Cancel();
     outstanding_.reset();
     std::atomic_store(&cycle_, std::shared_ptr<SnapshotInput>{});
-    std::atomic_store(&progress_, std::shared_ptr<IDatabasePublishedProgressReaderV1>{});
+    std::atomic_store(&progress_, std::shared_ptr<IDatabasePublishedProgressReader>{});
     std::atomic_store(&selection_, std::shared_ptr<SnapshotReader>{});
     source_.reset();
     states_.clear();

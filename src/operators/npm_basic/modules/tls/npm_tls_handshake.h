@@ -8,9 +8,9 @@
 
 namespace flowsql::npm {
 
-enum class NpmTlsOutcomeV1 : uint8_t { kServerHelloObserved, kFatalAlertObserved, kIncomplete };
+enum class NpmTlsOutcome : uint8_t { kServerHelloObserved, kFatalAlertObserved, kIncomplete };
 
-enum class NpmTlsIncompleteReasonV1 : uint8_t {
+enum class NpmTlsIncompleteReason : uint8_t {
     kNone,
     kEncryptedAfterServerHello,
     kEncryptedAfterChangeCipherSpec,
@@ -31,28 +31,28 @@ enum class NpmTlsIncompleteReasonV1 : uint8_t {
     kSessionEnd,
 };
 
-struct NpmTlsHandshakeResultV1 {
-    NpmTlsHandshakeV1 handshake;
-    NpmTlsOutcomeV1 outcome = NpmTlsOutcomeV1::kIncomplete;
-    NpmTlsIncompleteReasonV1 incomplete_reason = NpmTlsIncompleteReasonV1::kNone;
+struct NpmTlsHandshakeResult {
+    NpmTlsHandshake handshake;
+    NpmTlsOutcome outcome = NpmTlsOutcome::kIncomplete;
+    NpmTlsIncompleteReason incomplete_reason = NpmTlsIncompleteReason::kNone;
     int64_t observed_at_ns = 0;
     std::optional<int64_t> server_hello_latency_ns;
     std::optional<uint8_t> alert_level;
     std::optional<uint8_t> alert_description;
 };
 
-enum class NpmTlsTrackerErrorV1 : uint8_t { kNone, kInvalidInput, kAllocationFailed };
+enum class NpmTlsTrackerError : uint8_t { kNone, kInvalidInput, kAllocationFailed };
 
 /** One session; stream views are borrowed only during Consume. A final result is moved out at most once. */
-class NpmTlsHandshakeTrackerV1 final {
+class NpmTlsHandshakeTracker final {
  public:
-    NpmTlsHandshakeTrackerV1(uint64_t session_id, NpmTlsConfigV1 config);
+    NpmTlsHandshakeTracker(uint64_t session_id, NpmTlsConfig config);
 
-    NpmTlsTrackerErrorV1 Consume(const NpmTcpStreamContextV1& context, const NpmTcpStreamEventV1& event,
-                                 std::optional<NpmTlsHandshakeResultV1>* result);
-    NpmTlsTrackerErrorV1 OnCaptureWatermark(int64_t watermark_ns, std::optional<NpmTlsHandshakeResultV1>* result);
-    NpmTlsTrackerErrorV1 OnSessionEnd(NpmSessionEndReason reason, int64_t observed_at_ns,
-                                      std::optional<NpmTlsHandshakeResultV1>* result);
+    NpmTlsTrackerError Consume(const NpmTcpStreamContext& context, const NpmTcpStreamEvent& event,
+                               std::optional<NpmTlsHandshakeResult>* result);
+    NpmTlsTrackerError OnCaptureWatermark(int64_t watermark_ns, std::optional<NpmTlsHandshakeResult>* result);
+    NpmTlsTrackerError OnSessionEnd(NpmSessionEndReason reason, int64_t observed_at_ns,
+                                    std::optional<NpmTlsHandshakeResult>* result);
     void Abort() noexcept;
     bool HasCandidate() const noexcept { return candidate_.has_value(); }
     bool Closed() const noexcept { return closed_; }
@@ -60,22 +60,22 @@ class NpmTlsHandshakeTrackerV1 final {
     std::optional<int64_t> NextEventDeadlineNs() const noexcept;
 
  private:
-    NpmTlsTrackerErrorV1 OnFramedEvent(const NpmTlsFramedEventV1& event, int64_t observed_at_ns,
-                                       std::optional<NpmTlsHandshakeResultV1>* result);
-    void Close(NpmTlsOutcomeV1 outcome, NpmTlsIncompleteReasonV1 reason, int64_t observed_at_ns,
-               std::optional<NpmTlsHandshakeResultV1>* result);
-    void Fail(NpmTlsIncompleteReasonV1 reason, int64_t observed_at_ns, std::optional<NpmTlsHandshakeResultV1>* result);
+    NpmTlsTrackerError OnFramedEvent(const NpmTlsFramedEvent& event, int64_t observed_at_ns,
+                                     std::optional<NpmTlsHandshakeResult>* result);
+    void Close(NpmTlsOutcome outcome, NpmTlsIncompleteReason reason, int64_t observed_at_ns,
+               std::optional<NpmTlsHandshakeResult>* result);
+    void Fail(NpmTlsIncompleteReason reason, int64_t observed_at_ns, std::optional<NpmTlsHandshakeResult>* result);
 
     uint64_t session_id_;
-    NpmTlsConfigV1 config_;
-    NpmTlsFramerV1 framer_;
-    std::optional<NpmTlsHandshakeV1> candidate_;
+    NpmTlsConfig config_;
+    NpmTlsFramer framer_;
+    std::optional<NpmTlsHandshake> candidate_;
     std::optional<int64_t> last_watermark_ns_;
     bool closed_ = false;
 };
 
-const char* NpmTlsOutcomeNameV1(NpmTlsOutcomeV1 outcome) noexcept;
-const char* NpmTlsIncompleteReasonNameV1(NpmTlsIncompleteReasonV1 reason) noexcept;
+const char* NpmTlsOutcomeName(NpmTlsOutcome outcome) noexcept;
+const char* NpmTlsIncompleteReasonName(NpmTlsIncompleteReason reason) noexcept;
 
 }  // namespace flowsql::npm
 

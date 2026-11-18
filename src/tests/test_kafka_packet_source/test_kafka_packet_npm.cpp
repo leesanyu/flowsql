@@ -6,6 +6,7 @@
 #include <framework/interfaces/iblock_stream_factory.h>
 #include <framework/interfaces/iblock_stream_reader.h>
 #include <framework/interfaces/iflow_labeling.h>
+#include <openssl/evp.h>
 #include <plugins/npi/packet_decoder.h>
 #include <algorithm>
 #include <atomic>
@@ -15,17 +16,8 @@
 #include "packet_test_runtime.h"
 using namespace packet_test;
 namespace {
-class Labels final : public IConfigChannelRegistryV1 {
- public:
-    int Resolve(const char* reference, ConfigChannelSnapshot* output, std::string*) override {
-        if (!reference || std::string(reference) != "config.packet-test@1" || !output) return EINVAL;
-        *output = {};
-        output->channel_name = "packet-test";
-        output->revision = 1;
-        output->format = "yaml";
-        output->schema_id = "flowsql.io/flow-labeling/v1alpha1";
-        output->sha256_hex = "frozen-packet-test-source";
-        output->content = std::make_shared<const std::string>(R"YAML(api_version: flowsql.io/flow-labeling/v1alpha1
+void PublishLabels(Runtime& runtime) {
+    const std::string content = R"YAML(api_version: flowsql.io/flow-labeling
 kind: FlowLabelingSet
 spec:
   engine:
@@ -52,14 +44,21 @@ spec:
         - field: destination_port
           min: 1
           max: 65535
-)YAML");
-        output->content_bytes = output->content->size();
-        return 0;
-    }
-};
+)YAML";
+    std::string encoded(4 * ((content.size() + 2) / 3) + 1, '\0');
+    const int size = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(encoded.data()),
+                                     reinterpret_cast<const unsigned char*>(content.data()), content.size());
+    Check(size > 0, "labels_encode");
+    encoded.resize(size);
+    auto request = Parse(
+        R"({"name":"packet-test","expected_current_revision":0,"format":"yaml","schema_id":"flowsql.io/flow-labeling"})");
+    String(request, "content_base64", encoded, request.GetAllocator());
+    const auto result = runtime.Call("/channels/config/publish", request);
+    Check(result["revision"].GetUint64() == 1, "labels_revision");
+}
 PacketSourceConfig Config() {
     return ParsePacketSourceConfig(Parse(
-        R"({"encoding":"flowsql_packet_v1","stream_id":"probe","observation_domain_id":"7","max_packets_per_batch":4096,"max_bytes_per_batch":16777216,"max_message_bytes":16777216,"inputs":[{"source_id":0,"queue_id":0,"source_name":"a"},{"source_id":1,"queue_id":0,"source_name":"b"}]})"));
+        R"({"encoding":"flowsql_packet","stream_id":"probe","observation_domain_id":"7","max_packets_per_batch":4096,"max_bytes_per_batch":16777216,"max_message_bytes":16777216,"inputs":[{"source_id":0,"queue_id":0,"source_name":"a"},{"source_id":1,"queue_id":0,"source_name":"b"}]})"));
 }
 std::vector<PacketEnvelope> Sequence() {
     PacketEnvelope e;
@@ -178,24 +177,24 @@ std::vector<PacketEnvelope> Sequence() {
     }
     Check(e.packets.size() > 20 && e.packets.size() < 4096, "pcap_count");
     for (uint32_t id = 0; id < 2; ++id) {
-        CaptureProgressV1 f;
+        CaptureProgress f;
         f.source_id = id;
         f.fact_sequence = 1;
         f.packet_observed = true;
         for (const auto& p : e.packets)
             if (p.meta.source_id == id) f.capture_time_ns = p.meta.timestamp_ns;
-        f.backlog = CaptureBacklogV1::kEmpty;
+        f.backlog = CaptureBacklog::kEmpty;
         e.progress.push_back(f);
     }
     std::vector<PacketEnvelope> polls{e};
     // Remote backlog/unknown and backwards time suspend the common candidate; explicit idle resumes it.
-    for (const auto [time, backlog] : {std::pair<int64_t, CaptureBacklogV1>{120, CaptureBacklogV1::kEmpty},
-                                       {135, CaptureBacklogV1::kPresent},
-                                       {150, CaptureBacklogV1::kEmpty},
-                                       {140, CaptureBacklogV1::kEmpty},
-                                       {180, CaptureBacklogV1::kEmpty},
-                                       {200, CaptureBacklogV1::kUnknown},
-                                       {240, CaptureBacklogV1::kEmpty}}) {
+    for (const auto [time, backlog] : {std::pair<int64_t, CaptureBacklog>{120, CaptureBacklog::kEmpty},
+                                       {135, CaptureBacklog::kPresent},
+                                       {150, CaptureBacklog::kEmpty},
+                                       {140, CaptureBacklog::kEmpty},
+                                       {180, CaptureBacklog::kEmpty},
+                                       {200, CaptureBacklog::kUnknown},
+                                       {240, CaptureBacklog::kEmpty}}) {
         auto idle = e;
         idle.packets.clear();
         idle.poll_sequence = polls.size() + 1;
@@ -214,7 +213,7 @@ struct State {
     std::atomic<size_t> released{0};
     std::atomic<size_t> permitted{1};
 };
-class Local final : public ICaptureBlockStreamReaderV2, public IBlockStreamSchemaV1 {
+class Local final : public ICaptureBlockStreamReader, public IBlockStreamSchema {
  public:
     Local(std::string name, std::vector<PacketEnvelope> polls, IProtocol* protocol, std::shared_ptr<State> state)
         : name_(std::move(name)), polls_(std::move(polls)), protocol_(protocol), state_(std::move(state)) {}
@@ -229,10 +228,10 @@ class Local final : public ICaptureBlockStreamReaderV2, public IBlockStreamSchem
     bool IsOpened() const override { return true; }
     bool IsFinished() const override { return cancelled_; }
     void Cancel() override { cancelled_ = true; }
-    int DescribeSources(CaptureSourceSetV2* sources) const override {
+    int DescribeSources(CaptureSourceSet* sources) const override {
         sources->inputs.clear();
         for (uint32_t i = 0; i < 2; ++i) {
-            CaptureQueueIdentityV1 id;
+            CaptureQueueIdentity id;
             id.source_name = i ? "b" : "a";
             id.source_id = i;
             id.generation = 900;
@@ -246,10 +245,10 @@ class Local final : public ICaptureBlockStreamReaderV2, public IBlockStreamSchem
         sources->limits.max_outstanding_batches = 1;
         return 0;
     }
-    int ReadInputCounters(uint32_t, CaptureCountersV1*) const override { return ENOTSUP; }
+    int ReadInputCounters(uint32_t, CaptureCounters*) const override { return ENOTSUP; }
     BlockPollEvent PollBlock(int timeout) override { return PollCapture(timeout).block; }
-    CapturePollEventV2 PollCapture(int) override {
-        CapturePollEventV2 event;
+    CapturePollEvent PollCapture(int) override {
+        CapturePollEvent event;
         if (cancelled_) {
             event.block.kind = BlockPollEvent::kCancelled;
             return event;
@@ -290,22 +289,22 @@ class Local final : public ICaptureBlockStreamReaderV2, public IBlockStreamSchem
     size_t index_ = 0;
     std::atomic<bool> cancelled_{false};
 };
-class Session final : public IKafkaClientSessionV1, public IKafkaConsumerSessionV1 {
+class Session final : public IKafkaClientSession, public IKafkaConsumerSession {
  public:
-    KafkaBindingSnapshotV1 snapshot;
-    std::vector<KafkaMessageV1> messages;
+    KafkaBindingSnapshot snapshot;
+    std::vector<KafkaMessage> messages;
     size_t index = 0;
     std::atomic<bool> cancelled{false};
     std::shared_ptr<State> state;
-    const KafkaBindingSnapshotV1& Snapshot() const override { return snapshot; }
+    const KafkaBindingSnapshot& Snapshot() const override { return snapshot; }
     int Probe(uint32_t, std::string*) override { return ENOTSUP; }
     void Cancel() override { cancelled = true; }
     int QueryInterface(const Guid&, void** p) override {
-        *p = static_cast<IKafkaConsumerSessionV1*>(this);
+        *p = static_cast<IKafkaConsumerSession*>(this);
         return 0;
     }
     int StartConsumer(const char*, uint32_t) override { return 0; }
-    int PollMessage(uint32_t, KafkaMessageV1* m) override {
+    int PollMessage(uint32_t, KafkaMessage* m) override {
         if (cancelled) return ECANCELED;
         if (index == messages.size() || index >= state->permitted) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -314,20 +313,20 @@ class Session final : public IKafkaClientSessionV1, public IKafkaConsumerSession
         *m = messages[index++];
         return 0;
     }
-    int CommitOffsets(const std::vector<KafkaOffsetV1>&, uint32_t) override {
+    int CommitOffsets(const std::vector<KafkaOffset>&, uint32_t) override {
         ++state->released;
         return 0;
     }
 };
 class Factory final : public IBlockStreamFactory,
-                      public IBlockStreamReaderFactoryV1,
-                      public IBlockStreamChannelDescriptorV1,
-                      public IKafkaChannelCatalogV1 {
+                      public IBlockStreamReaderFactory,
+                      public IBlockStreamChannelDescriptor,
+                      public IKafkaChannelCatalog {
  public:
     Local local{"local", {}, nullptr, std::make_shared<State>()},
         remote{"remote", {}, nullptr, std::make_shared<State>()};
     std::shared_ptr<State> state = std::make_shared<State>();
-    int DescribeChannel(const char*, KafkaChannelDescriptionV1* d) override {
+    int DescribeChannel(const char*, KafkaChannelDescription* d) override {
         *d = {};
         d->role = "source";
         d->source_adapter_available = true;
@@ -341,13 +340,13 @@ class Factory final : public IBlockStreamFactory,
         f("kafka", "local", &local);
         f("kafka", "remote", &remote);
     }
-    void DescribeChannelTypes(std::function<void(const BlockStreamChannelTypeDescriptorV1&)> f) const override {
-        BlockStreamChannelTypeDescriptorV1 d;
+    void DescribeChannelTypes(std::function<void(const BlockStreamChannelTypeDescriptor&)> f) const override {
+        BlockStreamChannelTypeDescriptor d;
         d.channel_type = "kafka";
         d.allowed_roles = {"source"};
         f(d);
     }
-    int CreateReader(const BlockStreamReaderConfigV1& c, IBlockStreamChannel** output) override {
+    int CreateReader(const BlockStreamReaderConfig& c, IBlockStreamChannel** output) override {
         *output = nullptr;
         if (!Get(c.source_category, c.source_name)) return ENOTSUP;
         auto* protocol = static_cast<IProtocol*>(PluginLoader::Single()->First(IID_PROTOCOL));
@@ -374,7 +373,7 @@ class Factory final : public IBlockStreamFactory,
 };
 std::multiset<std::string> Rows(Runtime& runtime, const std::string& entity, const std::string& run) {
     std::multiset<std::string> rows;
-    auto batches = runtime.Query("SELECT * FROM npm_" + entity + "_history_v1 WHERE __npm_run_id='" + run + "'");
+    auto batches = runtime.Query("SELECT * FROM npm_" + entity + "_history WHERE __npm_run_id='" + run + "'");
     for (const auto& batch : batches)
         for (int64_t r = 0; r < batch->num_rows(); ++r) {
             std::string row;
@@ -393,16 +392,16 @@ std::multiset<std::string> Rows(Runtime& runtime, const std::string& entity, con
 int main() {
     try {
         Factory factory;
-        Labels labels;
         auto* loader = PluginLoader::Single();
-        loader->Regist(IID_CONFIG_CHANNEL_REGISTRY_V1, &labels);
         loader->Regist(IID_BLOCK_STREAM_FACTORY, static_cast<IBlockStreamFactory*>(&factory));
-        loader->Regist(IID_BLOCK_STREAM_READER_FACTORY_V1, static_cast<IBlockStreamReaderFactoryV1*>(&factory));
-        loader->Regist(IID_BLOCK_STREAM_CHANNEL_DESCRIPTOR_V1, static_cast<IBlockStreamChannelDescriptorV1*>(&factory));
-        loader->Regist(IID_KAFKA_CHANNEL_CATALOG_V1, static_cast<IKafkaChannelCatalogV1*>(&factory));
+        loader->Regist(IID_BLOCK_STREAM_READER_FACTORY, static_cast<IBlockStreamReaderFactory*>(&factory));
+        loader->Regist(IID_BLOCK_STREAM_CHANNEL_DESCRIPTOR, static_cast<IBlockStreamChannelDescriptor*>(&factory));
+        loader->Regist(IID_KAFKA_CHANNEL_CATALOG, static_cast<IKafkaChannelCatalog*>(&factory));
         Runtime runtime(flowsql::test::WorkspacePath("packet-npm"));
+        PublishLabels(runtime);
         for (const auto& [setting, diagnostic] :
-             {std::pair<std::string, std::string>{"run_mode='offline'", "run_mode conflicts"},
+             {std::pair<std::string, std::string>{R"(parameters='{"schema_version":1,"core":{"run_mode":"offline"}}')",
+                                                  "run_mode conflicts"},
               {"source_domains='0:8;1:8'", "source domain conflicts"}}) {
             const auto id = "packet-conflict-" + diagnostic;
             runtime.Submit(id, "SELECT * FROM kafka.remote USING npm.basic WITH features='basic'," + setting +
@@ -437,15 +436,20 @@ int main() {
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 }
+                if (factory.state->released != poll)
+                    std::cerr << "source=" << source << " interval_seconds=" << seconds << " filter=" << filter
+                              << " cancel=" << cancel << " poll=" << poll
+                              << " released=" << factory.state->released.load()
+                              << " permitted=" << factory.state->permitted.load() << '\n';
                 Check(factory.state->released == poll, "source_not_drained");
-                const auto counts = runtime.Query("SELECT COUNT(*) FROM npm_basic_ipv4_history_v1");
+                const auto counts = runtime.Query("SELECT COUNT(*) FROM npm_basic_ipv4_history");
                 const auto count = std::stoll(counts.front()->column(0)->GetScalar(0).ValueOrDie()->ToString());
                 if (poll == 3 || poll == 5 || poll == 7)
                     Check(count == prior_rows, "blocked_remote_time_closed_period");
                 prior_rows = count;
                 if (poll == 2 || poll == 4 || poll == 6 || poll == 8) {
                     const auto end = runtime.Query(
-                        "SELECT MAX(period_end_ns) FROM npm_basic_ipv4_history_v1 WHERE period_complete=1 AND "
+                        "SELECT MAX(period_end_ns) FROM npm_basic_ipv4_history WHERE period_complete=1 AND "
                         "__npm_run_id=(SELECT run_id FROM npm_result_runs ORDER BY started_at_ns DESC LIMIT 1)");
                     const auto value = end.front()->column(0)->GetScalar(0).ValueOrDie();
                     const int64_t safe_seconds[] = {0, 117, 0, 147, 0, 177, 0, 237};
@@ -465,7 +469,7 @@ int main() {
                       (cancel ? "incomplete" : "completed"),
                   "managed_terminal_state");
             if (!filter && !cancel) {
-                const auto tail = runtime.Query("SELECT COUNT(*) FROM npm_basic_ipv4_history_v1 WHERE __npm_run_id='" +
+                const auto tail = runtime.Query("SELECT COUNT(*) FROM npm_basic_ipv4_history WHERE __npm_run_id='" +
                                                 run + "' AND is_final=1 AND period_complete=0");
                 Check(std::stoll(tail.front()->column(0)->GetScalar(0).ValueOrDie()->ToString()) > 0,
                       "stop_missing_incomplete_tail");

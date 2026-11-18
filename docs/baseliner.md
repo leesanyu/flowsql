@@ -9,8 +9,7 @@ NPM 与 Baseliner 分次提交，以已发布的 DataFrame 或数据库结果衔
 ## 运行准备与输入输出
 
 执行任务的 Scheduler 进程需要加载 `libflowsql_baseline.so`；通过 Web「算子管理 → C++ 插件」
-上传并激活 `build/output/libflowsql_baseliner.so`。Baseline 插件必须提供 Value、Ratio、Relation 的
-V1 评估就绪能力，缺少任务所需能力会在打开任务时明确失败。
+上传并激活 `build/output/libflowsql_baseliner.so`。Baseline 插件的 Value、Ratio、Relation 任务统一返回评估结果与 readiness；宿主、调用方和插件须按当前契约同步重建。
 
 | 位置 | 支持范围 | 使用方式 |
 | --- | --- | --- |
@@ -77,7 +76,7 @@ DataFrame 默认分析整个快照；限定桶范围时保留 begin/end，将 co
 SELECT * FROM netadapter.eth0
 USING npm.basic
 WITH input_namespace='netadapter.eth0', source_domains='0:1',
-     features='basic', output_interval_ns=60000000000
+     features='basic', parameters='{"schema_version":1,"core":{"output_interval_ns":60000000000}}'
 INTO mysql.npm
 
 SELECT * FROM mysql.npm
@@ -86,7 +85,7 @@ INTO mysql.baseline
 ```
 
 以下配置读取已完成运行的 IPv4 结果，按观测域汇总完整周期的字节增量。
-将 `completed-run-id` 替换为 NPM 响应中的明确 run_id；IPv6 使用 `npm_basic_ipv6_history_v1`，
+将 `completed-run-id` 替换为 NPM 响应中的明确 run_id；IPv6 使用 `npm_basic_ipv6_history`，
 可在 datasets 中另配置一项并绑定同次运行。实际业务身份应按需要设置 series_keys。
 
 ```json
@@ -102,7 +101,7 @@ INTO mysql.baseline
   "persistence": {"checkpoint_every_buckets": 7, "retain_generations": 2, "restore": "if_exists"},
   "datasets": [{
     "id": "link",
-    "table": "npm_basic_ipv4_history_v1",
+    "table": "npm_basic_ipv4_history",
     "fields": {
       "__npm_run_id": "utf8", "session_id": "uint64", "revision": "uint64",
       "observation_domain_id": "uint64", "period_start_ns": "int64", "period_end_ns": "int64",
@@ -123,7 +122,7 @@ INTO mysql.baseline
 ```
 
 通过 `POST /channels/config/publish` 发布配置，字段为 `name=link_baseline`、`expected_current_revision=0`、
-`format=json`、`schema_id=baseliner.task.v1`，以及 JSON 原文的 `content_base64`。
+`format=json`、`schema_id=flowsql.baseliner.task`，以及 JSON 原文的 `content_base64`。
 执行 SQL 时使用响应的 exact_reference，例如 `config.link_baseline@1`。
 
 有限 PCAP 落库可使用 snapshot。持续 poll 需要生产者提供真实的 epoch、已提交位置、不可变前缀和桶关闭证据；
@@ -147,13 +146,13 @@ Relation 按组分布评估并输出 routed 结果。
 ```sql
 SELECT metric_id, target_bucket, observed, expected, lower, upper, score, can_alert,
        band_kind, basis_id, model_basis_id, published_generation
-FROM mysql.baseline.baseline_results_v1
+FROM mysql.baseline.baseline_results
 WHERE task_key='link-byte-baseline' AND result_kind='evaluation'
 ORDER BY target_bucket
 INTO dataframe.current_baseline
 
 SELECT metric_id, target_bucket, issued_after_bucket, expected, lower, upper, model_basis_id
-FROM mysql.baseline.baseline_results_v1
+FROM mysql.baseline.baseline_results
 WHERE task_key='link-byte-baseline' AND result_kind='forecast'
 ORDER BY target_bucket, issued_after_bucket
 INTO dataframe.future_baseline
@@ -318,3 +317,5 @@ WSL2/Linux x86_64，仓库普通构建，成本目标未启用优化 flags；固
 
 详细数据契约见 [托管算子规格](../tasks/archive/feat-baseline-operator.md) 和
 [单表与 DataFrame 规格](../tasks/archive/feat-baseliner-single-source.md)。
+
+恢复仅接受完整当前检查点：活动时间、父模型身份、释放 epoch 和序列活动年龄必须齐全。Relation bootstrap artifact 必须带完整 `relation_fusion_metadata`，且 `feature_base` 与任务配置一致；value/ratio artifact 按各自契约读取。产品不推导缺失的旧状态；存量整理须先备份，不能无损确认的对象保留原件并停止该对象恢复。

@@ -221,12 +221,12 @@ void Client::Cancel() {
 int Client::QueryInterface(const Guid& iid, void** capability) {
     if (!capability) return EINVAL;
     *capability = nullptr;
-    if (std::memcmp(&iid, &IID_KAFKA_CONSUMER_SESSION_V1, sizeof(Guid)) == 0 && binding_.snapshot.usage == "source") {
-        *capability = static_cast<IKafkaConsumerSessionV1*>(this);
+    if (std::memcmp(&iid, &IID_KAFKA_CONSUMER_SESSION, sizeof(Guid)) == 0 && binding_.snapshot.usage == "source") {
+        *capability = static_cast<IKafkaConsumerSession*>(this);
         return 0;
     }
-    if (std::memcmp(&iid, &IID_KAFKA_PRODUCER_SESSION_V1, sizeof(Guid)) == 0 && binding_.snapshot.usage == "sink") {
-        *capability = static_cast<IKafkaProducerSessionV1*>(this);
+    if (std::memcmp(&iid, &IID_KAFKA_PRODUCER_SESSION, sizeof(Guid)) == 0 && binding_.snapshot.usage == "sink") {
+        *capability = static_cast<IKafkaProducerSession*>(this);
         return 0;
     }
     return ENOTSUP;
@@ -290,7 +290,7 @@ int Client::StartConsumer(const char* reset, uint32_t max_message_bytes) {
         return EINVAL;
     }
 }
-int Client::PollMessage(uint32_t timeout_ms, KafkaMessageV1* message) {
+int Client::PollMessage(uint32_t timeout_ms, KafkaMessage* message) {
     if (!message || timeout_ms > 30000) return EINVAL;
     std::lock_guard<std::mutex> operation(operation_mutex_);
     *message = {};
@@ -333,7 +333,7 @@ int Client::PollMessage(uint32_t timeout_ms, KafkaMessageV1* message) {
     } while (Clock::now() < deadline);
     return cancelled_ ? ECANCELED : EAGAIN;
 }
-int Client::CommitOffsets(const std::vector<KafkaOffsetV1>& offsets, uint32_t timeout_ms) {
+int Client::CommitOffsets(const std::vector<KafkaOffset>& offsets, uint32_t timeout_ms) {
     if (offsets.empty() || !timeout_ms || timeout_ms > 30000) return EINVAL;
     std::lock_guard<std::mutex> operation(operation_mutex_);
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);

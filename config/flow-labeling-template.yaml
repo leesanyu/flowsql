@@ -10,7 +10,7 @@
 # deduplicated. The single DPDK ACL category returns the matching label with
 # the highest priority; label id 0 is reserved for no match.
 
-api_version: flowsql.io/flow-labeling/v1alpha1
+api_version: flowsql.io/flow-labeling
 kind: FlowLabelingSet
 
 metadata:

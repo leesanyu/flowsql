@@ -314,7 +314,7 @@ int main() {
     const char* libraries[] = {FLOWSQL_CONFIG_CHANNEL_PLUGIN_PATH};
     const char* missing_options[] = {nullptr};
     assert(loader->Load(".", libraries, missing_options, 1) != 0);
-    assert(loader->First(flowsql::IID_CONFIG_CHANNEL_REGISTRY_V1) == nullptr);
+    assert(loader->First(flowsql::IID_CONFIG_CHANNEL_REGISTRY) == nullptr);
     char corrupt_name[] = "/tmp/flowsql_config_corrupt_XXXXXX";
     const int corrupt_fd = mkstemp(corrupt_name);
     assert(corrupt_fd >= 0);
@@ -324,17 +324,15 @@ int main() {
     const std::string invalid_option = std::string("db_path=") + corrupt_name;
     const char* bad_options[] = {invalid_option.c_str()};
     assert(loader->Load(".", libraries, bad_options, 1) != 0);
-    assert(loader->First(flowsql::IID_CONFIG_CHANNEL_REGISTRY_V1) == nullptr);
+    assert(loader->First(flowsql::IID_CONFIG_CHANNEL_REGISTRY) == nullptr);
     assert(unlink(corrupt_name) == 0);
     const std::string option = "db_path=" + path;
     const char* options[] = {option.c_str()};
     assert(loader->Load(".", libraries, options, 1) == 0);
     assert(loader->StartAll() == 0);
-    auto* registry =
-        static_cast<flowsql::IConfigChannelRegistryV1*>(loader->First(flowsql::IID_CONFIG_CHANNEL_REGISTRY_V1));
+    auto* registry = static_cast<flowsql::IConfigChannelRegistry*>(loader->First(flowsql::IID_CONFIG_CHANNEL_REGISTRY));
     assert(registry);
-    auto* descriptions =
-        static_cast<flowsql::IMetadataDescriptionV1*>(loader->First(flowsql::IID_METADATA_DESCRIPTION_V1));
+    auto* descriptions = static_cast<flowsql::IMetadataDescription*>(loader->First(flowsql::IID_METADATA_DESCRIPTION));
     assert(descriptions);
     std::string description_response;
     assert(descriptions->Describe(R"({"target":{"kind":"channel","locator":{"kind":"dataframe","name":"absent"}}})",
@@ -347,13 +345,13 @@ int main() {
         [&](const flowsql::RouteItem& item) { discovered_routes.emplace(item.uri, item.handler); });
     assert(discovered_routes.size() == 19);
     for (const char* op : {"describe", "channels/save-description", "operators/save-description"})
-        assert(discovered_routes.count(std::string("/semantics/v1/") + op) == 1);
+        assert(discovered_routes.count(std::string("/semantics/") + op) == 1);
     for (const char* op : {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export"})
-        assert(discovered_routes.count(std::string("/semantics/v1/") + op) == 1);
+        assert(discovered_routes.count(std::string("/semantics/") + op) == 1);
     for (const char* op : {"list", "publish", "history", "resolve"})
         assert(discovered_routes.count(std::string("/channels/config/") + op) == 1);
     for (const char* op : {"describe", "preview", "check", "apply"})
-        assert(discovered_routes.count(std::string("/semantics/v1/channels/") + op) == 1);
+        assert(discovered_routes.count(std::string("/semantics/channels/") + op) == 1);
     assert(discovered_routes.count("/channels/config/publish") == 1);
     assert(registry->Resolve("config.rules@1", &snapshot, &error) == 0);
     assert(*snapshot.content == "{}" && snapshot.sha256_hex == original_hash);
@@ -371,9 +369,9 @@ int main() {
     });
     assert(routes.size() == 19);
     for (const char* op : {"describe", "channels/save-description", "operators/save-description"})
-        assert(routes.count(std::string("/semantics/v1/") + op) == 1);
+        assert(routes.count(std::string("/semantics/") + op) == 1);
     for (const char* op : {"describe", "preview", "check", "apply"})
-        assert(routes.count(std::string("/semantics/v1/channels/") + op) == 1);
+        assert(routes.count(std::string("/semantics/channels/") + op) == 1);
     std::string response;
     const auto call = [&](const char* route, const std::string& body) {
         response.clear();

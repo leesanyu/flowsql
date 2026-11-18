@@ -120,7 +120,7 @@ class Broker {
         rd_kafka_metadata_destroy(m);
         return found;
     }
-    std::vector<KafkaProduceMessageV1> Consume(const std::string& topic, const std::string& group) {
+    std::vector<KafkaProduceMessage> Consume(const std::string& topic, const std::string& group) {
         auto* c = rd_kafka_conf_new();
         Set(c, "bootstrap.servers", servers_);
         Set(c, "group.id", group);
@@ -142,7 +142,7 @@ class Broker {
         rd_kafka_topic_partition_list_add(assignment, topic.c_str(), 0)->offset = 0;
         Check(rd_kafka_assign(consumer, assignment) == 0, "fixture_assign");
         rd_kafka_topic_partition_list_destroy(assignment);
-        std::vector<KafkaProduceMessageV1> out;
+        std::vector<KafkaProduceMessage> out;
         auto deadline = Clock::now() + std::chrono::seconds(10);
         while (out.size() < uint64_t(high) && Clock::now() < deadline) {
             auto* message = rd_kafka_consumer_poll(consumer, 100);

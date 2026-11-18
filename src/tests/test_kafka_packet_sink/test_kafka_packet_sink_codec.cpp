@@ -10,10 +10,10 @@
 using namespace flowsql;
 using namespace flowsql::channels::kafka;
 namespace {
-const char* kSink = R"({"encoding":"flowsql_packet_v1","stream_id":"probe-a"})";
-CaptureSourceSetV2 Sources() {
-    CaptureSourceSetV2 s;
-    CaptureQueueIdentityV1 i;
+const char* kSink = R"({"encoding":"flowsql_packet","stream_id":"probe-a"})";
+CaptureSourceSet Sources() {
+    CaptureSourceSet s;
+    CaptureQueueIdentity i;
     i.observation_domain_id = UINT64_MAX;
     i.source_id = UINT32_MAX;
     i.queue_id = UINT32_MAX - 1;
@@ -21,27 +21,27 @@ CaptureSourceSetV2 Sources() {
     i.generation = UINT64_MAX - 1;
     i.link_type = 1;
     s.inputs.push_back(i);
-    s.limits = {sizeof(CaptureReaderLimitsV1), 1, 256, 1048576, 100, 1};
+    s.limits = {sizeof(CaptureReaderLimits), 1, 256, 1048576, 100, 1};
     return s;
 }
-CapturePollEventV2 Event(const std::string& raw, uint64_t sequence = UINT64_MAX - 3) {
+CapturePollEvent Event(const std::string& raw, uint64_t sequence = UINT64_MAX - 3) {
     auto owner = std::make_shared<std::string>(raw);
     packet::PacketFamilyRecord row;
     row.meta = {INT64_MAX, uint32_t(raw.size()), 65535, 1, UINT32_MAX, sequence};
     row.raw_data = {owner, reinterpret_cast<const uint8_t*>(owner->data()), uint32_t(raw.size())};
     packet::PacketFamilyBatch records;
     records.rows.push_back(row);
-    CapturePollEventV2 event;
+    CapturePollEvent event;
     event.block.kind = BlockPollEvent::kData;
     assert(packet::EncodePacketFamilyBatch(records, &event.block.batch) == packet::PacketBatchError::kNone);
-    CaptureProgressV1 fact;
+    CaptureProgress fact;
     fact.source_id = UINT32_MAX;
     fact.queue_id = UINT32_MAX - 1;
     fact.generation = UINT64_MAX - 1;
     fact.fact_sequence = UINT64_MAX - 4;
     fact.capture_time_ns = INT64_MAX;
     fact.packet_observed = true;
-    fact.backlog = CaptureBacklogV1::kEmpty;
+    fact.backlog = CaptureBacklog::kEmpty;
     event.progress.push_back(fact);
     return event;
 }
@@ -79,10 +79,10 @@ void Config() {
         }
     }
     for (const char* json :
-         {R"({"encoding":"flowsql_packet_v1","stream_id":"x","surprise":1})",
-          R"({"encoding":"flowsql_packet_v1","stream_id":"x","stream_id":"y"})",
-          R"({"encoding":"flowsql_packet_v1","stream_id":"x","max_message_bytes":16777216,"queue_max_bytes":1048576})",
-          R"({"encoding":"json","stream_id":"x"})", R"({"encoding":"flowsql_packet_v1","stream_id":"x y"})"}) {
+         {R"({"encoding":"flowsql_packet","stream_id":"x","surprise":1})",
+          R"({"encoding":"flowsql_packet","stream_id":"x","stream_id":"y"})",
+          R"({"encoding":"flowsql_packet","stream_id":"x","max_message_bytes":16777216,"queue_max_bytes":1048576})",
+          R"({"encoding":"json","stream_id":"x"})", R"({"encoding":"flowsql_packet","stream_id":"x y"})"}) {
         rapidjson::Document v;
         v.Parse(json);
         reject(v);
@@ -93,7 +93,7 @@ void Config() {
     store.Mutate("connections", "add",
                  Parse(R"({"name":"local","bootstrap_servers":["localhost:1"],"security_protocol":"PLAINTEXT"})"));
     auto channel = Parse(
-        R"({"name":"packet","connection_name":"local","role":"both","topic":"packet","consumer_group":"group","payload_kind":"packet","payload_options":{"source":{"encoding":"flowsql_packet_v1","stream_id":"probe-a","observation_domain_id":"1","inputs":[{"source_id":0,"queue_id":0,"source_name":"remote"}]},"sink":{}}})");
+        R"({"name":"packet","connection_name":"local","role":"both","topic":"packet","consumer_group":"group","payload_kind":"packet","payload_options":{"source":{"encoding":"flowsql_packet","stream_id":"probe-a","observation_domain_id":"1","inputs":[{"source_id":0,"queue_id":0,"source_name":"remote"}]},"sink":{}}})");
     channel["payload_options"]["sink"].CopyFrom(Parse(kSink), channel.GetAllocator());
     store.Mutate("channels", "add", std::move(channel));
     const auto saved = store.Query("channels", "packet");
@@ -127,13 +127,13 @@ void Codec() {
         };
         assert(u32(48) == 1 && u32(52) == 1 && u32(56) == UINT32_MAX && u32(68) == bytes.size());
     }
-    CapturePollEventV2 timeout;
+    CapturePollEvent timeout;
     timeout.progress = event.progress;
     timeout.progress[0].packet_observed = false;
     timeout.progress[0].source_idle_confirmed = true;
     timeout.progress[0].fact_sequence++;
     assert(codec.Encode(timeout, Epoch(), UINT64_MAX - 1).ValueOrDie().value.size() == 84);
-    assert(!codec.Encode(CapturePollEventV2{}, Epoch(), 1).ok());
+    assert(!codec.Encode(CapturePollEvent{}, Epoch(), 1).ok());
     for (int mode = 0; mode < 4; ++mode) {
         bool bad = false;
         try {

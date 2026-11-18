@@ -4,10 +4,10 @@
 #include "data_semantics_model.h"
 namespace flowsql::channels::config {
 int NormalizeOperatorDocument(const std::string& kind, rapidjson::Document* document,
-                              std::vector<SemanticsReference>* references, DataSemanticsErrorV1* error);
+                              std::vector<SemanticsReference>* references, DataSemanticsError* error);
 // Validate the documented finite JSON Schema vocabulary without loading external resources.
 int ValidateOperatorConfiguration(const rapidjson::Value& schema, const rapidjson::Value& instance,
-                                  const rapidjson::Value& contract, DataSemanticsErrorV1* error);
+                                  const rapidjson::Value& contract, DataSemanticsError* error);
 int ValidateOperatorParameters(const rapidjson::Value& contract, const rapidjson::Value& parameters,
-                               DataSemanticsErrorV1* error);
+                               DataSemanticsError* error);
 }  // namespace flowsql::channels::config

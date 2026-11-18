@@ -39,11 +39,11 @@ void Number(Value& properties, const char* key, int64_t low, int64_t high, int64
     Set(schema, "default", Value(initial), a);
     Set(properties, key, std::move(schema), a);
 }
-Value DomainDictionary(const Value& content, const NpmEntityDescriptorV1& entity, Alloc& a) {
+Value DomainDictionary(const Value& content, const NpmEntityDescriptor& entity, Alloc& a) {
     const auto& declarations = content["fields"];
     assert(declarations.MemberCount() == static_cast<unsigned>(entity.schema->num_fields()));
     Value dictionary(rapidjson::kObjectType), fields(rapidjson::kArrayType);
-    Set(dictionary, "schema_id", "flowsql.data-dictionary.v1", a);
+    Set(dictionary, "schema_id", "flowsql.data-dictionary", a);
     Set(dictionary, "title", "NPM：" + entity.entity_id, a);
     Set(dictionary, "entity", Copy(content["entity"], a), a);
     for (const auto& physical : entity.schema->fields()) {
@@ -91,24 +91,24 @@ std::string Build() {
     auto& modules = resources["module_parameters"];
     Number(modules["session"]["properties"], "max_tcp_ranges_per_direction", kNpmMinSessionTcpRangesPerDirection,
            kNpmMaxSessionTcpRangesPerDirection, kNpmDefaultSessionTcpRangesPerDirection, a);
-    Number(modules["dns"]["properties"], "response_timeout_ns", kNpmDnsMinResponseTimeoutNsV1,
-           kNpmDnsMaxResponseTimeoutNsV1, kNpmDnsDefaultResponseTimeoutNsV1, a);
-    Number(modules["dns"]["properties"], "max_pending_per_session", 1, kNpmDnsMaxPendingPerSessionV1,
-           kNpmDnsDefaultMaxPendingPerSessionV1, a);
-    Number(modules["http1"]["properties"], "response_timeout_ns", kNpmHttp1MinResponseTimeoutNsV1,
-           kNpmHttp1MaxResponseTimeoutNsV1, kNpmHttp1DefaultResponseTimeoutNsV1, a);
-    Number(modules["http1"]["properties"], "max_pending_per_session", 1, kNpmHttp1MaxPendingPerSessionV1,
-           kNpmHttp1DefaultMaxPendingPerSessionV1, a);
-    Number(modules["http1"]["properties"], "max_header_bytes", kNpmHttp1MinHeaderBytesV1, kNpmHttp1MaxHeaderBytesV1,
-           kNpmHttp1DefaultMaxHeaderBytesV1, a);
-    Number(modules["tls"]["properties"], "handshake_timeout_ns", kNpmTlsMinHandshakeTimeoutNsV1,
-           kNpmTlsMaxHandshakeTimeoutNsV1, kNpmTlsDefaultHandshakeTimeoutNsV1, a);
-    Number(modules["tls"]["properties"], "max_hello_bytes", kNpmTlsMinHelloBytesV1, kNpmTlsMaxHelloBytesV1,
-           kNpmTlsDefaultMaxHelloBytesV1, a);
-    Number(modules["icmp"]["properties"], "echo_timeout_ns", kNpmIcmpMinEchoTimeoutNsV1, kNpmIcmpMaxEchoTimeoutNsV1,
-           kNpmIcmpDefaultEchoTimeoutNsV1, a);
-    Number(modules["icmp"]["properties"], "max_pending_echo", 1, kNpmIcmpDefaultMaxPendingEchoV1,
-           kNpmIcmpDefaultMaxPendingEchoV1, a);
+    Number(modules["dns"]["properties"], "response_timeout_ns", kNpmDnsMinResponseTimeoutNs,
+           kNpmDnsMaxResponseTimeoutNs, kNpmDnsDefaultResponseTimeoutNs, a);
+    Number(modules["dns"]["properties"], "max_pending_per_session", 1, kNpmDnsMaxPendingPerSession,
+           kNpmDnsDefaultMaxPendingPerSession, a);
+    Number(modules["http1"]["properties"], "response_timeout_ns", kNpmHttp1MinResponseTimeoutNs,
+           kNpmHttp1MaxResponseTimeoutNs, kNpmHttp1DefaultResponseTimeoutNs, a);
+    Number(modules["http1"]["properties"], "max_pending_per_session", 1, kNpmHttp1MaxPendingPerSession,
+           kNpmHttp1DefaultMaxPendingPerSession, a);
+    Number(modules["http1"]["properties"], "max_header_bytes", kNpmHttp1MinHeaderBytes, kNpmHttp1MaxHeaderBytes,
+           kNpmHttp1DefaultMaxHeaderBytes, a);
+    Number(modules["tls"]["properties"], "handshake_timeout_ns", kNpmTlsMinHandshakeTimeoutNs,
+           kNpmTlsMaxHandshakeTimeoutNs, kNpmTlsDefaultHandshakeTimeoutNs, a);
+    Number(modules["tls"]["properties"], "max_hello_bytes", kNpmTlsMinHelloBytes, kNpmTlsMaxHelloBytes,
+           kNpmTlsDefaultMaxHelloBytes, a);
+    Number(modules["icmp"]["properties"], "echo_timeout_ns", kNpmIcmpMinEchoTimeoutNs, kNpmIcmpMaxEchoTimeoutNs,
+           kNpmIcmpDefaultEchoTimeoutNs, a);
+    Number(modules["icmp"]["properties"], "max_pending_echo", 1, kNpmIcmpDefaultMaxPendingEcho,
+           kNpmIcmpDefaultMaxPendingEcho, a);
     auto& packets = resources["packet_inputs"]["batch_structures"];
     packets.PushBack(Structure(*packet::PacketSchema(), a), a);
     packets.PushBack(Structure(*packet::PacketFamilySchema(), a), a);
@@ -134,7 +134,7 @@ std::string Build() {
                 Value entry(rapidjson::kObjectType);
                 Set(entry, "schema_canonical", SchemaCanonical(*entity.schema), a);
                 Set(entry, "dictionary", Copy(dictionary, a), a);
-                const auto key = entity.entity_id + "_" + view + "_v" + std::to_string(entity.schema_version);
+                const auto key = entity.entity_id + "_" + view;
                 Set(templates, key.c_str(), std::move(entry), a);
             }
             Set(resources, entity.entity_id.c_str(), std::move(structure), a);
@@ -240,8 +240,8 @@ std::string Build() {
 }  // namespace
 }  // namespace flowsql::npm
 
-extern "C" const char* flowsql_operator_data_contract_v1(int index) {
-    if (index != 0 && index != 1) return nullptr;
+extern "C" const char* flowsql_operator_data_contract(int index) {
+    if (index != 0) return nullptr;
     static const std::string contract = flowsql::npm::Build();
     return contract.c_str();
 }

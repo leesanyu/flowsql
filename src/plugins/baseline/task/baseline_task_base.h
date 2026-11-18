@@ -18,7 +18,7 @@ namespace baseline {
 
 class TaskRegistry;
 
-class BaselineTaskBase : public std::enable_shared_from_this<BaselineTaskBase>, public IBaselineModelParametersV1 {
+class BaselineTaskBase : public std::enable_shared_from_this<BaselineTaskBase>, public IBaselineModelParameters {
     friend class CheckpointAccess;
 
  public:
@@ -37,18 +37,18 @@ class BaselineTaskBase : public std::enable_shared_from_this<BaselineTaskBase>, 
                                                     BaselineSerializationFormat format) const;
     BaselineStatus Close();
     BaselineStatus ExportModelParameters(std::string_view series_key, uint64_t max_bytes,
-                                         BaselineModelParametersV1* output) const override;
-    BaselineStatus BindStateLimits(const BaselineStateLimitsV1& limits);
-    BaselineStatus ReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope);
-    std::pair<BaselineStatus, BaselineStateUsageV1> QueryStateUsage() const;
+                                         BaselineModelParameters* output) const override;
+    BaselineStatus BindStateLimits(const BaselineStateLimits& limits);
+    BaselineStatus ReleaseIdentity(std::string_view key, BaselineStateReleaseScope scope);
+    std::pair<BaselineStatus, BaselineStateUsage> QueryStateUsage() const;
 
  protected:
     BaselineStatus EnsureOpen() const;
     static BaselineSerializationResult UnsupportedFormatResult(BaselineSerializationFormat format);
     virtual void OnClosing();
-    virtual BaselineStatus DoReleaseIdentity(std::string_view key, BaselineStateReleaseScopeV1 scope) = 0;
-    virtual BaselineStateUsageV1 DoQueryStateUsage() const = 0;
-    const BaselineStateLimitsV1* StateLimits() const { return state_limits_ ? &*state_limits_ : nullptr; }
+    virtual BaselineStatus DoReleaseIdentity(std::string_view key, BaselineStateReleaseScope scope) = 0;
+    virtual BaselineStateUsage DoQueryStateUsage() const = 0;
+    const BaselineStateLimits* StateLimits() const { return state_limits_ ? &*state_limits_ : nullptr; }
     void MarkStateOperation() { state_operations_started_ = true; }
 
  private:
@@ -63,7 +63,7 @@ class BaselineTaskBase : public std::enable_shared_from_this<BaselineTaskBase>, 
     bool state_operations_started_ = false;
     bool checkpoint_bound_ = false;
     bool checkpoint_restored_ = false;
-    std::optional<BaselineStateLimitsV1> state_limits_;
+    std::optional<BaselineStateLimits> state_limits_;
 };
 
 }  // namespace baseline

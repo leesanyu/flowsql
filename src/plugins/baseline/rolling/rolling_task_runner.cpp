@@ -539,7 +539,7 @@ void WriteComponentReadinessObject(Writer* writer, const std::vector<std::string
 RollingBaselineResult SubmitObservedPoint(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
                                           RollingStateMap* states, const ObservedModelPoint& point,
                                           const RollingSubmitOptions& options, const BaselineRollingConfig& config,
-                                          RollingEventContext* events, BaselineEvaluationReadinessV1* readiness) {
+                                          RollingEventContext* events, BaselineEvaluationReadiness* readiness) {
     RollingBaselineResult result = BaseResultFromPoint(point);
     if (!states || point.series_key.empty()) {
         result.status = BaselineStatus::kInvalidArgument;
@@ -608,7 +608,7 @@ RollingBaselineResult SubmitObservedPoint(const BaselineTaskSpec& spec, const Bo
             state_it = states->emplace(point.series_key, std::move(state)).first;
             FillColdStartBand(spec, point, config, state_it->second, &result);
             CacheSubmitView(result, &state_it->second);
-            if (readiness) *readiness = BaselineEvaluationReadinessV1::kColdStart;
+            if (readiness) *readiness = BaselineEvaluationReadiness::kColdStart;
             return result;
         }
     }
@@ -720,7 +720,7 @@ RollingBaselineResult SubmitObservedPoint(const BaselineTaskSpec& spec, const Bo
         result.uncertainty_source.push_back("anomaly_downweight_update");
     }
     CacheSubmitView(result, &state);
-    if (readiness && result.status == BaselineStatus::kOk) *readiness = BaselineEvaluationReadinessV1::kReady;
+    if (readiness && result.status == BaselineStatus::kOk) *readiness = BaselineEvaluationReadiness::kReady;
     return result;
 }
 
@@ -729,8 +729,8 @@ RollingBaselineResult SubmitObservedPoint(const BaselineTaskSpec& spec, const Bo
 RollingBaselineResult RunValueRollingSubmit(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
                                             RollingStateMap* states, const ValueRollingObservation& obs,
                                             const RollingSubmitOptions& options, RollingEventContext* events,
-                                            BaselineEvaluationReadinessV1* readiness) {
-    if (readiness) *readiness = BaselineEvaluationReadinessV1::kUnavailable;
+                                            BaselineEvaluationReadiness* readiness) {
+    if (readiness) *readiness = BaselineEvaluationReadiness::kUnavailable;
     BaselineRollingConfig config;
     std::string diagnostics;
     RollingBaselineResult result;
@@ -752,8 +752,8 @@ RollingBaselineResult RunValueRollingSubmit(const BaselineTaskSpec& spec, const 
 RollingBaselineResult RunRatioRollingSubmit(const BaselineTaskSpec& spec, const BootstrapSeedStore& seeds,
                                             RollingStateMap* states, const RatioRollingObservation& obs,
                                             const RollingSubmitOptions& options, RollingEventContext* events,
-                                            BaselineEvaluationReadinessV1* readiness) {
-    if (readiness) *readiness = BaselineEvaluationReadinessV1::kUnavailable;
+                                            BaselineEvaluationReadiness* readiness) {
+    if (readiness) *readiness = BaselineEvaluationReadiness::kUnavailable;
     BaselineRollingConfig config;
     std::string diagnostics;
     RollingBaselineResult result;

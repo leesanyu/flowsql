@@ -12,34 +12,34 @@
 namespace flowsql::npm {
 namespace {
 
-using Reason = NpmTlsIncompleteReasonV1;
-using Outcome = NpmTlsOutcomeV1;
+using Reason = NpmTlsIncompleteReason;
+using Outcome = NpmTlsOutcome;
 
-bool OffersVersion(const NpmTlsHelloFactsV1& hello, uint16_t version) {
+bool OffersVersion(const NpmTlsHelloFacts& hello, uint16_t version) {
     return std::find(hello.offered_versions.begin(), hello.offered_versions.end(), version) !=
            hello.offered_versions.end();
 }
 
-bool ValidClientHello(const NpmTlsHelloFactsV1& hello) {
+bool ValidClientHello(const NpmTlsHelloFacts& hello) {
     if (hello.legacy_version != 0x0303) return false;
     return hello.offered_versions.empty() || OffersVersion(hello, 0x0303) || OffersVersion(hello, 0x0304);
 }
 
 bool ValidCipherSuite(uint16_t cipher) { return cipher != 0 && cipher != 0x00ff && cipher != 0x5600; }
 
-Reason FramerReason(NpmTlsFramerErrorV1 error, NpmPacketDirection direction, NpmPacketDirection client) {
+Reason FramerReason(NpmTlsFramerError error, NpmPacketDirection direction, NpmPacketDirection client) {
     switch (error) {
-        case NpmTlsFramerErrorV1::kGap:
+        case NpmTlsFramerError::kGap:
             return direction == client ? Reason::kClientPathGap : Reason::kServerPathGap;
-        case NpmTlsFramerErrorV1::kCaptureTruncation:
+        case NpmTlsFramerError::kCaptureTruncation:
             return Reason::kCaptureTruncation;
-        case NpmTlsFramerErrorV1::kMalformedRecord:
+        case NpmTlsFramerError::kMalformedRecord:
             return Reason::kMalformedRecord;
-        case NpmTlsFramerErrorV1::kMalformedHello:
+        case NpmTlsFramerError::kMalformedHello:
             return Reason::kMalformedHello;
-        case NpmTlsFramerErrorV1::kHelloLimit:
+        case NpmTlsFramerError::kHelloLimit:
             return Reason::kHelloLimitExceeded;
-        case NpmTlsFramerErrorV1::kIncomplete:
+        case NpmTlsFramerError::kIncomplete:
             return Reason::kClientHelloIncomplete;
         default:
             return Reason::kUnsupportedFraming;
@@ -48,19 +48,19 @@ Reason FramerReason(NpmTlsFramerErrorV1 error, NpmPacketDirection direction, Npm
 
 }  // namespace
 
-NpmTlsHandshakeTrackerV1::NpmTlsHandshakeTrackerV1(uint64_t session_id, NpmTlsConfigV1 config)
+NpmTlsHandshakeTracker::NpmTlsHandshakeTracker(uint64_t session_id, NpmTlsConfig config)
     : session_id_(session_id), config_(std::move(config)), framer_(config_.max_hello_bytes) {}
 
-std::optional<int64_t> NpmTlsHandshakeTrackerV1::NextEventDeadlineNs() const noexcept {
+std::optional<int64_t> NpmTlsHandshakeTracker::NextEventDeadlineNs() const noexcept {
     return closed_ || !candidate_ ? std::nullopt : candidate_->deadline_ns;
 }
 
-void NpmTlsHandshakeTrackerV1::Close(Outcome outcome, Reason reason, int64_t observed_at_ns,
-                                     std::optional<NpmTlsHandshakeResultV1>* result) {
+void NpmTlsHandshakeTracker::Close(Outcome outcome, Reason reason, int64_t observed_at_ns,
+                                   std::optional<NpmTlsHandshakeResult>* result) {
     if (closed_ || !candidate_) return;
-    NpmTlsHandshakeResultV1 next;
+    NpmTlsHandshakeResult next;
     next.handshake = std::move(*candidate_);
-    next.handshake.phase = NpmTlsHandshakePhaseV1::kClosed;
+    next.handshake.phase = NpmTlsHandshakePhase::kClosed;
     next.outcome = outcome;
     next.incomplete_reason = reason;
     next.observed_at_ns = observed_at_ns;
@@ -76,122 +76,120 @@ void NpmTlsHandshakeTrackerV1::Close(Outcome outcome, Reason reason, int64_t obs
     closed_ = true;
 }
 
-void NpmTlsHandshakeTrackerV1::Fail(Reason reason, int64_t observed_at_ns,
-                                    std::optional<NpmTlsHandshakeResultV1>* result) {
+void NpmTlsHandshakeTracker::Fail(Reason reason, int64_t observed_at_ns, std::optional<NpmTlsHandshakeResult>* result) {
     Close(Outcome::kIncomplete, reason, observed_at_ns, result);
 }
 
-NpmTlsTrackerErrorV1 NpmTlsHandshakeTrackerV1::OnFramedEvent(const NpmTlsFramedEventV1& event, int64_t observed_at_ns,
-                                                             std::optional<NpmTlsHandshakeResultV1>* result) {
-    if (!candidate_ || closed_) return NpmTlsTrackerErrorV1::kNone;
+NpmTlsTrackerError NpmTlsHandshakeTracker::OnFramedEvent(const NpmTlsFramedEvent& event, int64_t observed_at_ns,
+                                                         std::optional<NpmTlsHandshakeResult>* result) {
+    if (!candidate_ || closed_) return NpmTlsTrackerError::kNone;
     const bool client = event.direction == candidate_->client_direction;
     const auto phase = candidate_->phase;
-    if (!candidate_->first_client_hello && event.kind != NpmTlsFramedKindV1::kClientHello) {
+    if (!candidate_->first_client_hello && event.kind != NpmTlsFramedKind::kClientHello) {
         Fail(Reason::kClientHelloIncomplete, observed_at_ns, result);
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
-    if (event.kind == NpmTlsFramedKindV1::kAlert) {
+    if (event.kind == NpmTlsFramedKind::kAlert) {
         if (event.record_length == 2 && event.control_bytes[0] == 2) {
             Close(Outcome::kFatalAlertObserved, Reason::kNone, event.complete_at_ns.value_or(observed_at_ns), result);
             result->value().alert_level = 2;
             result->value().alert_description = event.control_bytes[1];
         }
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
-    if (event.kind == NpmTlsFramedKindV1::kChangeCipherSpec) {
+    if (event.kind == NpmTlsFramedKind::kChangeCipherSpec) {
         if (event.record_length != 1 || event.control_bytes[0] != 1) {
             Fail(Reason::kUnsupportedFraming, observed_at_ns, result);
-        } else if (phase == NpmTlsHandshakePhaseV1::kAwaitingTls12Boundary) {
+        } else if (phase == NpmTlsHandshakePhase::kAwaitingTls12Boundary) {
             Close(Outcome::kServerHelloObserved, Reason::kEncryptedAfterChangeCipherSpec, observed_at_ns, result);
         }
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
-    if (event.kind == NpmTlsFramedKindV1::kApplicationData) {
-        if (!client || phase == NpmTlsHandshakePhaseV1::kAwaitingTls12Boundary) {
+    if (event.kind == NpmTlsFramedKind::kApplicationData) {
+        if (!client || phase == NpmTlsHandshakePhase::kAwaitingTls12Boundary) {
             Fail(Reason::kUnsupportedFraming, observed_at_ns, result);
         }
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
-    if (event.kind == NpmTlsFramedKindV1::kOtherHandshake) {
-        if (phase == NpmTlsHandshakePhaseV1::kAwaitingRetryClientHello ||
-            (phase == NpmTlsHandshakePhaseV1::kAwaitingFinalServerHello && client)) {
+    if (event.kind == NpmTlsFramedKind::kOtherHandshake) {
+        if (phase == NpmTlsHandshakePhase::kAwaitingRetryClientHello ||
+            (phase == NpmTlsHandshakePhase::kAwaitingFinalServerHello && client)) {
             Fail(Reason::kUnsupportedFraming, observed_at_ns, result);
         }
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
     if (!event.hello) {
         Fail(Reason::kMalformedHello, observed_at_ns, result);
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
-    if (event.kind == NpmTlsFramedKindV1::kClientHello) {
+    if (event.kind == NpmTlsFramedKind::kClientHello) {
         if (!client || !ValidClientHello(*event.hello)) {
             Fail(client ? Reason::kUnsupportedVersion : Reason::kUnsupportedFraming, observed_at_ns, result);
-        } else if (phase == NpmTlsHandshakePhaseV1::kCandidate) {
+        } else if (phase == NpmTlsHandshakePhase::kCandidate) {
             candidate_->first_client_hello = *event.hello;
-            candidate_->phase = NpmTlsHandshakePhaseV1::kAwaitingServerHello;
-        } else if (phase == NpmTlsHandshakePhaseV1::kAwaitingRetryClientHello && OffersVersion(*event.hello, 0x0304)) {
+            candidate_->phase = NpmTlsHandshakePhase::kAwaitingServerHello;
+        } else if (phase == NpmTlsHandshakePhase::kAwaitingRetryClientHello && OffersVersion(*event.hello, 0x0304)) {
             candidate_->retry_client_hello = *event.hello;
-            candidate_->phase = NpmTlsHandshakePhaseV1::kAwaitingFinalServerHello;
+            candidate_->phase = NpmTlsHandshakePhase::kAwaitingFinalServerHello;
         } else {
             Fail(Reason::kUnsupportedFraming, observed_at_ns, result);
         }
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
-    if (client || (phase != NpmTlsHandshakePhaseV1::kAwaitingServerHello &&
-                   phase != NpmTlsHandshakePhaseV1::kAwaitingFinalServerHello)) {
+    if (client || (phase != NpmTlsHandshakePhase::kAwaitingServerHello &&
+                   phase != NpmTlsHandshakePhase::kAwaitingFinalServerHello)) {
         Fail(Reason::kUnsupportedFraming, observed_at_ns, result);
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
     const auto& hello = *event.hello;
     if (hello.legacy_version != 0x0303 || !hello.cipher_suite || !ValidCipherSuite(*hello.cipher_suite)) {
         Fail(Reason::kUnsupportedVersion, observed_at_ns, result);
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
     if (hello.hello_retry_request) {
-        if (phase != NpmTlsHandshakePhaseV1::kAwaitingServerHello || hello.selected_version != 0x0304 ||
+        if (phase != NpmTlsHandshakePhase::kAwaitingServerHello || hello.selected_version != 0x0304 ||
             !OffersVersion(*candidate_->first_client_hello, 0x0304) || hello.selected_alpn) {
             Fail(Reason::kUnsupportedFraming, observed_at_ns, result);
         } else {
             candidate_->hello_retry_count = 1;
-            candidate_->phase = NpmTlsHandshakePhaseV1::kAwaitingRetryClientHello;
+            candidate_->phase = NpmTlsHandshakePhase::kAwaitingRetryClientHello;
         }
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
     const bool tls13 = hello.selected_version == 0x0304;
     if (hello.selected_version && !tls13 && hello.selected_version != 0x0303) {
         Fail(Reason::kUnsupportedVersion, observed_at_ns, result);
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
-    if (phase == NpmTlsHandshakePhaseV1::kAwaitingFinalServerHello && !tls13) {
+    if (phase == NpmTlsHandshakePhase::kAwaitingFinalServerHello && !tls13) {
         Fail(Reason::kUnsupportedVersion, observed_at_ns, result);
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
     if (tls13 && (!OffersVersion(*candidate_->first_client_hello, 0x0304) || hello.selected_alpn)) {
         Fail(Reason::kUnsupportedVersion, observed_at_ns, result);
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
     candidate_->final_server_hello = hello;
     if (tls13) {
         Close(Outcome::kServerHelloObserved, Reason::kEncryptedAfterServerHello, observed_at_ns, result);
     } else {
-        candidate_->phase = NpmTlsHandshakePhaseV1::kAwaitingTls12Boundary;
+        candidate_->phase = NpmTlsHandshakePhase::kAwaitingTls12Boundary;
     }
-    return NpmTlsTrackerErrorV1::kNone;
+    return NpmTlsTrackerError::kNone;
 }
 
-NpmTlsTrackerErrorV1 NpmTlsHandshakeTrackerV1::Consume(const NpmTcpStreamContextV1& context,
-                                                       const NpmTcpStreamEventV1& event,
-                                                       std::optional<NpmTlsHandshakeResultV1>* result) {
+NpmTlsTrackerError NpmTlsHandshakeTracker::Consume(const NpmTcpStreamContext& context, const NpmTcpStreamEvent& event,
+                                                   std::optional<NpmTlsHandshakeResult>* result) {
     if (!result || !context.session || context.session->session_id != session_id_) {
-        return NpmTlsTrackerErrorV1::kInvalidInput;
+        return NpmTlsTrackerError::kInvalidInput;
     }
     result->reset();
-    if (closed_) return NpmTlsTrackerErrorV1::kNone;
+    if (closed_) return NpmTlsTrackerError::kNone;
     try {
-        std::vector<NpmTlsFramedEventV1> events;
+        std::vector<NpmTlsFramedEvent> events;
         const auto framed = framer_.Consume(context, event, &events);
-        if (framed == NpmTlsFramerErrorV1::kAllocationFailed) return NpmTlsTrackerErrorV1::kAllocationFailed;
-        if (framed == NpmTlsFramerErrorV1::kInvalidInput) return NpmTlsTrackerErrorV1::kInvalidInput;
+        if (framed == NpmTlsFramerError::kAllocationFailed) return NpmTlsTrackerError::kAllocationFailed;
+        if (framed == NpmTlsFramerError::kInvalidInput) return NpmTlsTrackerError::kInvalidInput;
         if (!candidate_ && framer_.HasCandidate()) {
             candidate_.emplace();
             candidate_->session_id = session_id_;
@@ -206,86 +204,85 @@ NpmTlsTrackerErrorV1 NpmTlsHandshakeTrackerV1::Consume(const NpmTcpStreamContext
         }
         for (const auto& item : events) {
             const auto error = OnFramedEvent(item, context.observed_at_ns, result);
-            if (error != NpmTlsTrackerErrorV1::kNone || closed_) return error;
+            if (error != NpmTlsTrackerError::kNone || closed_) return error;
         }
-        if (framed != NpmTlsFramerErrorV1::kNone && candidate_) {
+        if (framed != NpmTlsFramerError::kNone && candidate_) {
             Reason reason = FramerReason(framed, context.direction, candidate_->client_direction);
-            if (framed == NpmTlsFramerErrorV1::kIncomplete) {
-                if (candidate_->phase == NpmTlsHandshakePhaseV1::kAwaitingRetryClientHello ||
-                    candidate_->phase == NpmTlsHandshakePhaseV1::kAwaitingFinalServerHello) {
+            if (framed == NpmTlsFramerError::kIncomplete) {
+                if (candidate_->phase == NpmTlsHandshakePhase::kAwaitingRetryClientHello ||
+                    candidate_->phase == NpmTlsHandshakePhase::kAwaitingFinalServerHello) {
                     reason = Reason::kHelloRetryRequestUnfinished;
                 } else if (candidate_->first_client_hello && context.direction != candidate_->client_direction) {
                     reason = Reason::kServerStreamEnd;
                 }
             }
-            if (candidate_->final_server_hello && candidate_->phase == NpmTlsHandshakePhaseV1::kAwaitingTls12Boundary &&
-                framed == NpmTlsFramerErrorV1::kIncomplete &&
-                event.end_reason == NpmTcpStreamEndReasonV1::kSessionEnd) {
+            if (candidate_->final_server_hello && candidate_->phase == NpmTlsHandshakePhase::kAwaitingTls12Boundary &&
+                framed == NpmTlsFramerError::kIncomplete && event.end_reason == NpmTcpStreamEndReason::kSessionEnd) {
                 Close(Outcome::kServerHelloObserved, Reason::kSessionEndAfterServerHello, context.observed_at_ns,
                       result);
             } else {
                 Fail(reason, context.observed_at_ns, result);
             }
         }
-        if (!closed_ && candidate_ && event.kind == NpmTcpStreamEventKindV1::kEnd &&
-            event.end_reason == NpmTcpStreamEndReasonV1::kFin && context.direction != candidate_->client_direction &&
+        if (!closed_ && candidate_ && event.kind == NpmTcpStreamEventKind::kEnd &&
+            event.end_reason == NpmTcpStreamEndReason::kFin && context.direction != candidate_->client_direction &&
             !candidate_->final_server_hello) {
             Fail(Reason::kServerStreamEnd, context.observed_at_ns, result);
         }
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     } catch (const std::bad_alloc&) {
-        return NpmTlsTrackerErrorV1::kAllocationFailed;
+        return NpmTlsTrackerError::kAllocationFailed;
     }
 }
 
-NpmTlsTrackerErrorV1 NpmTlsHandshakeTrackerV1::OnCaptureWatermark(int64_t watermark_ns,
-                                                                  std::optional<NpmTlsHandshakeResultV1>* result) {
-    if (!result) return NpmTlsTrackerErrorV1::kInvalidInput;
+NpmTlsTrackerError NpmTlsHandshakeTracker::OnCaptureWatermark(int64_t watermark_ns,
+                                                              std::optional<NpmTlsHandshakeResult>* result) {
+    if (!result) return NpmTlsTrackerError::kInvalidInput;
     result->reset();
     if (closed_ || (last_watermark_ns_ && watermark_ns <= *last_watermark_ns_)) {
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
     last_watermark_ns_ = watermark_ns;
     if (!candidate_ || !candidate_->deadline_ns || watermark_ns < *candidate_->deadline_ns) {
-        return NpmTlsTrackerErrorV1::kNone;
+        return NpmTlsTrackerError::kNone;
     }
     if (candidate_->final_server_hello) {
         Close(Outcome::kServerHelloObserved, Reason::kDeadlineAfterServerHello, watermark_ns, result);
-    } else if (candidate_->phase == NpmTlsHandshakePhaseV1::kAwaitingRetryClientHello ||
-               candidate_->phase == NpmTlsHandshakePhaseV1::kAwaitingFinalServerHello) {
+    } else if (candidate_->phase == NpmTlsHandshakePhase::kAwaitingRetryClientHello ||
+               candidate_->phase == NpmTlsHandshakePhase::kAwaitingFinalServerHello) {
         Fail(Reason::kHelloRetryRequestUnfinished, watermark_ns, result);
     } else if (!candidate_->first_client_hello) {
         Fail(Reason::kClientHelloIncomplete, watermark_ns, result);
     } else {
         Fail(Reason::kServerHelloNotObservedByDeadline, watermark_ns, result);
     }
-    return NpmTlsTrackerErrorV1::kNone;
+    return NpmTlsTrackerError::kNone;
 }
 
-NpmTlsTrackerErrorV1 NpmTlsHandshakeTrackerV1::OnSessionEnd(NpmSessionEndReason, int64_t observed_at_ns,
-                                                            std::optional<NpmTlsHandshakeResultV1>* result) {
-    if (!result) return NpmTlsTrackerErrorV1::kInvalidInput;
+NpmTlsTrackerError NpmTlsHandshakeTracker::OnSessionEnd(NpmSessionEndReason, int64_t observed_at_ns,
+                                                        std::optional<NpmTlsHandshakeResult>* result) {
+    if (!result) return NpmTlsTrackerError::kInvalidInput;
     result->reset();
-    if (closed_ || !candidate_) return NpmTlsTrackerErrorV1::kNone;
+    if (closed_ || !candidate_) return NpmTlsTrackerError::kNone;
     if (candidate_->final_server_hello) {
         Close(Outcome::kServerHelloObserved, Reason::kSessionEndAfterServerHello, observed_at_ns, result);
-    } else if (candidate_->phase == NpmTlsHandshakePhaseV1::kAwaitingRetryClientHello ||
-               candidate_->phase == NpmTlsHandshakePhaseV1::kAwaitingFinalServerHello) {
+    } else if (candidate_->phase == NpmTlsHandshakePhase::kAwaitingRetryClientHello ||
+               candidate_->phase == NpmTlsHandshakePhase::kAwaitingFinalServerHello) {
         Fail(Reason::kHelloRetryRequestUnfinished, observed_at_ns, result);
     } else if (!candidate_->first_client_hello) {
         Fail(Reason::kClientHelloIncomplete, observed_at_ns, result);
     } else {
         Fail(Reason::kSessionEnd, observed_at_ns, result);
     }
-    return NpmTlsTrackerErrorV1::kNone;
+    return NpmTlsTrackerError::kNone;
 }
 
-void NpmTlsHandshakeTrackerV1::Abort() noexcept {
+void NpmTlsHandshakeTracker::Abort() noexcept {
     candidate_.reset();
     closed_ = true;
 }
 
-const char* NpmTlsOutcomeNameV1(NpmTlsOutcomeV1 outcome) noexcept {
+const char* NpmTlsOutcomeName(NpmTlsOutcome outcome) noexcept {
     switch (outcome) {
         case Outcome::kServerHelloObserved:
             return "server_hello_observed";
@@ -297,7 +294,7 @@ const char* NpmTlsOutcomeNameV1(NpmTlsOutcomeV1 outcome) noexcept {
     return "incomplete";
 }
 
-const char* NpmTlsIncompleteReasonNameV1(NpmTlsIncompleteReasonV1 reason) noexcept {
+const char* NpmTlsIncompleteReasonName(NpmTlsIncompleteReason reason) noexcept {
     switch (reason) {
         case Reason::kNone:
             return "";

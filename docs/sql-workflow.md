@@ -195,7 +195,7 @@ SQL 在 body.sql_text 中，不能把请求记录整个作为 API body。
 
 <!-- workflow:DNS-LABELS -->
 ```yaml
-api_version: flowsql.io/flow-labeling/v1alpha1
+api_version: flowsql.io/flow-labeling
 kind: FlowLabelingSet
 metadata:
   name: workflow-dns
@@ -231,19 +231,19 @@ spec:
 
 <!-- workflow:E03-CONFIG -->
 ```json
-{"method":"POST","path":"/api/channels/config/publish","body":{"name":"workflow-dns","expected_current_revision":0,"format":"yaml","schema_id":"flowsql.io/flow-labeling/v1alpha1","content_base64":"${LABELS_B64}","original_filename":"workflow-dns.yaml","change_note":"isolated example"}}
+{"method":"POST","path":"/api/channels/config/publish","body":{"name":"workflow-dns","expected_current_revision":0,"format":"yaml","schema_id":"flowsql.io/flow-labeling","content_base64":"${LABELS_B64}","original_filename":"workflow-dns.yaml","change_note":"isolated example"}}
 ```
 
 先选 Basic 输出；相同有限文件可以在不同任务重新读取。final 只输出终态累计值。
 
 <!-- workflow:E03-BASIC -->
 ```json
-{"method":"POST","path":"/api/tasks/batch/execute","body":{"mode":"sync","sql_text":"SELECT * FROM pcapfile.dns_capture USING npm.basic WITH features='basic,session',observing='basic_ipv4',result_mode='final' INTO dataframe.dns_basic"}}
+{"method":"POST","path":"/api/tasks/batch/execute","body":{"mode":"sync","sql_text":"SELECT * FROM pcapfile.dns_capture USING npm.basic WITH features='basic,session',observing='basic_ipv4',parameters='{\"schema_version\":1,\"core\":{\"result_mode\":\"final\"}}' INTO dataframe.dns_basic"}}
 ```
 
 <!-- workflow:E03-SESSION -->
 ```json
-{"method":"POST","path":"/api/tasks/batch/execute","body":{"mode":"sync","sql_text":"SELECT * FROM pcapfile.dns_capture USING npm.basic WITH features='basic,session',observing='session_ipv4',result_mode='final' INTO dataframe.dns_session"}}
+{"method":"POST","path":"/api/tasks/batch/execute","body":{"mode":"sync","sql_text":"SELECT * FROM pcapfile.dns_capture USING npm.basic WITH features='basic,session',observing='session_ipv4',parameters='{\"schema_version\":1,\"core\":{\"result_mode\":\"final\"}}' INTO dataframe.dns_session"}}
 ```
 
 <!-- workflow:E03-DNS -->
@@ -261,12 +261,12 @@ Web 任务摘要不直接返回完整 managed_result；先执行下面的元数�
 {"method":"POST","path":"/api/tasks/batch/execute","body":{"mode":"sync","sql_text":"SELECT * FROM sqlite.work.npm_result_runs WHERE input_namespace='pcapfile.dns_capture' INTO dataframe.dns_runs"}}
 ```
 
-preview dns_runs，核对 status=completed，再在数据库通道查询 npm_basic_ipv4_final_v1、npm_session_ipv4_final_v1、
-npm_dns_transaction_ipv4_final_v1，以 `__npm_run_id` 精确筛选，DNS 预期一个 example.com 的成功响应事务。
+preview dns_runs，核对 status=completed，再在数据库通道查询 npm_basic_ipv4_final、npm_session_ipv4_final、
+npm_dns_transaction_ipv4_final，以 `__npm_run_id` 精确筛选，DNS 预期一个 example.com 的成功响应事务。
 
 <!-- workflow:E03-QUERY -->
 ```json
-{"method":"POST","path":"/api/tasks/batch/execute","body":{"mode":"sync","sql_text":"SELECT * FROM sqlite.work.npm_dns_transaction_ipv4_final_v1 WHERE __npm_run_id='${RUN_ID}' INTO dataframe.dns_transaction"}}
+{"method":"POST","path":"/api/tasks/batch/execute","body":{"mode":"sync","sql_text":"SELECT * FROM sqlite.work.npm_dns_transaction_ipv4_final WHERE __npm_run_id='${RUN_ID}' INTO dataframe.dns_transaction"}}
 ```
 
 preview dns_transaction 核验 qname、outcome、事务数；完整字段见 [NPM](npm.md)。本例只覆盖完整双向 UDP DNS。
@@ -395,8 +395,8 @@ Group 状态中的 `resolved_sources`、`share_sets` 是观测信息，不等同
 | C01 NetAdapter → NPM | `${CAPTURE}` 为可读网卡来源，`${DB}` 为两段托管数据库；加载后端、NPI 和已激活 NPM。`SELECT * FROM netadapter.${CAPTURE} USING npm.basic WITH features='basic,session' INTO ${DB}` | async；从 runtime_task_id 的 batch/status 取得 managed_result，再查询 history；正常 Stop 排空终态。后端权限、缓冲与接口可见性见 [NetAdapter](netadapter.md#通道与生产-sql)。 |
 | C02 Kafka structured source → DataFrame | `${LOG_SOURCE}` 的 source 配置声明 JSON 字段 Schema，身份有 READ/组权限；`SELECT * FROM kafka.${LOG_SOURCE} INTO dataframe.log_samples` | async；结构化实体不能交给 packet 专用算子。最终 DataFrame 发布和 offset 确认不是同一事务，见 [JSON source](kafka.md#结构化-json-source)。 |
 | C03 DataFrame → Kafka result sink | `${RESULT_SINK}` 的 sink 配置使用 JSON 结果信封，包含所需 key/revision 字段，身份有 WRITE；`SELECT * FROM dataframe.csv_copy INTO kafka.${RESULT_SINK}` | 有限来源可 sync/async；每行一条消息，检查 confirmed/not_sent/unknown，空结果不证明写权限，见 [结果 sink](kafka.md#分析结果-json-sink)。 |
-| C04 Kafka packet source → NPM | `${PACKET_SOURCE}` 读取 `flowsql_packet_v1`；单分区 Topic、stream_id、观测域与 inputs 一致，`${DB}` 已创建；`SELECT * FROM kafka.${PACKET_SOURCE} USING npm.basic WITH features='basic,session' INTO ${DB}` | async；原始 Ethernet 包与同次 Capture V2 事实缺一不可，不接收 JSON/PCAP 文件；结果与新 run 规则见 [packet source](kafka.md#原始包-packet-source)。 |
-| C05 NetAdapter → Kafka packet sink | `${CAPTURE}` 为 Capture V2 网卡来源，`${PACKET_SINK}` 是同流单发布者的单分区 packet sink；`SELECT * FROM netadapter.${CAPTURE} INTO kafka.${PACKET_SINK}` | async；仅 SELECT * 直通形状，不加 WHERE/USING/投影。逐批确认不等于零丢包，见 [packet sink](kafka.md#网卡原始包-packet-sink)。 |
+| C04 Kafka packet source → NPM | `${PACKET_SOURCE}` 读取 `flowsql_packet`；单分区 Topic、stream_id、观测域与 inputs 一致，`${DB}` 已创建；`SELECT * FROM kafka.${PACKET_SOURCE} USING npm.basic WITH features='basic,session' INTO ${DB}` | async；原始 Ethernet 包与同次 采集轮询 事实缺一不可，不接收 JSON/PCAP 文件；结果与新 run 规则见 [packet source](kafka.md#原始包-packet-source)。 |
+| C05 NetAdapter → Kafka packet sink | `${CAPTURE}` 为 采集轮询 网卡来源，`${PACKET_SINK}` 是同流单发布者的单分区 packet sink；`SELECT * FROM netadapter.${CAPTURE} INTO kafka.${PACKET_SINK}` | async；仅 SELECT * 直通形状，不加 WHERE/USING/投影。逐批确认不等于零丢包，见 [packet sink](kafka.md#网卡原始包-packet-sink)。 |
 
 Kafka 四类适配器的方向和数据契约独立，不能互换配置。通道 ready、active 或连接验证只证明相应准备层级；
 不证明实际发布、消费或托管结果已经成功。持续 batch 的显式 sync 会在创建任务前返回 ASYNC_EXECUTION_REQUIRED。

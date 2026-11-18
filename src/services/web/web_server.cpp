@@ -447,7 +447,7 @@ int WebServer::Init(const std::string& db_path) {
         res.set_header("Access-Control-Allow-Headers", "Content-Type");
         return httplib::Server::HandlerResponse::Unhandled;
     });
-    server_.Post(R"(/api/visualization/v1/(compute|cancel|snapshots/(acquire|renew|release)))",
+    server_.Post(R"(/api/visualization/(compute|cancel|snapshots/(acquire|renew|release)))",
                  [this](const auto& req, auto& res) { ProxyExploration(visualization_upstream_, req, res); });
     server_.Options(".*", [](const httplib::Request&, httplib::Response& res) {
         res.status = 204;
@@ -481,12 +481,8 @@ int WebServer::Init(const std::string& db_path) {
         res.set_header("Cache-Control", "no-store");
         res.set_content(rsp, "application/json");
     });
-    // list 风格新路由（保留旧路由兼容）
+    // 当前列表路由。
     server_.Get("/api/channels/list", [this](const httplib::Request&, httplib::Response& res) {
-        std::string rsp; HandleGetChannels("", "", rsp);
-        res.set_content(rsp, "application/json");
-    });
-    server_.Get("/api/channels", [this](const httplib::Request&, httplib::Response& res) {
         std::string rsp; HandleGetChannels("", "", rsp);
         res.set_content(rsp, "application/json");
     });
@@ -578,14 +574,6 @@ int WebServer::Init(const std::string& db_path) {
         res.set_content(rsp, "application/json");
     });
     server_.Get("/api/operators/list", [this](const httplib::Request& req, httplib::Response& res) {
-        const std::string type = req.has_param("type") ? req.get_param_value("type") : "python";
-        std::string req_json = std::string("{\"type\":\"") + type + "\"}";
-        std::string rsp;
-        int32_t rc = HandleGetOperators("", req_json, rsp);
-        res.status = (rc == error::OK) ? 200 : (rc == error::NOT_FOUND ? 404 : 400);
-        res.set_content(rsp, "application/json");
-    });
-    server_.Get("/api/operators", [this](const httplib::Request& req, httplib::Response& res) {
         const std::string type = req.has_param("type") ? req.get_param_value("type") : "python";
         std::string req_json = std::string("{\"type\":\"") + type + "\"}";
         std::string rsp;
@@ -794,8 +782,9 @@ int WebServer::Init(const std::string& db_path) {
          {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export", "channels/describe",
           "channels/preview", "channels/check", "channels/apply", "operators/check", "describe",
           "channels/save-description", "operators/save-description"}) {
-        const std::string target = std::string("/semantics/v1/") + operation;
-        server_.Post("/api" + target, [this, target](const httplib::Request& req, httplib::Response& res) {
+        const std::string target = std::string("/semantics/") + operation;
+        server_.Post(std::string("/api/semantics/v1/") + operation, [this, target](const httplib::Request& req,
+                                                                                   httplib::Response& res) {
             std::string response;
             const auto code = ProxySemanticsPost(scheduler_host_, scheduler_port_, target, req.body, &response);
             res.status = ConfigHttpStatus(code);
@@ -1039,10 +1028,6 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleGetChannels(u, req, rsp);
         }});
-    cb({"GET",  "/api/channels",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
-            return HandleGetChannels(u, req, rsp);
-        }});
     cb({"POST", "/api/channels/stream/query",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleQueryStreamChannels(u, req, rsp);
@@ -1068,10 +1053,6 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
             return HandleRemoveStreamChannel(u, req, rsp);
         }});
     cb({"GET",  "/api/operators/list",
-        [this](const std::string& u, const std::string& req, std::string& rsp) {
-            return HandleGetOperators(u, req, rsp);
-        }});
-    cb({"GET",  "/api/operators",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleGetOperators(u, req, rsp);
         }});
@@ -1211,8 +1192,9 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
          {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export", "channels/describe",
           "channels/preview", "channels/check", "channels/apply", "operators/check", "describe",
           "channels/save-description", "operators/save-description"}) {
-        const std::string target = std::string("/semantics/v1/") + operation;
-        cb({"POST", "/api" + target, [this, target](const auto&, const auto& request, auto& response) {
+        const std::string target = std::string("/semantics/") + operation;
+        cb({"POST", std::string("/api/semantics/v1/") + operation,
+            [this, target](const auto&, const auto& request, auto& response) {
                 return ProxySemanticsPost(scheduler_host_, scheduler_port_, target, request, &response);
             }});
     }

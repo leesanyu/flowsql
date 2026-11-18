@@ -17,9 +17,9 @@
 #include "atomic_target.h"
 namespace flowsql::database {
 namespace {
-using Code = DatabaseAtomicCodeV1;
-using Status = DatabaseAtomicStatusV1;
-using Outcome = DatabaseCommitOutcomeV1;
+using Code = DatabaseAtomicCode;
+using Status = DatabaseAtomicStatus;
+using Outcome = DatabaseCommitOutcome;
 using Clock = std::chrono::steady_clock;
 constexpr uint64_t kReadLimit = 1024ULL * 1024 * 1024;
 using Cell = std::optional<std::string>;
@@ -76,7 +76,7 @@ Status BuildBatch(const std::vector<std::shared_ptr<arrow::Field>>& fields, cons
     *output = arrow::RecordBatch::Make(arrow::schema(fields), rows.size(), arrays);
     return {};
 }
-class ServerAtomic : public IDatabaseAtomicSessionV1 {
+class ServerAtomic : public IDatabaseAtomicSession {
  public:
     explicit ServerAtomic(uint32_t timeout) : timeout_(timeout) {}
     Status Begin() override {
@@ -86,14 +86,14 @@ class ServerAtomic : public IDatabaseAtomicSessionV1 {
         if (s.ok()) active_ = true;
         return s;
     }
-    Status ExecutePrepared(const char* sql, const DatabaseParameterV1* p, size_t count, uint64_t* n) override {
+    Status ExecutePrepared(const char* sql, const DatabaseParameter* p, size_t count, uint64_t* n) override {
         if (n) *n = 0;
         if (!n || !active_) return {Code::kInvalidArgument, "active transaction/affected required"};
         if (auto s = Available(); !s.ok()) return s;
         if (auto s = Validate(sql, p, count); !s.ok()) return s;
         return Run(sql, p, count, n, nullptr);
     }
-    Status CreateReader(const char* sql, const DatabaseParameterV1* p, size_t count, IBatchReader** out) override {
+    Status CreateReader(const char* sql, const DatabaseParameter* p, size_t count, IBatchReader** out) override {
         if (!out) return {Code::kInvalidArgument, "reader required"};
         *out = nullptr;
         if (auto s = Available(); !s.ok()) return s;
@@ -116,7 +116,7 @@ class ServerAtomic : public IDatabaseAtomicSessionV1 {
         *out = std::static_pointer_cast<arrow::Int64Array>(batch->column(0))->Value(0);
         return {};
     }
-    DatabaseCommitResultV1 Commit() override {
+    DatabaseCommitResult Commit() override {
         if (!active_) return {{Code::kInvalidArgument, "transaction required"}, Outcome::kRolledBack};
         if (*readers_) {
             auto s = Rollback();
@@ -163,7 +163,7 @@ class ServerAtomic : public IDatabaseAtomicSessionV1 {
     }
 
  protected:
-    virtual Status Run(const char*, const DatabaseParameterV1*, size_t, uint64_t*,
+    virtual Status Run(const char*, const DatabaseParameter*, size_t, uint64_t*,
                        std::shared_ptr<arrow::RecordBatch>*) = 0;
     virtual const char* TimeSql() const = 0;
     virtual bool Connected() const = 0;
@@ -173,13 +173,13 @@ class ServerAtomic : public IDatabaseAtomicSessionV1 {
         if (cancelled_) return {Code::kCancelled, "cancelled"};
         return {};
     }
-    Status Validate(const char* sql, const DatabaseParameterV1* p, size_t count) {
+    Status Validate(const char* sql, const DatabaseParameter* p, size_t count) {
         if (!sql || (count && !p) || count > INT_MAX) return {Code::kInvalidArgument, "invalid parameters"};
         for (size_t i = 0; i < count; ++i) {
             if (p[i].size > INT_MAX || (p[i].size && !p[i].data) ||
-                static_cast<int>(p[i].kind) > static_cast<int>(DatabaseParameterKindV1::kBlob))
+                static_cast<int>(p[i].kind) > static_cast<int>(DatabaseParameterKind::kBlob))
                 return {Code::kInvalidArgument, "invalid parameter size/kind"};
-            if (p[i].kind == DatabaseParameterKindV1::kDouble && !std::isfinite(p[i].double_value))
+            if (p[i].kind == DatabaseParameterKind::kDouble && !std::isfinite(p[i].double_value))
                 return {Code::kInvalidArgument, "nonfinite parameter"};
         }
         return {};
@@ -211,7 +211,7 @@ class MysqlAtomic final : public ServerAtomic {
         if (code == 2006 || code == 2013 || code == 2055) broken_ = true;
         return {cancelled_ ? Code::kCancelled : code == 1205 || broken_ ? Code::kTimeout : Code::kError, message};
     }
-    Status Run(const char* sql, const DatabaseParameterV1* p, size_t count, uint64_t* affected,
+    Status Run(const char* sql, const DatabaseParameter* p, size_t count, uint64_t* affected,
                std::shared_ptr<arrow::RecordBatch>* output) override {
         if (!db_ || cancelled_) return {Code::kCancelled, "connection cancelled"};
         // Socket timeout bounds native prepared operations; cancellation permanently wakes this socket.
@@ -249,25 +249,25 @@ class MysqlAtomic final : public ServerAtomic {
             auto& v = p[i];
             b.is_null = &nulls[i];
             switch (v.kind) {
-                case DatabaseParameterKindV1::kNull:
+                case DatabaseParameterKind::kNull:
                     b.buffer_type = MYSQL_TYPE_NULL;
                     nulls[i] = true;
                     break;
-                case DatabaseParameterKindV1::kInt64:
+                case DatabaseParameterKind::kInt64:
                     b.buffer_type = MYSQL_TYPE_LONGLONG;
                     b.buffer = const_cast<int64_t*>(&v.int64_value);
                     break;
-                case DatabaseParameterKindV1::kUInt64:
+                case DatabaseParameterKind::kUInt64:
                     b.buffer_type = MYSQL_TYPE_LONGLONG;
                     b.is_unsigned = 1;
                     b.buffer = const_cast<uint64_t*>(&v.uint64_value);
                     break;
-                case DatabaseParameterKindV1::kDouble:
+                case DatabaseParameterKind::kDouble:
                     b.buffer_type = MYSQL_TYPE_DOUBLE;
                     b.buffer = const_cast<double*>(&v.double_value);
                     break;
                 default:
-                    b.buffer_type = v.kind == DatabaseParameterKindV1::kString ? MYSQL_TYPE_STRING : MYSQL_TYPE_BLOB;
+                    b.buffer_type = v.kind == DatabaseParameterKind::kString ? MYSQL_TYPE_STRING : MYSQL_TYPE_BLOB;
                     lengths[i] = v.size;
                     b.buffer = const_cast<void*>(v.data ? v.data : static_cast<const void*>(""));
                     b.buffer_length = v.size;
@@ -412,7 +412,7 @@ class PostgresAtomic final : public ServerAtomic {
             if (rc > 0) return {};
         }
     }
-    Status Run(const char* sql, const DatabaseParameterV1* p, size_t count, uint64_t* affected,
+    Status Run(const char* sql, const DatabaseParameter* p, size_t count, uint64_t* affected,
                std::shared_ptr<arrow::RecordBatch>* output) override {
         if (!db_ || cancelled_) return {Code::kCancelled, "connection cancelled"};
         bool valid;
@@ -425,29 +425,29 @@ class PostgresAtomic final : public ServerAtomic {
         for (size_t i = 0; i < count; ++i) {
             auto& v = p[i];
             switch (v.kind) {
-                case DatabaseParameterKindV1::kNull:
+                case DatabaseParameterKind::kNull:
                     continue;
-                case DatabaseParameterKindV1::kInt64:
+                case DatabaseParameterKind::kInt64:
                     values[i] = std::to_string(v.int64_value);
                     break;
-                case DatabaseParameterKindV1::kUInt64:
+                case DatabaseParameterKind::kUInt64:
                     types[i] = 1700;
                     values[i] = std::to_string(v.uint64_value);
                     break;
-                case DatabaseParameterKindV1::kDouble: {
+                case DatabaseParameterKind::kDouble: {
                     types[i] = 701;
                     std::ostringstream stream;
                     stream << std::setprecision(17) << v.double_value;
                     values[i] = stream.str();
                     break;
                 }
-                case DatabaseParameterKindV1::kString:
+                case DatabaseParameterKind::kString:
                     values[i].assign(v.data ? static_cast<const char*>(v.data) : "", v.size);
                     if (values[i].find('\0') != std::string::npos)
                         return {Code::kInvalidArgument, "NUL text parameter"};
                     types[i] = 25;
                     break;
-                case DatabaseParameterKindV1::kBlob:
+                case DatabaseParameterKind::kBlob:
                     types[i] = 17;
                     pointers[i] = v.data ? static_cast<const char*>(v.data) : "";
                     lengths[i] = v.size;
@@ -548,10 +548,10 @@ class PostgresAtomic final : public ServerAtomic {
     PGconn* db_;
 };
 }  // namespace
-DatabaseAtomicStatusV1 MakeServerAtomicSession(const std::string& backend,
-                                               const std::unordered_map<std::string, std::string>& p,
-                                               const DatabaseAtomicSessionOptionsV1& options,
-                                               std::shared_ptr<IDatabaseAtomicSessionV1>* output) {
+DatabaseAtomicStatus MakeServerAtomicSession(const std::string& backend,
+                                             const std::unordered_map<std::string, std::string>& p,
+                                             const DatabaseAtomicSessionOptions& options,
+                                             std::shared_ptr<IDatabaseAtomicSession>* output) {
     if (backend == "mysql") {
         MYSQL* db = mysql_init(nullptr);
         if (!db) return {Code::kError, "connection allocation failed"};

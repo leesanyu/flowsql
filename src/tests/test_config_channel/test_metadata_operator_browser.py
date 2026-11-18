@@ -18,7 +18,7 @@ def main():
         directory = Path(temporary)
         with running_contract_host(Path(sys.argv[1]).resolve(), directory) as (base, _, log):
             bind_input(base)
-            multi = Path(sys.argv[1]).resolve().parent / 'libfixture_cpp_operator_v2.so'
+            multi = Path(sys.argv[1]).resolve().parent / 'libfixture_cpp_operator_capabilities.so'
             source = Path(__file__).with_name('fixtures').joinpath('description_chisquare.py').read_text()
             api(base,'operators/upload',dict(type='python',filename='explore_chisquare.py',content=source))
             for name in ['legacy', 'long_name_'*8]:

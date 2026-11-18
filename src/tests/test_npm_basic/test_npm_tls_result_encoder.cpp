@@ -48,15 +48,15 @@ class FailingPool final : public arrow::MemoryPool {
 };
 
 template <typename Address>
-class Emitter final : public npm::INpmResultEmitterV1 {
+class Emitter final : public npm::INpmResultEmitter {
  public:
     explicit Emitter(std::shared_ptr<Budget> budget) : budget_(std::move(budget)) {}
     int Emit(std::string_view entity, const arrow::RecordBatch& rows) override {
         ++calls;
         assert(entity == (sizeof(Address) == 4 ? "tls_handshake_ipv4" : "tls_handshake_ipv6") && budget_->used > 0);
-        const auto descriptor = npm::NpmTlsHandshakeEntityDescriptorV1(
+        const auto descriptor = npm::NpmTlsHandshakeEntityDescriptor(
             sizeof(Address) == 4 ? flowsql::packet::AddressFamily::kIPv4 : flowsql::packet::AddressFamily::kIPv6);
-        assert(npm::ValidateNpmEntityRowsV1("tls", descriptor, rows).error == npm::NpmProtocolContractErrorV1::kNone);
+        assert(npm::ValidateNpmEntityRows("tls", descriptor, rows).error == npm::NpmProtocolContractError::kNone);
         assert(rows.schema()->Equals(*descriptor.schema, true) && rows.num_rows() == 1);
         auto domain = std::static_pointer_cast<arrow::UInt64Array>(rows.GetColumnByName("observation_domain_id"));
         auto outcome = std::static_pointer_cast<arrow::StringArray>(rows.GetColumnByName("outcome"));
@@ -112,7 +112,7 @@ void TestEncoder() {
     auto& row = session.transaction;
     row.handshake.entity_instance_id = 9;
     row.handshake.session_id = 7;
-    row.handshake.phase = npm::NpmTlsHandshakePhaseV1::kClosed;
+    row.handshake.phase = npm::NpmTlsHandshakePhase::kClosed;
     row.handshake.first_client_hello.emplace();
     row.handshake.first_client_hello->offered_versions = {0x0304};
     row.handshake.first_client_hello->offered_alpn = {"h2", "http/1.1"};
@@ -122,33 +122,33 @@ void TestEncoder() {
     row.handshake.final_server_hello->selected_version = 0x0304;
     row.handshake.final_server_hello->cipher_suite = 0x1301;
     row.handshake.final_server_hello->complete_at_ns = 20;
-    row.outcome = npm::NpmTlsOutcomeV1::kServerHelloObserved;
-    row.incomplete_reason = npm::NpmTlsIncompleteReasonV1::kEncryptedAfterServerHello;
+    row.outcome = npm::NpmTlsOutcome::kServerHelloObserved;
+    row.incomplete_reason = npm::NpmTlsIncompleteReason::kEncryptedAfterServerHello;
     row.observed_at_ns = 20;
     row.server_hello_latency_ns = 10;
-    assert(npm::EmitNpmTlsHandshakeV1(session, budget, emitter) == 0);
+    assert(npm::EmitNpmTlsHandshake(session, budget, emitter) == 0);
     assert(budget->used == 0 && emitter.calls == 1);
     emitter.error = EIO;
-    assert(npm::EmitNpmTlsHandshakeV1(session, budget, emitter) == EIO);
+    assert(npm::EmitNpmTlsHandshake(session, budget, emitter) == EIO);
     assert(budget->used == 0 && emitter.calls == 2);
     budget->limit = 1;
-    assert(npm::EmitNpmTlsHandshakeV1(session, budget, emitter) == ENOSPC);
+    assert(npm::EmitNpmTlsHandshake(session, budget, emitter) == ENOSPC);
     assert(budget->used == 0 && emitter.calls == 2);
     budget->limit = 1024 * 1024;
     FailingPool pool;
-    assert(npm::EmitNpmTlsHandshakeV1(session, budget, emitter, &pool) == ENOMEM);
+    assert(npm::EmitNpmTlsHandshake(session, budget, emitter, &pool) == ENOMEM);
     assert(budget->used == 0 && emitter.calls == 2);
     row.handshake.final_server_hello->selected_version = 0x0303;
     row.handshake.final_server_hello->selected_alpn = std::string("h\0\xff\"", 4);
-    row.incomplete_reason = npm::NpmTlsIncompleteReasonV1::kSessionEndAfterServerHello;
+    row.incomplete_reason = npm::NpmTlsIncompleteReason::kSessionEndAfterServerHello;
     emitter.error = 0;
     emitter.expected_version = 0x0303;
     emitter.expected_reason = "session_end_after_server_hello";
     emitter.expected_selected_alpn = "\"h\\u0000\\u00ff\\\"\"";
-    assert(npm::EmitNpmTlsHandshakeV1(session, budget, emitter) == 0);
+    assert(npm::EmitNpmTlsHandshake(session, budget, emitter) == 0);
     assert(budget->used == 0 && emitter.calls == 3);
     row.handshake.entity_instance_id = 0;
-    assert(npm::EmitNpmTlsHandshakeV1(session, budget, emitter) == EINVAL);
+    assert(npm::EmitNpmTlsHandshake(session, budget, emitter) == EINVAL);
 }
 
 }  // namespace

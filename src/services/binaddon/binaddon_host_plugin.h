@@ -28,8 +28,8 @@ namespace binaddon {
 
 class __attribute__((visibility("default"))) BinAddonHostPlugin : public IPlugin,
                                                                   public IBinAddonHost,
-                                                                  public ICppOperatorPluginRegistryV1,
-                                                                  public ICppOperatorContractProviderV1 {
+                                                                  public ICppOperatorPluginRegistry,
+                                                                  public ICppOperatorContractProvider {
  public:
     struct PluginStoreRow {
         std::string plugin_id;
@@ -64,15 +64,13 @@ class __attribute__((visibility("default"))) BinAddonHostPlugin : public IPlugin
         std::atomic<int> active_count{0};
         std::atomic<bool> pending_unload{false};
         CppOperatorPluginCountFn count_fn = nullptr;
-        CppOperatorPluginCreateV1Fn create_fn = nullptr;
-        CppOperatorPluginDestroyV1Fn destroy_fn = nullptr;
-        CppOperatorPluginDescribeV2Fn describe_fn = nullptr;
-        CppOperatorPluginCreateCapabilityV2Fn create_capability_fn = nullptr;
-        CppOperatorPluginDestroyCapabilityV2Fn destroy_capability_fn = nullptr;
+        CppOperatorPluginDescribeFn describe_fn = nullptr;
+        CppOperatorPluginCreateCapabilityFn create_capability_fn = nullptr;
+        CppOperatorPluginDestroyCapabilityFn destroy_capability_fn = nullptr;
         std::vector<std::string> operator_keys;
         std::vector<std::string> operator_names;
         std::vector<Capability> capabilities;
-        std::vector<OperatorComponentContractV1> data_contracts;
+        std::vector<OperatorComponentContract> data_contracts;
         ~LoadedPlugin();
     };
 
@@ -94,11 +92,11 @@ class __attribute__((visibility("default"))) BinAddonHostPlugin : public IPlugin
     int DeleteCppPlugin(const std::string& plugin_id, std::string& rsp) override;
     int GetCppPluginDetail(const std::string& plugin_id, std::string& rsp) override;
 
-    // ICppOperatorPluginRegistryV1
+    // ICppOperatorPluginRegistry
     int Acquire(const char* category, const char* name, const Guid& contract_iid,
-                CppOperatorCapabilityLeaseV1* lease) override;
+                CppOperatorCapabilityLease* lease) override;
     int AcquireContract(const char* category, const char* name, const Guid& execution_iid,
-                        CppOperatorCapabilityLeaseV1* lease, OperatorComponentContractV1* component) override;
+                        CppOperatorCapabilityLease* lease, OperatorComponentContract* component) override;
 
  private:
     int EnsureOperatorDbDir() const;

@@ -33,10 +33,10 @@ class __attribute__((visibility("default"))) CatalogPlugin : public IPlugin,
                                                              public IChannelRegistry,
                                                              public IOperatorRegistry,
                                                              public IOperatorCatalog,
-                                                             public IOperatorContractCatalogV1,
+                                                             public IOperatorContractCatalog,
                                                              public IRouterHandle,
-                                                             public IDataFrameSnapshotProviderV1,
-                                                             public IChannelDatasetDescriptorV1 {
+                                                             public IDataFrameSnapshotProvider,
+                                                             public IChannelDatasetDescriptor {
  public:
     CatalogPlugin() = default;
     ~CatalogPlugin() override;
@@ -55,10 +55,10 @@ class __attribute__((visibility("default"))) CatalogPlugin : public IPlugin,
     int Rename(const char* old_name, const char* new_name) override;
     void List(std::function<void(const char* name, std::shared_ptr<IChannel>)> callback) override;
 
-    int List(std::vector<DataFrameSourceV1>* output, std::string* error) override;
-    int Acquire(const DataFrameSnapshotRequestV1& request, DataFrameSnapshotV1* output, std::string* error) override;
+    int List(std::vector<DataFrameSource>* output, std::string* error) override;
+    int Acquire(const DataFrameSnapshotRequest& request, DataFrameSnapshot* output, std::string* error) override;
     const char* ProviderId() const override { return "dataframe"; }
-    int Describe(const ChannelDatasetRequestV1&, ChannelDatasetSnapshotV1*, DataSemanticsErrorV1*) override;
+    int Describe(const ChannelDatasetRequest&, ChannelDatasetSnapshot*, DataSemanticsError*) override;
 
     // IOperatorRegistry
     int Register(const char* name, OperatorFactory factory) override;
@@ -71,10 +71,10 @@ class __attribute__((visibility("default"))) CatalogPlugin : public IPlugin,
     UpsertResult UpsertBatch(const std::vector<OperatorMeta>& operators) override;
     int SetActive(const std::string& category, const std::string& name, bool active) override;
 
-    int Prepare(const std::vector<OperatorContractDeclarationV1>&, std::vector<PreparedOperatorContractV1>*,
-                DataSemanticsErrorV1*) override;
-    int Commit(const std::vector<PreparedOperatorContractV1>&, DataSemanticsErrorV1*) override;
-    int Lookup(const char*, const char*, OperatorComponentContractV1*, DataSemanticsErrorV1*) override;
+    int Prepare(const std::vector<OperatorContractDeclaration>&, std::vector<PreparedOperatorContract>*,
+                DataSemanticsError*) override;
+    int Commit(const std::vector<PreparedOperatorContract>&, DataSemanticsError*) override;
+    int Lookup(const char*, const char*, OperatorComponentContract*, DataSemanticsError*) override;
 
     // IRouterHandle
     void EnumRoutes(std::function<void(const RouteItem&)> callback) override;
@@ -115,8 +115,6 @@ class __attribute__((visibility("default"))) CatalogPlugin : public IPlugin,
                              const std::string* position);
     std::string OperatorsDirPath() const;
     std::string OperatorContentPath(const std::string& category, const std::string& name) const;
-    int LoadOperatorContent(const std::string& category, const std::string& name, std::string* content) const;
-    int SaveOperatorContent(const std::string& category, const std::string& name, const std::string& content) const;
 
     std::string GenerateImportName(const std::string& filename);
     static const char* DataTypeName(DataType t);

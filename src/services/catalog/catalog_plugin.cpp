@@ -79,7 +79,7 @@ std::string ToLowerAscii(std::string s) {
     return s;
 }
 
-int32_t PythonPublicationError(const DataSemanticsErrorV1& issue, std::string* response) {
+int32_t PythonPublicationError(const DataSemanticsError& issue, std::string* response) {
     dataset::Json result(rapidjson::kObjectType);
     rapidjson::Value detail(rapidjson::kObjectType);
     auto& a = result.GetAllocator();
@@ -102,18 +102,6 @@ bool IsSafeUploadFilename(const std::string& filename) {
     if (filename.find("..") != std::string::npos) return false;
     if (filename.find('/') != std::string::npos || filename.find('\\') != std::string::npos) return false;
     return true;
-}
-
-int MoveUploadedFile(const fs::path& src, const fs::path& dst) {
-    std::error_code ec;
-    fs::rename(src, dst, ec);
-    if (!ec) return 0;
-
-    ec.clear();
-    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
-    if (ec) return -1;
-    fs::remove(src, ec);
-    return 0;
 }
 
 constexpr size_t kPacketPreviewBytes = 64;
@@ -277,25 +265,14 @@ int CatalogPlugin::Load(IQuerier* querier) {
     }
 
     bool ok = true;
-    std::unordered_set<std::string> seen;
     builtin_registry->ListBuiltinOperators([&](const BuiltinOperatorDescriptor& desc) {
         const auto make_factory = [builtin_registry, category = desc.category, name = desc.name]() -> IOperator* {
             return builtin_registry->CreateBuiltinOperator(category, name);
         };
-
-        auto register_one = [&](const std::string& reg_name) {
-            if (reg_name.empty()) return;
-            const std::string key = ToLowerAscii(reg_name);
-            if (!seen.insert(key).second) return;
-            if (Register(reg_name.c_str(), make_factory) != 0) {
-                LOG_ERROR("CatalogPlugin::Load: register builtin operator failed: %s", reg_name.c_str());
-                ok = false;
-            }
-        };
-
-        register_one(desc.category + "." + desc.name);
-        for (const auto& alias : desc.aliases) {
-            register_one(alias);
+        const std::string full_name = desc.category + "." + desc.name;
+        if (Register(full_name.c_str(), make_factory) != 0) {
+            LOG_ERROR("CatalogPlugin::Load: register builtin operator failed: %s", full_name.c_str());
+            ok = false;
         }
     });
     if (!ok) return -1;
@@ -359,7 +336,7 @@ int CatalogPlugin::Register(const char* name, std::shared_ptr<IChannel> channel)
     std::lock_guard<std::mutex> lock(mu_);
     if (channels_.find(name) != channels_.end()) return -1;
     if (df_channel) {
-        auto* metadata = dynamic_cast<IDataFrameMetadataV1*>(channel.get());
+        auto* metadata = dynamic_cast<IDataFrameMetadata*>(channel.get());
         if (DatasetIdentity(name, metadata ? metadata->DescribeMetadata().replacement_generation : 0, true).empty())
             return -1;
     }
@@ -433,20 +410,20 @@ void CatalogPlugin::List(std::function<void(const char* name, std::shared_ptr<IC
     for (const auto& [name, ch] : snapshot) callback(name.c_str(), ch);
 }
 
-int CatalogPlugin::List(std::vector<DataFrameSourceV1>* output, std::string* error) {
+int CatalogPlugin::List(std::vector<DataFrameSource>* output, std::string* error) {
     if (!output || !error) return -1;
     output->clear();
     error->clear();
     std::lock_guard<std::mutex> lock(mu_);
     for (const auto& [name, channel] : channels_) {
-        if (dynamic_cast<IDataFrameSnapshotReaderV1*>(channel.get()))
+        if (dynamic_cast<IDataFrameSnapshotReader*>(channel.get()))
             output->push_back({source_ids_.at(name), "dataframe." + name});
     }
     std::sort(output->begin(), output->end(), [](const auto& a, const auto& b) { return a.label < b.label; });
     return 0;
 }
 
-int CatalogPlugin::Acquire(const DataFrameSnapshotRequestV1& request, DataFrameSnapshotV1* output, std::string* error) {
+int CatalogPlugin::Acquire(const DataFrameSnapshotRequest& request, DataFrameSnapshot* output, std::string* error) {
     if (!output || !error) return -1;
     *output = {};
     error->clear();
@@ -459,12 +436,12 @@ int CatalogPlugin::Acquire(const DataFrameSnapshotRequestV1& request, DataFrameS
                 break;
             }
     }
-    auto* reader = channel ? dynamic_cast<IDataFrameSnapshotReaderV1*>(channel.get()) : nullptr;
+    auto* reader = channel ? dynamic_cast<IDataFrameSnapshotReader*>(channel.get()) : nullptr;
     if (!reader) {
         *error = "SOURCE_UNAVAILABLE";
         return -1;
     }
-    DataFrameSnapshotV1 snapshot;
+    DataFrameSnapshot snapshot;
     if (reader->CaptureSnapshot(request, &snapshot.batch, &snapshot.retained_bytes, error) != 0) return -1;
     snapshot.schema_revision = SnapshotSchemaRevision(*snapshot.batch->schema());
     if (snapshot.schema_revision.empty()) {
@@ -486,17 +463,25 @@ int CatalogPlugin::Acquire(const DataFrameSnapshotRequestV1& request, DataFrameS
 }
 
 int CatalogPlugin::Register(const char* name, OperatorFactory factory) {
-    if (!name || !*name || !factory) return -1;
+    if (!name || !factory) return -1;
+    const std::string full_name(name);
+    const auto separator = full_name.find('.');
+    if (separator == std::string::npos || separator == 0 || separator + 1 == full_name.size()) return -1;
     std::lock_guard<std::mutex> lock(mu_);
     return op_factories_.emplace(name, std::move(factory)).second ? 0 : -1;
 }
 
 IOperator* CatalogPlugin::Create(const char* name) {
     if (!name || !*name) return nullptr;
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = op_factories_.find(name);
-    if (it == op_factories_.end()) return nullptr;
-    return it->second();
+    OperatorFactory factory;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = op_factories_.find(name);
+        if (it == op_factories_.end()) return nullptr;
+        factory = it->second;
+    }
+    // Plugin creation may use IQuerier to call this catalog again.
+    return factory();
 }
 
 int CatalogPlugin::RemoveFactory(const char* name) {
@@ -613,19 +598,19 @@ int CatalogPlugin::SetActive(const std::string& category, const std::string& nam
 void CatalogPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
     cb({"POST", "/channels/dataframe/dataset/describe",
         [this](const auto&, const auto& req, auto& rsp) { return dataset::DescriptorControl(*this, req, rsp); }});
-    cb({"GET", "/channels/dataframe/exploration/v1/sources",
+    cb({"GET", "/channels/dataframe/exploration/sources",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleSnapshotSources(u, req, rsp);
         }});
-    cb({"POST", "/channels/dataframe/exploration/v1/snapshots/acquire",
+    cb({"POST", "/channels/dataframe/exploration/snapshots/acquire",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleSnapshotAcquire(u, req, rsp);
         }});
-    cb({"POST", "/channels/dataframe/exploration/v1/snapshots/cancel",
+    cb({"POST", "/channels/dataframe/exploration/snapshots/cancel",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleSnapshotCancel(u, req, rsp);
         }});
-    cb({"POST", "/channels/dataframe/exploration/v1/snapshots/release",
+    cb({"POST", "/channels/dataframe/exploration/snapshots/release",
         [this](const std::string& u, const std::string& req, std::string& rsp) {
             return HandleSnapshotRelease(u, req, rsp);
         }});
@@ -668,7 +653,7 @@ void CatalogPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
 }
 
 int32_t CatalogPlugin::HandleSnapshotSources(const std::string&, const std::string&, std::string& rsp) {
-    std::vector<DataFrameSourceV1> sources;
+    std::vector<DataFrameSource> sources;
     std::string error_text;
     if (List(&sources, &error_text) != 0) {
         rsp = R"({"code":"DATA_PLANE_UNAVAILABLE"})";
@@ -714,13 +699,13 @@ int32_t CatalogPlugin::HandleSnapshotAcquire(const std::string&, const std::stri
         rsp = R"({"code":"INVALID_REQUEST"})";
         return error::BAD_REQUEST;
     }
-    DataFrameSnapshotRequestV1 request;
+    DataFrameSnapshotRequest request;
     request.source_id = source_id;
     request.max_bytes = max_bytes;
     request.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     auto cancellation = std::make_shared<std::atomic_bool>(false);
     request.cancelled = cancellation;
-    DataFrameTransferInfoV1 info;
+    DataFrameTransferInfo info;
     std::string failure;
     if (dataframe_transfers_.Acquire(*this, request_id, request, &info, &failure) != 0) {
         rsp = "{\"request_id\":\"" + request_id + "\",\"code\":\"" + failure + "\"}";
@@ -1275,67 +1260,20 @@ int32_t CatalogPlugin::HandleOperatorUpload(const std::string&, const std::strin
         return host->UploadCppPlugin(filename, tmp_path, rsp);
     }
 
-    auto* publisher = querier_
-                          ? static_cast<IPythonOperatorPublisherV1*>(querier_->First(IID_PYTHON_OPERATOR_PUBLISHER_V1))
-                          : nullptr;
-    if (publisher) {
-        std::ifstream input(src, std::ios::binary);
-        const std::string content{std::istreambuf_iterator<char>(input), {}};
-        DataSemanticsErrorV1 issue;
-        const auto expected = dataset::Get(doc, "expected_component_revision");
-        if (publisher->PublishPythonSource(filename.c_str(), content.c_str(), expected.c_str(), &rsp, &issue)) {
-            return PythonPublicationError(issue, &rsp);
-        }
-        return error::OK;
+    auto* publisher =
+        querier_ ? static_cast<IPythonOperatorPublisher*>(querier_->First(IID_PYTHON_OPERATOR_PUBLISHER)) : nullptr;
+    if (!publisher) {
+        rsp = R"({"error":{"code":"UNAVAILABLE","message":"Python publisher unavailable"}})";
+        return error::UNAVAILABLE;
     }
-    // Legacy minimal deployments can persist undeclared source without a Worker.
-    // An existing declared component cannot silently take this path.
-    const auto stem = fs::path(filename).stem().string();
-    const auto separator = stem.find('_');
-    if (separator != std::string::npos) {
-        OperatorComponentContractV1 previous;
-        DataSemanticsErrorV1 issue;
-        if (Lookup(stem.substr(0, separator).c_str(), stem.substr(separator + 1).c_str(), &previous, &issue) ||
-            previous.contract_state == "declared") {
-            rsp = R"({"error":{"code":"UNAVAILABLE","message":"Python publisher unavailable for declared component"}})";
-            return error::UNAVAILABLE;
-        }
+    std::ifstream input(src, std::ios::binary);
+    const std::string content{std::istreambuf_iterator<char>(input), {}};
+    DataSemanticsError issue;
+    const auto expected = dataset::Get(doc, "expected_component_revision");
+    if (publisher->PublishPythonSource(filename.c_str(), content.c_str(), expected.c_str(), &rsp, &issue)) {
+        return PythonPublicationError(issue, &rsp);
     }
-
-    fs::path target_dir = OperatorsDirPath();
-
-    std::error_code ec;
-    fs::create_directories(target_dir, ec);
-    if (ec) {
-        rsp = R"({"error":"failed to create target directory"})";
-        return error::INTERNAL_ERROR;
-    }
-
-    const fs::path dst = target_dir / filename;
-    if (EqualsIgnoreCase(type, "python")) {
-        if (fs::exists(dst)) fs::remove(dst, ec);
-        if (MoveUploadedFile(src, dst) != 0) {
-            rsp = R"({"error":"failed to persist uploaded file"})";
-            return error::INTERNAL_ERROR;
-        }
-        rapidjson::StringBuffer buf;
-        rapidjson::Writer<rapidjson::StringBuffer> w(buf);
-        w.StartObject();
-        w.Key("ok");
-        w.Bool(true);
-        w.Key("type");
-        w.String("python");
-        w.Key("filename");
-        w.String(filename.c_str());
-        w.Key("path");
-        w.String(dst.string().c_str());
-        w.EndObject();
-        rsp = buf.GetString();
-        return error::OK;
-    }
-
-    rsp = R"({"error":"unexpected type"})";
-    return error::BAD_REQUEST;
+    return error::OK;
 }
 
 int32_t CatalogPlugin::HandleOperatorDelete(const std::string&, const std::string& req, std::string& rsp) {
@@ -1474,14 +1412,13 @@ int32_t CatalogPlugin::HandleOperatorDetail(const std::string&, const std::strin
         return error::NOT_FOUND;
     }
 
-    OperatorComponentContractV1 association;
-    DataSemanticsErrorV1 contract_error;
+    OperatorComponentContract association;
+    DataSemanticsError contract_error;
     const bool association_available = Lookup(category.c_str(), name.c_str(), &association, &contract_error) == 0;
     if (association_available && association.contract_state == "declared") {
         auto* definitions =
-            querier_ ? static_cast<IDataSemanticsRegistryV1*>(querier_->First(IID_DATA_SEMANTICS_REGISTRY_V1))
-                     : nullptr;
-        DataSemanticsSnapshotV1 snapshot;
+            querier_ ? static_cast<IDataSemanticsRegistry*>(querier_->First(IID_DATA_SEMANTICS_REGISTRY)) : nullptr;
+        DataSemanticsSnapshot snapshot;
         if (!definitions || definitions->Resolve(association.contract_ref.c_str(), &snapshot, &contract_error))
             association.contract_state = "unavailable";
     }
@@ -1525,19 +1462,17 @@ int32_t CatalogPlugin::HandleOperatorDetail(const std::string&, const std::strin
         std::string content;
         bool available = false;
         auto* publisher =
-            querier_ ? static_cast<IPythonOperatorPublisherV1*>(querier_->First(IID_PYTHON_OPERATOR_PUBLISHER_V1))
-                     : nullptr;
+            querier_ ? static_cast<IPythonOperatorPublisher*>(querier_->First(IID_PYTHON_OPERATOR_PUBLISHER)) : nullptr;
         if (publisher) {
             std::string source_response;
-            DataSemanticsErrorV1 issue;
+            DataSemanticsError issue;
             if (!publisher->ReadPythonSource(meta.category.c_str(), meta.name.c_str(), &source_response, &issue)) {
                 dataset::Json source;
                 source.Parse(source_response.c_str());
                 content = dataset::Get(source, "source");
                 available = true;
             }
-        } else
-            available = LoadOperatorContent(meta.category, meta.name, &content) == 0;
+        }
         if (available) {
             w.Key("content");
             w.String(content.c_str());
@@ -1671,26 +1606,21 @@ int32_t CatalogPlugin::HandleOperatorUpdate(const std::string&, const std::strin
 
     if (content_ptr) {
         auto* publisher =
-            querier_ ? static_cast<IPythonOperatorPublisherV1*>(querier_->First(IID_PYTHON_OPERATOR_PUBLISHER_V1))
-                     : nullptr;
-        OperatorComponentContractV1 previous;
-        DataSemanticsErrorV1 issue;
-        if (Lookup(category.c_str(), name.c_str(), &previous, &issue)) return error::UNAVAILABLE;
-        if (publisher) {
-            std::string source_response;
-            if (publisher->ReadPythonSource(category.c_str(), name.c_str(), &source_response, &issue))
-                return PythonPublicationError(issue, &rsp);
-            dataset::Json source_info;
-            source_info.Parse(source_response.c_str());
-            const auto filename = dataset::Get(source_info, "filename");
-            const auto expected = dataset::Get(doc, "expected_component_revision");
-            if (publisher->PublishPythonSource(filename.c_str(), content.c_str(), expected.c_str(), &rsp, &issue)) {
-                return PythonPublicationError(issue, &rsp);
-            }
-            content_ptr = nullptr;
-        } else if (previous.contract_state == "declared") {
-            rsp = R"({"error":{"code":"UNAVAILABLE","message":"Python publisher unavailable for declared component"}})";
+            querier_ ? static_cast<IPythonOperatorPublisher*>(querier_->First(IID_PYTHON_OPERATOR_PUBLISHER)) : nullptr;
+        if (!publisher) {
+            rsp = R"({"error":{"code":"UNAVAILABLE","message":"Python publisher unavailable"}})";
             return error::UNAVAILABLE;
+        }
+        DataSemanticsError issue;
+        std::string source_response;
+        if (publisher->ReadPythonSource(category.c_str(), name.c_str(), &source_response, &issue))
+            return PythonPublicationError(issue, &rsp);
+        dataset::Json source_info;
+        source_info.Parse(source_response.c_str());
+        const auto filename = dataset::Get(source_info, "filename");
+        const auto expected = dataset::Get(doc, "expected_component_revision");
+        if (publisher->PublishPythonSource(filename.c_str(), content.c_str(), expected.c_str(), &rsp, &issue)) {
+            return PythonPublicationError(issue, &rsp);
         }
     }
 
@@ -1698,10 +1628,6 @@ int32_t CatalogPlugin::HandleOperatorUpdate(const std::string&, const std::strin
     if (rc == 1) return error::NOT_FOUND;
     if (rc != 0) {
         rsp = R"({"error":"failed to update operator"})";
-        return error::INTERNAL_ERROR;
-    }
-    if (content_ptr != nullptr && SaveOperatorContent(category, name, *content_ptr) != 0) {
-        rsp = R"({"error":"failed to update operator content"})";
         return error::INTERNAL_ERROR;
     }
     rsp = R"({"ok":true})";
@@ -1767,28 +1693,17 @@ int CatalogPlugin::EnsureOperatorCatalogDb() {
         return -1;
     }
 
-    if (sqlite3_exec(operator_db_, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr) != SQLITE_OK) {
+    if (EnsureOperatorCatalogSchema() != 0 ||
+        sqlite3_exec(operator_db_, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr) != SQLITE_OK) {
         sqlite3_close(operator_db_);
         operator_db_ = nullptr;
         return -1;
     }
-    return EnsureOperatorCatalogSchema();
+    return 0;
 }
 
 int CatalogPlugin::EnsureOperatorCatalogSchema() {
     if (operator_db_ == nullptr) return -1;
-    if (sqlite3_exec(operator_db_,
-                     "CREATE TABLE IF NOT EXISTS dataset_identities(name TEXT PRIMARY KEY,"
-                     "object_id TEXT NOT NULL,file_stamp TEXT NOT NULL)",
-                     nullptr, nullptr, nullptr) != SQLITE_OK)
-        return -1;
-    if (sqlite3_exec(operator_db_,
-                     "CREATE TABLE IF NOT EXISTS operator_contract_association("
-                     "category TEXT NOT NULL COLLATE NOCASE,name TEXT NOT NULL COLLATE NOCASE,"
-                     "component_revision TEXT NOT NULL,operator_version TEXT NOT NULL,"
-                     "contract_ref TEXT NOT NULL,contract_state TEXT NOT NULL,PRIMARY KEY(category,name))",
-                     nullptr, nullptr, nullptr) != SQLITE_OK)
-        return -1;
     const char* ddl_catalog =
         "CREATE TABLE IF NOT EXISTS operator_catalog ("
         "category TEXT NOT NULL,"
@@ -1807,33 +1722,26 @@ int CatalogPlugin::EnsureOperatorCatalogSchema() {
         ");";
     if (sqlite3_exec(operator_db_, ddl_catalog, nullptr, nullptr, nullptr) != SQLITE_OK) return -1;
 
-    // 补 plugin_id 列（仅支持 category 字段，不再保留旧别名）
-    bool has_category = false;
-    bool has_plugin_id = false;
-    sqlite3_stmt* info = nullptr;
-    if (sqlite3_prepare_v2(operator_db_, "PRAGMA table_info(operator_catalog);", -1, &info, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(info) == SQLITE_ROW) {
-            const unsigned char* name = sqlite3_column_text(info, 1);
-            const std::string col = name ? reinterpret_cast<const char*>(name) : "";
-            if (EqualsIgnoreCase(col, "category")) has_category = true;
-            if (EqualsIgnoreCase(col, "plugin_id")) {
-                has_plugin_id = true;
-            }
-        }
-        sqlite3_finalize(info);
-    }
-    if (!has_category) {
-        if (sqlite3_exec(operator_db_, "ALTER TABLE operator_catalog ADD COLUMN category TEXT;", nullptr, nullptr,
-                         nullptr) != SQLITE_OK) {
-            return -1;
-        }
-    }
-    if (!has_plugin_id) {
-        if (sqlite3_exec(operator_db_, "ALTER TABLE operator_catalog ADD COLUMN plugin_id TEXT;", nullptr, nullptr,
-                         nullptr) != SQLITE_OK) {
-            return -1;
-        }
-    }
+    sqlite3_stmt* current = nullptr;
+    const int rc = sqlite3_prepare_v2(
+        operator_db_,
+        "SELECT category,name,type,description,position,source,active,editable,content_ref,plugin_id,created_at,"
+        "updated_at FROM operator_catalog LIMIT 0",
+        -1, &current, nullptr);
+    sqlite3_finalize(current);
+    if (rc != SQLITE_OK) return -1;
+    if (sqlite3_exec(operator_db_,
+                     "CREATE TABLE IF NOT EXISTS dataset_identities(name TEXT PRIMARY KEY,"
+                     "object_id TEXT NOT NULL,file_stamp TEXT NOT NULL)",
+                     nullptr, nullptr, nullptr) != SQLITE_OK)
+        return -1;
+    if (sqlite3_exec(operator_db_,
+                     "CREATE TABLE IF NOT EXISTS operator_contract_association("
+                     "category TEXT NOT NULL COLLATE NOCASE,name TEXT NOT NULL COLLATE NOCASE,"
+                     "component_revision TEXT NOT NULL,operator_version TEXT NOT NULL,"
+                     "contract_ref TEXT NOT NULL,contract_state TEXT NOT NULL,PRIMARY KEY(category,name))",
+                     nullptr, nullptr, nullptr) != SQLITE_OK)
+        return -1;
     if (sqlite3_exec(operator_db_,
                      "CREATE UNIQUE INDEX IF NOT EXISTS ux_operator_catalog_category_name "
                      "ON operator_catalog(category COLLATE NOCASE, name COLLATE NOCASE);",
@@ -1957,31 +1865,6 @@ std::string CatalogPlugin::OperatorContentPath(const std::string& category, cons
     fs::path p(OperatorsDirPath());
     p /= (category + "_" + name + ".py");
     return p.string();
-}
-
-int CatalogPlugin::LoadOperatorContent(const std::string& category, const std::string& name,
-                                       std::string* content) const {
-    if (!content) return -1;
-    const std::string path = OperatorContentPath(category, name);
-    std::ifstream ifs(path, std::ios::in | std::ios::binary);
-    if (!ifs.is_open()) {
-        LOG_ERROR("CatalogPlugin::LoadOperatorContent: open failed path=%s errno=%d", path.c_str(), errno);
-        return -1;
-    }
-    std::ostringstream ss;
-    ss << ifs.rdbuf();
-    *content = ss.str();
-    return 0;
-}
-
-int CatalogPlugin::SaveOperatorContent(const std::string& category, const std::string& name,
-                                       const std::string& content) const {
-    std::error_code ec;
-    fs::create_directories(OperatorsDirPath(), ec);
-    std::ofstream ofs(OperatorContentPath(category, name), std::ios::out | std::ios::binary | std::ios::trunc);
-    if (!ofs.is_open()) return -1;
-    ofs.write(content.data(), static_cast<std::streamsize>(content.size()));
-    return ofs.good() ? 0 : -1;
 }
 
 std::string CatalogPlugin::GenerateImportName(const std::string& filename) {

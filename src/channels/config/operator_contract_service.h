@@ -6,16 +6,16 @@
 #include "data_semantics_registry.h"
 
 namespace flowsql::channels::config {
-class OperatorContractService : public IOperatorDataContractV1 {
+class OperatorContractService : public IOperatorDataContract {
  public:
-    explicit OperatorContractService(DataSemanticsRegistry& registry, IConfigChannelRegistryV1* configs = nullptr)
+    explicit OperatorContractService(DataSemanticsRegistry& registry, IConfigChannelRegistry* configs = nullptr)
         : registry_(registry), configs_(configs) {}
-    int Resolve(const char*, OperatorContractSnapshotV1*, DataSemanticsErrorV1*) override;
-    int CheckAndDerive(const char*, std::string*, DataSemanticsErrorV1*) override;
-    int RecordUse(const char*, OperatorContractSnapshotV1*, DataSemanticsErrorV1*) override;
+    int Resolve(const char*, OperatorContractSnapshot*, DataSemanticsError*) override;
+    int CheckAndDerive(const char*, std::string*, DataSemanticsError*) override;
+    int RecordUse(const char*, OperatorContractSnapshot*, DataSemanticsError*) override;
 
  private:
     DataSemanticsRegistry& registry_;
-    IConfigChannelRegistryV1* configs_;
+    IConfigChannelRegistry* configs_;
 };
 }  // namespace flowsql::channels::config

@@ -70,7 +70,7 @@ def stop(children):
 
 
 def dataframe_source(visual, label):
-    status, listing = call(visual, '/api/visualization/v1/sources')
+    status, listing = call(visual, '/api/visualization/sources')
     assert status == 200, listing
     for item in listing['sources']:
         if item.get('kind') == 'dataframe' and item['label'] == label:
@@ -79,7 +79,7 @@ def dataframe_source(visual, label):
 
 
 def acquire(visual, source_id):
-    status, snapshot = call(visual, '/api/visualization/v1/snapshots/acquire',
+    status, snapshot = call(visual, '/api/visualization/snapshots/acquire',
                             dict(request_id=str(uuid.uuid4()), source_id=source_id))
     assert status == 200, snapshot
     return snapshot
@@ -88,7 +88,7 @@ def acquire(visual, source_id):
 def count_rows(visual, source_id, snapshot):
     workflow = [{'type': 'view', 'query': [{'op': 'aggregate', 'groupBy': [], 'measures': [
         {'field': '*', 'agg': 'count', 'asFieldKey': 'rows'}]}]}]
-    status, result = call(visual, '/api/visualization/v1/compute',
+    status, result = call(visual, '/api/visualization/compute',
                           dict(request_id=str(uuid.uuid4()), source_id=source_id, snapshot_id=snapshot['snapshot_id'],
                                schema_revision=snapshot['schema_revision'], workflow_version='graphic-walker-0.5.3',
                                workflow={'workflow': workflow}, detail_mode='complete'))
@@ -133,6 +133,7 @@ def main():
     visual_url = f'http://127.0.0.1:{port()}'
     env = dict(os.environ, LD_LIBRARY_PATH=f'{output}:' + os.environ.get('LD_LIBRARY_PATH', ''))
     core_plugins = ','.join([
+        f'{output}/libflowsql_config_channel.so:db_path={root}/semantics.db',
         f'{output}/libflowsql_builtin.so',
         f'{output}/libflowsql_catalog.so:data_dir={dataframes};exploration_shared_dir={shared};'
         f'operator_db_path={root}/meta.db',
@@ -152,8 +153,8 @@ def main():
                                    visualization_plugins, '--option', visualization_options],
                                   cwd=root, env=env, stdout=visual_log, stderr=visual_log)
         try:
-            wait_ready(source_url, '/channels/dataframe/exploration/v1/sources', core, core_log, 'core')
-            wait_ready(visual_url, '/api/visualization/v1/capabilities', visual, visual_log, 'visualization')
+            wait_ready(source_url, '/channels/dataframe/exploration/sources', core, core_log, 'core')
+            wait_ready(visual_url, '/api/visualization/capabilities', visual, visual_log, 'visualization')
             assert shared.is_dir() and (shared.stat().st_mode & 0o077) == 0, oct(shared.stat().st_mode)
             assert (shared / '.owner.lock').exists()
 
@@ -212,7 +213,7 @@ def main():
             snapshot = acquire(visual_url, source_id)
             assert snapshot['row_count'] == 2, snapshot
             assert count_rows(visual_url, source_id, snapshot) == 2
-            rows = call(visual_url, '/api/visualization/v1/compute',
+            rows = call(visual_url, '/api/visualization/compute',
                         dict(request_id=str(uuid.uuid4()), source_id=source_id, snapshot_id=snapshot['snapshot_id'],
                              schema_revision=snapshot['schema_revision'], workflow_version='graphic-walker-0.5.3',
                              workflow={'workflow': [{'type': 'view', 'query': [{'op': 'raw',
@@ -222,7 +223,7 @@ def main():
             passed('SQL named output to exploration with raw detail')
 
             # The source process leaving does not invalidate a snapshot already bound to the page.
-            status, bound = call(visual_url, '/api/visualization/v1/snapshots/renew',
+            status, bound = call(visual_url, '/api/visualization/snapshots/renew',
                                  dict(snapshot_id=snapshot['snapshot_id']))
             assert status == 200, bound
             assert count_rows(visual_url, source_id, snapshot) == 2
@@ -232,7 +233,7 @@ def main():
             call(source_url, '/channels/dataframe/delete', dict(name='sql_output'))
             assert dataframe_source(visual_url, 'dataframe.sql_output') == ''
             assert count_rows(visual_url, source_id, snapshot) == 2
-            status, missing = call(visual_url, '/api/visualization/v1/snapshots/acquire',
+            status, missing = call(visual_url, '/api/visualization/snapshots/acquire',
                                    dict(request_id=str(uuid.uuid4()), source_id=source_id))
             assert status in (404, 503), missing
             passed('source deletion keeps old snapshot and rejects recapture')
@@ -244,7 +245,7 @@ def main():
     # A deployment without a data plane keeps the database path usable.
     database_config = root / 'channels.json'
     database_config.write_text(json.dumps({'channels': {'database_channels': [
-        dict(type='sqlite', name='local', path=str(database), readonly='true')]}}))
+        dict(type='sqlite', name='local', dataset_instance_id='dataframe-native-fixture', path=str(database), readonly='true')]}}))
     database_config.chmod(0o600)
     degraded_url = f'http://127.0.0.1:{port()}'
     with (root / 'degraded.log').open('w+') as degraded_log:
@@ -255,17 +256,18 @@ def main():
                                                      static_dir=str(output / 'exploration')))],
                                     cwd=root, env=env, stdout=degraded_log, stderr=degraded_log)
         try:
-            wait_ready(degraded_url, '/api/visualization/v1/capabilities', degraded, degraded_log, 'degraded')
-            status, listing = call(degraded_url, '/api/visualization/v1/sources')
+            wait_ready(degraded_url, '/api/visualization/capabilities', degraded, degraded_log, 'degraded')
+            status, listing = call(degraded_url, '/api/visualization/sources')
             assert status == 200, listing
             assert [item for item in listing['sources'] if item['label'].endswith('.samples')], listing
-            status, failure = call(degraded_url, '/api/visualization/v1/snapshots/acquire',
+            status, failure = call(degraded_url, '/api/visualization/snapshots/acquire',
                                    dict(request_id=str(uuid.uuid4()), source_id='0' * 64))
             assert status == 503 and failure['code'] == 'DATA_PLANE_UNAVAILABLE', failure
             passed('missing data plane keeps database exploration available')
 
             catalog_only = subprocess.Popen(
                 [str(output / 'flowsql'), '--role', 'catalog', '--plugins',
+                 f'{output}/libflowsql_config_channel.so:db_path={root}/semantics.db,'
                  f'{output}/libflowsql_builtin.so,{output}/libflowsql_catalog.so:data_dir={dataframes};'
                  f'operator_db_path={root}/meta.db'],
                 cwd=root, env=env, stdout=degraded_log, stderr=degraded_log)
@@ -275,7 +277,7 @@ def main():
             finally:
                 stop([catalog_only])
             # Without exploration_shared_dir the source starts but the data plane stays unconfigured.
-            status, failure = call(degraded_url, '/api/visualization/v1/snapshots/acquire',
+            status, failure = call(degraded_url, '/api/visualization/snapshots/acquire',
                                    dict(request_id=str(uuid.uuid4()), source_id='0' * 64))
             assert status == 503, failure
             passed('source without shared directory starts without a data plane')

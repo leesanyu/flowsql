@@ -16,7 +16,7 @@ namespace npm = flowsql::npm;
 namespace packet = flowsql::packet;
 namespace network = flowsql::network;
 using Backend = npm::NpmFamilyDatabaseBackend;
-using ParameterKind = flowsql::DatabaseParameterKindV1;
+using ParameterKind = flowsql::DatabaseParameterKind;
 using Outcome = npm::NpmFamilyPublicationOutcome;
 static_assert(std::is_abstract_v<npm::INpmFamilyProgressConsumer>);
 template <typename T, typename = void>
@@ -88,7 +88,7 @@ void TestOutputSelection() {
     }
 }
 
-std::shared_ptr<arrow::RecordBatch> Fixture(const npm::NpmEntityDescriptorV1& entity) {
+std::shared_ptr<arrow::RecordBatch> Fixture(const npm::NpmEntityDescriptor& entity) {
     arrow::ArrayVector columns;
     for (const auto& field : entity.schema->fields()) {
         auto builder = Get(arrow::MakeBuilder(field->type()));
@@ -188,10 +188,10 @@ void TestAllBackendContracts() {
             for (auto family : {packet::AddressFamily::kIPv4, packet::AddressFamily::kIPv6}) {
                 const auto contract = Get(npm::NpmFamilyDatabaseMapping(backend, kind, family));
                 const auto prefix = "npm_" + contract.entity.entity_id;
-                assert(contract.relations.data == prefix + "_v1_data");
-                assert(contract.relations.history == prefix + "_history_v1");
-                assert(contract.relations.latest == prefix + "_latest_v1");
-                assert(contract.relations.final == prefix + "_final_v1");
+                assert(contract.relations.data == prefix + "_data");
+                assert(contract.relations.history == prefix + "_history");
+                assert(contract.relations.latest == prefix + "_latest");
+                assert(contract.relations.final == prefix + "_final");
                 assert(contract.columns.size() == static_cast<size_t>(contract.entity.schema->num_fields()));
                 auto batch = Fixture(contract.entity);
                 Check(npm::ValidateNpmFamilyDatabaseReadback(contract, *batch));
@@ -255,8 +255,8 @@ npm::NpmFamilyPublishedProgress Fact(const npm::NpmFamilyPublicationRequest& req
     return {request, request.key.run_id, position};
 }
 void TestPublication() {
-    npm::NpmFamilyPublicationRequest request4{{"basic_ipv4", "npm_basic_ipv4_history_v1", "run-1"}, 10, 20};
-    npm::NpmFamilyPublicationRequest request6{{"basic_ipv6", "npm_basic_ipv6_history_v1", "run-1"}, 10, 20};
+    npm::NpmFamilyPublicationRequest request4{{"basic_ipv4", "npm_basic_ipv4_history", "run-1"}, 10, 20};
+    npm::NpmFamilyPublicationRequest request6{{"basic_ipv6", "npm_basic_ipv6_history", "run-1"}, 10, 20};
     npm::NpmFamilyPublicationProof proof{true, 30, true, true, false};
     npm::NpmFamilyPublicationCursor cursor4, cursor6;
     Check(npm::ValidateNpmFamilyPublication(cursor4, request4, proof));
@@ -298,7 +298,7 @@ void TestPublication() {
     assert(!npm::CompleteNpmFamilyPublication(cursor4, request4, proof, Outcome::kCommitted, bad).ok());
     cursor4 = Get(npm::CompleteNpmFamilyPublication(cursor4, request4, proof, Outcome::kCommitted, Fact(request4, 2)));
     assert(cursor4.last_confirmed->committed_position == 2 && cursor6.last_confirmed->committed_position == 1);
-    flowsql::PublishedDatasetRequestV1 selected{"source", "", request4.key.relation_name, "run-1", 20, true};
+    flowsql::PublishedDatasetRequest selected{"source", "", request4.key.relation_name, "run-1", 20, true};
     const auto progress = Get(npm::NpmFamilyDatasetProgress(*cursor4.last_confirmed, selected));
     assert(progress.progress.dataset_id == "source" && progress.progress.epoch == "run-1");
     assert(progress.progress.committed_position == "2" && progress.progress.closed_before_bucket == 1);

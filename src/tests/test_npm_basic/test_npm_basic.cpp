@@ -36,6 +36,7 @@
 #include <operators/npm_basic/output/npm_session_result_encoder.h>
 #include <plugins/npi/iprotocol.h>
 #include <tests/support/scoped_shared_library.h>
+#include <common/channel_dataset.hpp>
 #include <common/loader.hpp>
 #include "npm_packet_test_support.h"
 
@@ -88,47 +89,47 @@ class NpiInterfaceRegistry : public flowsql::IRegister {
     void Regist(const flowsql::Guid& iid, void* iface) override {
         if (SameGuid(iid, flowsql::IID_PROTOCOL)) {
             protocol = static_cast<flowsql::IProtocol*>(iface);
-        } else if (SameGuid(iid, flowsql::IID_PROTOCOL_PIPELINE_POOL_V1)) {
-            pipeline_pool = static_cast<flowsql::IProtocolPipelinePoolV1*>(iface);
+        } else if (SameGuid(iid, flowsql::IID_PROTOCOL_PIPELINE_POOL)) {
+            pipeline_pool = static_cast<flowsql::IProtocolPipelinePool*>(iface);
         }
     }
 
     flowsql::IProtocol* protocol = nullptr;
-    flowsql::IProtocolPipelinePoolV1* pipeline_pool = nullptr;
+    flowsql::IProtocolPipelinePool* pipeline_pool = nullptr;
 };
 
 class SinglePoolQuerier final : public flowsql::IQuerier {
  public:
-    explicit SinglePoolQuerier(flowsql::IProtocolPipelinePoolV1* pool) : pool_(pool) {}
+    explicit SinglePoolQuerier(flowsql::IProtocolPipelinePool* pool) : pool_(pool) {}
 
     int Traverse(const flowsql::Guid& iid, fntraverse callback) override {
-        if (!SameGuid(iid, flowsql::IID_PROTOCOL_PIPELINE_POOL_V1) || pool_ == nullptr) return 0;
+        if (!SameGuid(iid, flowsql::IID_PROTOCOL_PIPELINE_POOL) || pool_ == nullptr) return 0;
         return callback ? callback(pool_) : 0;
     }
 
     void* First(const flowsql::Guid& iid) override {
-        if (SameGuid(iid, flowsql::IID_PROTOCOL_PIPELINE_POOL_V1)) return pool_;
-        if (SameGuid(iid, flowsql::IID_FLOW_LABELING_PROVIDER_V1)) {
+        if (SameGuid(iid, flowsql::IID_PROTOCOL_PIPELINE_POOL)) return pool_;
+        if (SameGuid(iid, flowsql::IID_FLOW_LABELING_PROVIDER)) {
             ++labeling_queries;
             return labeling_provider;
         }
-        if (SameGuid(iid, flowsql::IID_CONFIG_CHANNEL_REGISTRY_V1)) {
+        if (SameGuid(iid, flowsql::IID_CONFIG_CHANNEL_REGISTRY)) {
             ++config_registry_queries;
             return config_registry;
         }
         return nullptr;
     }
 
-    flowsql::IFlowLabelingProviderV1* labeling_provider = nullptr;
-    flowsql::IConfigChannelRegistryV1* config_registry = nullptr;
+    flowsql::IFlowLabelingProvider* labeling_provider = nullptr;
+    flowsql::IConfigChannelRegistry* config_registry = nullptr;
     uint32_t labeling_queries = 0;
     uint32_t config_registry_queries = 0;
 
  private:
-    flowsql::IProtocolPipelinePoolV1* pool_ = nullptr;
+    flowsql::IProtocolPipelinePool* pool_ = nullptr;
 };
 
-class LabelingConfigRegistry final : public flowsql::IConfigChannelRegistryV1 {
+class LabelingConfigRegistry final : public flowsql::IConfigChannelRegistry {
  public:
     int Resolve(const char* exact_reference, flowsql::ConfigChannelSnapshot* snapshot, std::string* error) override {
         ++resolve_calls;
@@ -141,7 +142,7 @@ class LabelingConfigRegistry final : public flowsql::IConfigChannelRegistryV1 {
         next.channel_name = "corp-labels";
         next.revision = 7;
         next.format = "yaml";
-        next.schema_id = "flowsql.io/flow-labeling/v1alpha1";
+        next.schema_id = "flowsql.io/flow-labeling";
         next.sha256_hex = "mock";
         next.content = std::make_shared<const std::string>("labels: []");
         next.content_bytes = next.content->size();
@@ -156,7 +157,7 @@ class LabelingConfigRegistry final : public flowsql::IConfigChannelRegistryV1 {
 };
 
 #ifdef FLOWSQL_FLOW_LABELING_PLUGIN_PATH
-class RealLabelingSnapshotRegistry final : public flowsql::IConfigChannelRegistryV1 {
+class RealLabelingSnapshotRegistry final : public flowsql::IConfigChannelRegistry {
  public:
     int Resolve(const char* exact_reference, flowsql::ConfigChannelSnapshot* snapshot, std::string* error) override {
         ++resolve_calls;
@@ -169,9 +170,9 @@ class RealLabelingSnapshotRegistry final : public flowsql::IConfigChannelRegistr
         next.channel_name = "corp-labels";
         next.revision = 7;
         next.format = "yaml";
-        next.schema_id = "flowsql.io/flow-labeling/v1alpha1";
+        next.schema_id = "flowsql.io/flow-labeling";
         next.sha256_hex = "test";
-        next.content = std::make_shared<const std::string>(R"(api_version: flowsql.io/flow-labeling/v1alpha1
+        next.content = std::make_shared<const std::string>(R"(api_version: flowsql.io/flow-labeling
 kind: FlowLabelingSet
 spec:
   engine:
@@ -218,17 +219,17 @@ struct LabelingMatcherStats {
     int classify_error = 0;
     int fail_call = -1;
     std::vector<uint32_t> batch_counts;
-    std::vector<flowsql::FlowLabelFactsV1> facts;
+    std::vector<flowsql::FlowLabelFacts> facts;
     std::deque<flowsql::network::IPv4Address> address4_owners;
     std::deque<flowsql::network::IPv6Address> address6_owners;
     std::vector<std::vector<uint32_t>> labels_by_call;
 };
 
-class RecordingLabelMatcher final : public flowsql::IFlowLabelMatcherV1 {
+class RecordingLabelMatcher final : public flowsql::IFlowLabelMatcher {
  public:
     explicit RecordingLabelMatcher(LabelingMatcherStats* stats) : stats_(stats) {}
 
-    int ClassifyBatch(const flowsql::FlowLabelFactsV1* facts, uint32_t count,
+    int ClassifyBatch(const flowsql::FlowLabelFacts* facts, uint32_t count,
                       uint32_t* primary_label_ids) const override {
         assert(stats_ != nullptr && facts != nullptr && count != 0 && primary_label_ids != nullptr);
         const size_t call_index = stats_->classify_calls++;
@@ -263,7 +264,7 @@ class RecordingLabelMatcher final : public flowsql::IFlowLabelMatcherV1 {
         return 0;
     }
 
-    bool FindLabel(uint32_t, flowsql::FlowPrimaryLabelViewV1*) const override { return false; }
+    bool FindLabel(uint32_t, flowsql::FlowPrimaryLabelView*) const override { return false; }
 
     void Release() noexcept override {
         ++stats_->release_calls;
@@ -274,25 +275,25 @@ class RecordingLabelMatcher final : public flowsql::IFlowLabelMatcherV1 {
     LabelingMatcherStats* stats_ = nullptr;
 };
 
-class LabelingStatusProvider final : public flowsql::IFlowLabelingProviderV1 {
+class LabelingStatusProvider final : public flowsql::IFlowLabelingProvider {
  public:
-    flowsql::FlowLabelingErrorV1 RuntimeStatus(flowsql::FlowLabelingDiagnosticV1* diagnostic) const override {
+    flowsql::FlowLabelingError RuntimeStatus(flowsql::FlowLabelingDiagnostic* diagnostic) const override {
         ++runtime_status_calls;
         if (ready) {
             if (diagnostic != nullptr) *diagnostic = {};
-            return flowsql::FlowLabelingErrorV1::kNone;
+            return flowsql::FlowLabelingError::kNone;
         }
         if (diagnostic != nullptr) {
-            diagnostic->error = flowsql::FlowLabelingErrorV1::kUnavailable;
+            diagnostic->error = flowsql::FlowLabelingError::kUnavailable;
             diagnostic->path = "/runtime";
             diagnostic->detail = "mock labeling runtime unavailable";
         }
-        return flowsql::FlowLabelingErrorV1::kUnavailable;
+        return flowsql::FlowLabelingError::kUnavailable;
     }
 
-    flowsql::FlowLabelingErrorV1 CreateMatcher(const flowsql::FlowLabelingCompileRequestV1& request,
-                                               flowsql::IFlowLabelMatcherV1** output,
-                                               flowsql::FlowLabelingDiagnosticV1* diagnostic) override {
+    flowsql::FlowLabelingError CreateMatcher(const flowsql::FlowLabelingCompileRequest& request,
+                                             flowsql::IFlowLabelMatcher** output,
+                                             flowsql::FlowLabelingDiagnostic* diagnostic) override {
         ++create_matcher_calls;
         if (create_succeeds && request.snapshot != nullptr && output != nullptr) {
             captured_reference = request.snapshot->channel_name + "@" + std::to_string(request.snapshot->revision);
@@ -302,14 +303,14 @@ class LabelingStatusProvider final : public flowsql::IFlowLabelingProviderV1 {
             captured_max_compiled_rules = request.max_compiled_rules;
             *output = new RecordingLabelMatcher(&matcher_stats);
             if (diagnostic != nullptr) *diagnostic = {};
-            return flowsql::FlowLabelingErrorV1::kNone;
+            return flowsql::FlowLabelingError::kNone;
         }
         if (diagnostic != nullptr) {
-            diagnostic->error = flowsql::FlowLabelingErrorV1::kInvalidConfig;
+            diagnostic->error = flowsql::FlowLabelingError::kInvalidConfig;
             diagnostic->path = "/mock";
             diagnostic->detail = "not used by T0.1";
         }
-        return flowsql::FlowLabelingErrorV1::kInvalidConfig;
+        return flowsql::FlowLabelingError::kInvalidConfig;
     }
 
     bool ready = true;
@@ -379,7 +380,7 @@ class ContextProtocol final : public flowsql::IProtocol {
     flowsql::protocol::IDictionary* dictionary_ = nullptr;
 };
 
-class ContextPool final : public flowsql::IProtocolPipelinePoolV1 {
+class ContextPool final : public flowsql::IProtocolPipelinePool {
  public:
     explicit ContextPool(flowsql::IProtocol* protocol,
                          flowsql::ProtocolPipelinePoolError acquire_result = flowsql::ProtocolPipelinePoolError::kNone)
@@ -415,7 +416,7 @@ class ContextPool final : public flowsql::IProtocolPipelinePoolV1 {
     bool leased_ = false;
 };
 
-class DualContextPool final : public flowsql::IProtocolPipelinePoolV1 {
+class DualContextPool final : public flowsql::IProtocolPipelinePool {
  public:
     explicit DualContextPool(flowsql::IProtocol* protocol) : protocol_(protocol) {}
 
@@ -481,9 +482,9 @@ class CountingProtocolProxy final : public flowsql::IProtocol {
     flowsql::IProtocol* target_ = nullptr;
 };
 
-class DelegatingPipelinePool final : public flowsql::IProtocolPipelinePoolV1 {
+class DelegatingPipelinePool final : public flowsql::IProtocolPipelinePool {
  public:
-    DelegatingPipelinePool(flowsql::IProtocolPipelinePoolV1* target, flowsql::IProtocol* protocol)
+    DelegatingPipelinePool(flowsql::IProtocolPipelinePool* target, flowsql::IProtocol* protocol)
         : target_(target), protocol_(protocol) {}
 
     flowsql::ProtocolPipelinePoolError Acquire(int32_t* pipeno) override { return target_->Acquire(pipeno); }
@@ -492,7 +493,7 @@ class DelegatingPipelinePool final : public flowsql::IProtocolPipelinePoolV1 {
     flowsql::IProtocol* Protocol() override { return protocol_; }
 
  private:
-    flowsql::IProtocolPipelinePoolV1* target_ = nullptr;
+    flowsql::IProtocolPipelinePool* target_ = nullptr;
     flowsql::IProtocol* protocol_ = nullptr;
 };
 
@@ -4620,7 +4621,7 @@ void TestNpmProtocolContextErrorsDictionaryAndRaii() {
     assert(pool.release_calls == 2);
 }
 
-void TestNpmProtocolContextRealNpi(flowsql::IProtocolPipelinePoolV1* real_pool, flowsql::IProtocol* real_protocol) {
+void TestNpmProtocolContextRealNpi(flowsql::IProtocolPipelinePool* real_pool, flowsql::IProtocol* real_protocol) {
     CountingProtocolProxy protocol(real_protocol);
     DelegatingPipelinePool pool(real_pool, &protocol);
     SinglePoolQuerier querier(&pool);
@@ -4719,7 +4720,7 @@ void TestNpiPipelinePoolOptionAndLeaseContract() {
     flowsql::IPlugin* max_plugin = pluginregist(&max_registry, "{\"concurrency\":16}");
     assert(max_plugin == plugin);
     assert(max_registry.pipeline_pool != nullptr);
-    assert(max_registry.pipeline_pool->Capacity() == flowsql::kProtocolPipelineMaxCapacityV1);
+    assert(max_registry.pipeline_pool->Capacity() == flowsql::kProtocolPipelineMaxCapacity);
 
     const std::string option = std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\",\"concurrency\":2}";
     NpiInterfaceRegistry registry;
@@ -4757,7 +4758,7 @@ void TestNpiPipelinePoolOptionAndLeaseContract() {
     assert(registry.pipeline_pool->Release(reused) == flowsql::ProtocolPipelinePoolError::kNone);
     assert(registry.pipeline_pool->Release(second) == flowsql::ProtocolPipelinePoolError::kNone);
 
-    registry.protocol->Concurrency(flowsql::kProtocolPipelineMaxCapacityV1);
+    registry.protocol->Concurrency(flowsql::kProtocolPipelineMaxCapacity);
     assert(registry.pipeline_pool->Capacity() == 2);
 
     std::atomic<int32_t> ready{0};
@@ -6524,7 +6525,7 @@ void TestNpmBasicResultPendingOutputFailuresAreAtomic() {
 
 npm::NpmBasicTaskConfigStatus ParseTaskConfigFailure(
     const char* json, npm::NpmBasicTaskConfigError expected_error, const char* expected_field = "",
-    npm::NpmParameterErrorV1 expected_parameter_error = npm::NpmParameterErrorV1::kNone,
+    npm::NpmParameterError expected_parameter_error = npm::NpmParameterError::kNone,
     const char* expected_parameter_path = "") {
     npm::NpmBasicTaskConfig output;
     output.analysis = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kRealtime);
@@ -6580,13 +6581,12 @@ void TestNpmBasicTaskConfigParsesOwnedValues() {
     assert(minimal.domains.bindings[0].observation_domain_id == 0);
 
     std::string json =
-        R"JSON({"result_mode":"periodic_snapshot","source_domains":"0:7;1:7;2:8","max_pending_output_bytes":"1099511627776","max_tracked_bytes":"1099511627776","max_active_sessions":"10000000","out_of_order_tolerance_ns":"60000000000","udp_idle_timeout_ns":"86400000000000","tcp_idle_timeout_ns":"1000000000","payload_sample_packets":"64","output_interval_ns":"10000000","overload_policy":"fail","input_namespace":"pcapfile.capture","run_mode":"offline","observing":"basic_ipv4"})JSON";
+        R"JSON({"source_domains":"0:7;1:7;2:8","input_namespace":"pcapfile.capture","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"result_mode\":\"periodic_snapshot\",\"max_pending_output_bytes\":1099511627776,\"max_tracked_bytes\":1099511627776,\"max_active_sessions\":10000000,\"out_of_order_tolerance_ns\":60000000000,\"udp_idle_timeout_ns\":86400000000000,\"tcp_idle_timeout_ns\":1000000000,\"payload_sample_packets\":64,\"output_interval_ns\":10000000,\"overload_policy\":\"fail\",\"run_mode\":\"offline\"}}"})JSON";
     npm::NpmBasicTaskConfig output;
     auto status = npm::ParseNpmBasicTaskConfig(json.c_str(), &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(status.field.empty());
     assert(status.domain_error == npm::NpmObservationDomainError::kNone);
-    assert(status.analysis_error == npm::NpmAnalysisConfigError::kNone);
     assert(output.analysis.run_mode == npm::NpmRunMode::kOffline);
     assert(output.analysis.result_mode == npm::NpmResultMode::kPeriodicSnapshot);
     assert(output.analysis.output_interval_ns == npm::kNpmMinOutputIntervalNs);
@@ -6609,7 +6609,7 @@ void TestNpmBasicTaskConfigParsesOwnedValues() {
     assert(output.domains.bindings[2].observation_domain_id == 8);
 
     status = npm::ParseNpmBasicTaskConfig(
-        R"JSON({"source_domains":"9:10","input_namespace":"live","run_mode":"realtime","observing":"basic_ipv4"})JSON",
+        R"JSON({"source_domains":"9:10","input_namespace":"live","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"run_mode\":\"realtime\"}}"})JSON",
         &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(output.analysis.run_mode == npm::NpmRunMode::kRealtime);
@@ -6621,7 +6621,7 @@ void TestNpmBasicTaskConfigParsesOwnedValues() {
     assert(output.domains.bindings[0].observation_domain_id == 10);
 
     status = npm::ParseNpmBasicTaskConfig(
-        R"JSON({"result_mode":"final","source_domains":"5:6","run_mode":"realtime","input_namespace":"ordered","observing":"basic_ipv4"})JSON",
+        R"JSON({"source_domains":"5:6","input_namespace":"ordered","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"result_mode\":\"final\",\"run_mode\":\"realtime\"}}"})JSON",
         &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(output.analysis.run_mode == npm::NpmRunMode::kRealtime);
@@ -6647,21 +6647,20 @@ void TestNpmBasicTaskConfigInputDefaults() {
         assert(domain == UINT32_MAX);
     }
     assert(npm::ParseNpmBasicTaskConfig(R"({"observing":"basic_ipv4"})", &config, false,
-                                        npm::ProductionNpmModuleCatalogV1(), "pcapfile.http")
+                                        npm::ProductionNpmModuleCatalog(), "pcapfile.http")
                .error == npm::NpmBasicTaskConfigError::kNone);
     assert(config.domains.input_namespace == "pcapfile.http");
     for (
         const char* json :
         {R"({"features":"basic,session,dns,http1,tls,icmp","observing":"basic_ipv4"})",
          R"({"features":"basic,session,dns,http1,tls,icmp","parameters":"{\"schema_version\":1}","observing":"basic_ipv4"})"}) {
-        assert(
-            npm::ParseNpmBasicTaskConfig(json, &config, false, npm::ProductionNpmModuleCatalogV1(), "netadapter.eth0")
-                .error == npm::NpmBasicTaskConfigError::kNone);
+        assert(npm::ParseNpmBasicTaskConfig(json, &config, false, npm::ProductionNpmModuleCatalog(), "netadapter.eth0")
+                   .error == npm::NpmBasicTaskConfigError::kNone);
         assert(config.domains.input_namespace == "netadapter.eth0");
         assert(config.domains.source_id_as_domain && config.domains.bindings.empty());
     }
     assert(npm::ParseNpmBasicTaskConfig(R"({"input_namespace":"custom","observing":"basic_ipv4"})", &config, false,
-                                        npm::ProductionNpmModuleCatalogV1(), "pcapfile.http")
+                                        npm::ProductionNpmModuleCatalog(), "pcapfile.http")
                .error == npm::NpmBasicTaskConfigError::kNone);
     assert(config.domains.input_namespace == "custom" && config.domains.source_id_as_domain);
     assert(npm::ParseNpmBasicTaskConfig(R"({"source_domains":"0:7;1:7","observing":"basic_ipv4"})", &config).error ==
@@ -6712,23 +6711,29 @@ void TestNpmBasicTaskConfigRejectsMalformedFieldsAtomically() {
                            npm::NpmBasicTaskConfigError::kNonStringValue, "source_domains");
 
     ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","run_mode":"batch","observing":"basic_ipv4"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidEnum, "run_mode");
+        R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"run_mode\":\"batch\"}}"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters", npm::NpmParameterError::kInvalidValue,
+        "/core/run_mode");
     ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","result_mode":"latest","observing":"basic_ipv4"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidEnum, "result_mode");
+        R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"result_mode\":\"latest\"}}"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters", npm::NpmParameterError::kInvalidValue,
+        "/core/result_mode");
     ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","overload_policy":"drop","observing":"basic_ipv4"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidEnum, "overload_policy");
+        R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"overload_policy\":\"drop\"}}"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters", npm::NpmParameterError::kInvalidValue,
+        "/core/overload_policy");
     ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","output_interval_ns":"-1","observing":"basic_ipv4"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidInteger, "output_interval_ns");
+        R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"output_interval_ns\":\"-1\"}}"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters", npm::NpmParameterError::kInvalidType,
+        "/core/output_interval_ns");
     ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","payload_sample_packets":"4294967296","observing":"basic_ipv4"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidInteger, "payload_sample_packets");
+        R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"payload_sample_packets\":4294967296}}"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters", npm::NpmParameterError::kInvalidRange,
+        "/core/payload_sample_packets");
     ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","max_tracked_bytes":"18446744073709551616","observing":"basic_ipv4"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidInteger, "max_tracked_bytes");
+        R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"max_tracked_bytes\":18446744073709551616}}"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters", npm::NpmParameterError::kInvalidType,
+        "/core/max_tracked_bytes");
 }
 
 void TestNpmBasicTaskConfigRejectsMappingsAndRanges() {
@@ -6751,13 +6756,13 @@ void TestNpmBasicTaskConfigRejectsMappingsAndRanges() {
     assert(status.domain_error == npm::NpmObservationDomainError::kEmptyInputNamespace);
 
     status = ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"1:2","output_interval_ns":"1","observing":"basic_ipv4"})JSON",
-        npm::NpmBasicTaskConfigError::kAnalysisValidationError, "output_interval_ns");
-    assert(status.analysis_error == npm::NpmAnalysisConfigError::kOutputIntervalOutOfRange);
+        R"JSON({"input_namespace":"a","source_domains":"1:2","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"output_interval_ns\":1}}"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters", npm::NpmParameterError::kInvalidRange,
+        "/core/output_interval_ns");
     status = ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"1:2","max_active_sessions":"0","observing":"basic_ipv4"})JSON",
-        npm::NpmBasicTaskConfigError::kAnalysisValidationError, "max_active_sessions");
-    assert(status.analysis_error == npm::NpmAnalysisConfigError::kActiveSessionsOutOfRange);
+        R"JSON({"input_namespace":"a","source_domains":"1:2","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"max_active_sessions\":0}}"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters", npm::NpmParameterError::kInvalidRange,
+        "/core/max_active_sessions");
 }
 
 void TestNpmBasicTaskConfigNumericBoundaries() {
@@ -6765,29 +6770,23 @@ void TestNpmBasicTaskConfigNumericBoundaries() {
         const char* field;
         uint64_t minimum;
         uint64_t maximum;
-        npm::NpmAnalysisConfigError range_error;
     };
     const NumericBoundary boundaries[] = {
-        {"output_interval_ns", npm::kNpmMinOutputIntervalNs, npm::kNpmMaxOutputIntervalNs,
-         npm::NpmAnalysisConfigError::kOutputIntervalOutOfRange},
-        {"payload_sample_packets", npm::kNpmMinPayloadSamplePackets, npm::kNpmMaxPayloadSamplePackets,
-         npm::NpmAnalysisConfigError::kPayloadSamplePacketsOutOfRange},
-        {"tcp_idle_timeout_ns", npm::kNpmMinIdleTimeoutNs, npm::kNpmMaxIdleTimeoutNs,
-         npm::NpmAnalysisConfigError::kTcpIdleTimeoutOutOfRange},
-        {"udp_idle_timeout_ns", npm::kNpmMinIdleTimeoutNs, npm::kNpmMaxIdleTimeoutNs,
-         npm::NpmAnalysisConfigError::kUdpIdleTimeoutOutOfRange},
-        {"out_of_order_tolerance_ns", npm::kNpmMinOutOfOrderToleranceNs, npm::kNpmMaxOutOfOrderToleranceNs,
-         npm::NpmAnalysisConfigError::kOutOfOrderToleranceOutOfRange},
-        {"max_active_sessions", npm::kNpmMinActiveSessions, npm::kNpmMaxActiveSessions,
-         npm::NpmAnalysisConfigError::kActiveSessionsOutOfRange},
-        {"max_tracked_bytes", npm::kNpmMinTrackedBytes, npm::kNpmMaxTrackedBytes,
-         npm::NpmAnalysisConfigError::kTrackedBytesOutOfRange},
-        {"max_pending_output_bytes", npm::kNpmMinPendingOutputBytes, npm::kNpmMaxPendingOutputBytes,
-         npm::NpmAnalysisConfigError::kPendingOutputBytesOutOfRange},
+        {"output_interval_ns", npm::kNpmMinOutputIntervalNs, npm::kNpmMaxOutputIntervalNs},
+        {"payload_sample_packets", npm::kNpmMinPayloadSamplePackets, npm::kNpmMaxPayloadSamplePackets},
+        {"tcp_idle_timeout_ns", npm::kNpmMinIdleTimeoutNs, npm::kNpmMaxIdleTimeoutNs},
+        {"udp_idle_timeout_ns", npm::kNpmMinIdleTimeoutNs, npm::kNpmMaxIdleTimeoutNs},
+        {"out_of_order_tolerance_ns", npm::kNpmMinOutOfOrderToleranceNs, npm::kNpmMaxOutOfOrderToleranceNs},
+        {"max_active_sessions", npm::kNpmMinActiveSessions, npm::kNpmMaxActiveSessions},
+        {"max_tracked_bytes", npm::kNpmMinTrackedBytes, npm::kNpmMaxTrackedBytes},
+        {"max_pending_output_bytes", npm::kNpmMinPendingOutputBytes, npm::kNpmMaxPendingOutputBytes},
     };
     const auto make_json = [](const char* field, const std::string& value) {
-        return std::string(R"JSON({"observing":"basic_ipv4","input_namespace":"a","source_domains":"0:0",")JSON") +
-               field + R"JSON(":")JSON" + value + R"JSON("})JSON";
+        const auto params = std::string(R"({"schema_version":1,"core":{")") + field + "\":" + value + "}}";
+        flowsql::dataset::Json json(rapidjson::kObjectType);
+        flowsql::dataset::Set(json, "observing", "basic_ipv4", json.GetAllocator());
+        flowsql::dataset::Set(json, "parameters", params, json.GetAllocator());
+        return flowsql::dataset::Encode(json);
     };
     for (const auto& boundary : boundaries) {
         for (const uint64_t value : {boundary.minimum, boundary.maximum}) {
@@ -6800,17 +6799,20 @@ void TestNpmBasicTaskConfigNumericBoundaries() {
         if (boundary.minimum > 0) invalid_values.push_back(boundary.minimum - 1);
         for (const uint64_t value : invalid_values) {
             const auto json = make_json(boundary.field, std::to_string(value));
-            const auto status = ParseTaskConfigFailure(
-                json.c_str(), npm::NpmBasicTaskConfigError::kAnalysisValidationError, boundary.field);
-            assert(status.analysis_error == boundary.range_error);
+            ParseTaskConfigFailure(json.c_str(), npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
+                                   npm::NpmParameterError::kInvalidRange,
+                                   (std::string("/core/") + boundary.field).c_str());
         }
         for (const char* text : {"", "+1", "-1", " 1", "1 ", "1.0", "1e3", "abc"}) {
-            const auto json = make_json(boundary.field, text);
-            ParseTaskConfigFailure(json.c_str(), npm::NpmBasicTaskConfigError::kInvalidInteger, boundary.field);
+            const auto json = make_json(boundary.field, std::string("\"") + text + "\"");
+            ParseTaskConfigFailure(json.c_str(), npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
+                                   npm::NpmParameterError::kInvalidType,
+                                   (std::string("/core/") + boundary.field).c_str());
         }
     }
     const auto json = make_json("tcp_idle_timeout_ns", "9223372036854775808");
-    ParseTaskConfigFailure(json.c_str(), npm::NpmBasicTaskConfigError::kInvalidInteger, "tcp_idle_timeout_ns");
+    ParseTaskConfigFailure(json.c_str(), npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
+                           npm::NpmParameterError::kInvalidType, "/core/tcp_idle_timeout_ns");
 }
 
 void TestNpmBasicTaskConfigFeatureSelection() {
@@ -6823,8 +6825,7 @@ void TestNpmBasicTaskConfigFeatureSelection() {
 
     npm::NpmBasicTaskConfig output;
     auto status = npm::ParseNpmBasicTaskConfig(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-        R"JSON("observing":"session_ipv4","session_max_tcp_ranges_per_direction":"8"})JSON",
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session","observing":"session_ipv4","parameters":"{\"schema_version\":1,\"session\":{\"max_tcp_ranges_per_direction\":8}}"})JSON",
         &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(!output.features.basic_enabled && output.features.session_enabled);
@@ -6832,8 +6833,7 @@ void TestNpmBasicTaskConfigFeatureSelection() {
     assert(output.features.session_max_tcp_ranges_per_direction == npm::kNpmMinSessionTcpRangesPerDirection);
 
     status = npm::ParseNpmBasicTaskConfig(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,session",)JSON"
-        R"JSON("observing":"basic_ipv4","session_max_tcp_ranges_per_direction":"65536"})JSON",
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"basic,session","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"session\":{\"max_tcp_ranges_per_direction\":65536}}"})JSON",
         &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
     assert(output.features.basic_enabled && output.features.session_enabled);
@@ -6875,7 +6875,7 @@ void TestNpmBasicTaskConfigFeatureSelection() {
 
     status = npm::ParseNpmBasicTaskConfig(labeling_json, &output);
     assert(status.error == npm::NpmBasicTaskConfigError::kInvalidParameters);
-    assert(status.parameter_status.error == npm::NpmParameterErrorV1::kUnavailableFeature);
+    assert(status.parameter_status.error == npm::NpmParameterError::kUnavailableFeature);
     assert(status.parameter_status.path == "/labeling");
 
     const char* invalid_features[] = {
@@ -6901,88 +6901,38 @@ void TestNpmBasicTaskConfigFeatureSelection() {
                            npm::NpmBasicTaskConfigError::kInvalidObserving, "observing");
     ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"dns"})JSON",
                            npm::NpmBasicTaskConfigError::kInvalidObserving, "observing");
+    assert(
+        npm::ParseNpmBasicTaskConfig(
+            R"JSON({"input_namespace":"a","source_domains":"0:0","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"session\":{\"max_tcp_ranges_per_direction\":1024}}"})JSON",
+            &output)
+            .error == npm::NpmBasicTaskConfigError::kNone);
+
     ParseTaskConfigFailure(
-        R"JSON({"input_namespace":"a","source_domains":"0:0","session_max_tcp_ranges_per_direction":"1024","observing":"basic_ipv4"})JSON",
-        npm::NpmBasicTaskConfigError::kSessionConfigWithoutFeature, "session_max_tcp_ranges_per_direction");
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-                           R"JSON("observing":"session_ipv4","session_max_tcp_ranges_per_direction":"x"})JSON",
-                           npm::NpmBasicTaskConfigError::kInvalidInteger, "session_max_tcp_ranges_per_direction");
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-                           R"JSON("observing":"session_ipv4","session_max_tcp_ranges_per_direction":"7"})JSON",
-                           npm::NpmBasicTaskConfigError::kSessionTcpRangesOutOfRange,
-                           "session_max_tcp_ranges_per_direction");
-    ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
-                           R"JSON("observing":"session_ipv4","session_max_tcp_ranges_per_direction":"65537"})JSON",
-                           npm::NpmBasicTaskConfigError::kSessionTcpRangesOutOfRange,
-                           "session_max_tcp_ranges_per_direction");
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session","observing":"session_ipv4","parameters":"{\"schema_version\":1,\"session\":{\"max_tcp_ranges_per_direction\":\"x\"}}"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters", npm::NpmParameterError::kInvalidType,
+        "/session/max_tcp_ranges_per_direction");
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session","observing":"session_ipv4","parameters":"{\"schema_version\":1,\"session\":{\"max_tcp_ranges_per_direction\":7}}"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters", npm::NpmParameterError::kInvalidRange,
+        "/session/max_tcp_ranges_per_direction");
+    ParseTaskConfigFailure(
+        R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session","observing":"session_ipv4","parameters":"{\"schema_version\":1,\"session\":{\"max_tcp_ranges_per_direction\":65537}}"})JSON",
+        npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters", npm::NpmParameterError::kInvalidRange,
+        "/session/max_tcp_ranges_per_direction");
 }
 
-void AssertEquivalentTaskConfig(const npm::NpmBasicTaskConfig& left, const npm::NpmBasicTaskConfig& right) {
-    assert(left.analysis.run_mode == right.analysis.run_mode);
-    assert(left.analysis.result_mode == right.analysis.result_mode);
-    assert(left.analysis.overload_policy == right.analysis.overload_policy);
-    assert(left.analysis.output_interval_ns == right.analysis.output_interval_ns);
-    assert(left.analysis.payload_sample_packets == right.analysis.payload_sample_packets);
-    assert(left.analysis.tcp_idle_timeout_ns == right.analysis.tcp_idle_timeout_ns);
-    assert(left.analysis.udp_idle_timeout_ns == right.analysis.udp_idle_timeout_ns);
-    assert(left.analysis.out_of_order_tolerance_ns == right.analysis.out_of_order_tolerance_ns);
-    assert(left.analysis.max_active_sessions == right.analysis.max_active_sessions);
-    assert(left.analysis.max_tracked_bytes == right.analysis.max_tracked_bytes);
-    assert(left.analysis.max_pending_output_bytes == right.analysis.max_pending_output_bytes);
-    assert(left.features.basic_enabled == right.features.basic_enabled);
-    assert(left.features.session_enabled == right.features.session_enabled);
-    assert(left.features.labeling_enabled == right.features.labeling_enabled);
-    assert(left.labeling_reference == right.labeling_reference);
-    assert(left.labeling_memory_mib == right.labeling_memory_mib);
-    assert(left.features.observing == right.features.observing);
-    assert(left.features.observing_entity == right.features.observing_entity);
-    assert(left.features.session_max_tcp_ranges_per_direction == right.features.session_max_tcp_ranges_per_direction);
-    assert(left.domains.input_namespace == right.domains.input_namespace);
-    assert(left.domains.bindings.size() == right.domains.bindings.size());
-    for (std::size_t index = 0; index < left.domains.bindings.size(); ++index) {
-        assert(left.domains.bindings[index].source_id == right.domains.bindings[index].source_id);
-        assert(left.domains.bindings[index].observation_domain_id ==
-               right.domains.bindings[index].observation_domain_id);
-    }
-}
-
-struct EquivalentRuntimeTaskConfigs {
-    std::string legacy_json;
-    std::string parameters_v1_json;
-    npm::NpmBasicTaskConfig legacy;
-    npm::NpmBasicTaskConfig parameters_v1;
+struct RuntimeTaskConfig {
+    std::string json;
+    npm::NpmBasicTaskConfig config;
 };
-
-EquivalentRuntimeTaskConfigs MakeEquivalentRuntimeTaskConfigs(
-    npm::NpmRunMode run_mode, bool observing_session,
-    flowsql::packet::AddressFamily family = flowsql::packet::AddressFamily::kIPv4) {
+RuntimeTaskConfig MakeRuntimeTaskConfig(npm::NpmRunMode run_mode, bool observing_session,
+                                        flowsql::packet::AddressFamily family = flowsql::packet::AddressFamily::kIPv4) {
     const char* feature_fields =
         observing_session ? (family == flowsql::packet::AddressFamily::kIPv4
                                  ? R"JSON(,"features":"session","observing":"session_ipv4")JSON"
                                  : R"JSON(,"features":"session","observing":"session_ipv6")JSON")
                           : (family == flowsql::packet::AddressFamily::kIPv4 ? R"JSON(,"observing":"basic_ipv4")JSON"
                                                                              : R"JSON(,"observing":"basic_ipv6")JSON");
-    const char* legacy_framework = run_mode == npm::NpmRunMode::kRealtime
-                                       ? R"JSON(,"run_mode":"realtime",)JSON"
-                                         R"JSON("result_mode":"periodic_snapshot",)JSON"
-                                         R"JSON("output_interval_ns":"10000000",)JSON"
-                                         R"JSON("payload_sample_packets":"4",)JSON"
-                                         R"JSON("tcp_idle_timeout_ns":"1000000000",)JSON"
-                                         R"JSON("udp_idle_timeout_ns":"1000000000",)JSON"
-                                         R"JSON("out_of_order_tolerance_ns":"0",)JSON"
-                                         R"JSON("max_active_sessions":"32",)JSON"
-                                         R"JSON("max_tracked_bytes":"1048576",)JSON"
-                                         R"JSON("max_pending_output_bytes":"1048576")JSON"
-                                       : R"JSON(,"run_mode":"offline",)JSON"
-                                         R"JSON("result_mode":"final",)JSON"
-                                         R"JSON("output_interval_ns":"10000000",)JSON"
-                                         R"JSON("payload_sample_packets":"4",)JSON"
-                                         R"JSON("tcp_idle_timeout_ns":"1000000000",)JSON"
-                                         R"JSON("udp_idle_timeout_ns":"1000000000",)JSON"
-                                         R"JSON("out_of_order_tolerance_ns":"0",)JSON"
-                                         R"JSON("max_active_sessions":"32",)JSON"
-                                         R"JSON("max_tracked_bytes":"1048576",)JSON"
-                                         R"JSON("max_pending_output_bytes":"1048576")JSON";
     const char* parameters_core =
         run_mode == npm::NpmRunMode::kRealtime
             ? R"JSON(,"parameters":"{\"schema_version\":1,\"core\":{)JSON"
@@ -6998,79 +6948,60 @@ EquivalentRuntimeTaskConfigs MakeEquivalentRuntimeTaskConfigs(
               R"JSON(\"out_of_order_tolerance_ns\":0,\"max_active_sessions\":32,)JSON"
               R"JSON(\"max_tracked_bytes\":1048576,\"max_pending_output_bytes\":1048576})JSON";
 
-    EquivalentRuntimeTaskConfigs configs;
-    configs.legacy_json = std::string(R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77")JSON") +
-                          feature_fields + legacy_framework;
-    configs.parameters_v1_json =
-        std::string(R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77")JSON") + feature_fields +
-        parameters_core;
-    if (observing_session) {
-        configs.legacy_json += R"JSON(,"session_max_tcp_ranges_per_direction":"8")JSON";
-        configs.parameters_v1_json += R"JSON(,\"session\":{\"max_tcp_ranges_per_direction\":8})JSON";
-    }
-    configs.legacy_json += "}";
-    configs.parameters_v1_json += R"JSON(}"})JSON";
-
-    const auto legacy_status = npm::ParseNpmBasicTaskConfig(configs.legacy_json.c_str(), &configs.legacy);
-    const auto parameters_status =
-        npm::ParseNpmBasicTaskConfig(configs.parameters_v1_json.c_str(), &configs.parameters_v1);
-    assert(legacy_status.error == npm::NpmBasicTaskConfigError::kNone);
-    assert(parameters_status.error == npm::NpmBasicTaskConfigError::kNone);
-    AssertEquivalentTaskConfig(configs.legacy, configs.parameters_v1);
-    return configs;
+    RuntimeTaskConfig result;
+    result.json = std::string(R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77")JSON") +
+                  feature_fields + parameters_core;
+    if (observing_session) result.json += R"JSON(,\"session\":{\"max_tcp_ranges_per_direction\":8})JSON";
+    result.json += R"JSON(}"})JSON";
+    assert(npm::ParseNpmBasicTaskConfig(result.json.c_str(), &result.config).error ==
+           npm::NpmBasicTaskConfigError::kNone);
+    return result;
 }
 
-void TestNpmBasicTaskConfigNormalizesParametersV1() {
-    static_assert(std::is_same_v<decltype(npm::NpmBasicTaskConfigStatus::parameter_status), npm::NpmParameterStatusV1>);
+void TestNpmBasicTaskConfigNormalizesParameters() {
+    static_assert(std::is_same_v<decltype(npm::NpmBasicTaskConfigStatus::parameter_status), npm::NpmParameterStatus>);
 
-    std::string v1_json = R"JSON({
+    std::string current_json = R"JSON({
         "input_namespace":"pcapfile.capture",
         "source_domains":"0:7;1:8",
         "features":"basic,session",
         "observing":"session_ipv4",
         "parameters":"{\"schema_version\":1,\"core\":{\"run_mode\":\"realtime\",)JSON"
-                          R"JSON(\"result_mode\":\"final\",\"overload_policy\":\"fail\",)JSON"
-                          R"JSON(\"output_interval_ns\":10000000,\"payload_sample_packets\":64,)JSON"
-                          R"JSON(\"tcp_idle_timeout_ns\":1000000000,)JSON"
-                          R"JSON(\"udp_idle_timeout_ns\":86400000000000,)JSON"
-                          R"JSON(\"out_of_order_tolerance_ns\":60000000000,)JSON"
-                          R"JSON(\"max_active_sessions\":10000000,)JSON"
-                          R"JSON(\"max_tracked_bytes\":1099511627776,)JSON"
-                          R"JSON(\"max_pending_output_bytes\":1099511627776},)JSON"
-                          R"JSON(\"basic\":{},\"session\":{\"max_tcp_ranges_per_direction\":8},)JSON"
-                          R"JSON(\"future\":{\"opaque\":true}}"
+                               R"JSON(\"result_mode\":\"final\",\"overload_policy\":\"fail\",)JSON"
+                               R"JSON(\"output_interval_ns\":10000000,\"payload_sample_packets\":64,)JSON"
+                               R"JSON(\"tcp_idle_timeout_ns\":1000000000,)JSON"
+                               R"JSON(\"udp_idle_timeout_ns\":86400000000000,)JSON"
+                               R"JSON(\"out_of_order_tolerance_ns\":60000000000,)JSON"
+                               R"JSON(\"max_active_sessions\":10000000,)JSON"
+                               R"JSON(\"max_tracked_bytes\":1099511627776,)JSON"
+                               R"JSON(\"max_pending_output_bytes\":1099511627776},)JSON"
+                               R"JSON(\"basic\":{},\"session\":{\"max_tcp_ranges_per_direction\":8},)JSON"
+                               R"JSON(\"future\":{\"opaque\":true}}"
     })JSON";
-    npm::NpmBasicTaskConfig v1;
-    auto status = npm::ParseNpmBasicTaskConfig(v1_json.c_str(), &v1);
+    npm::NpmBasicTaskConfig current;
+    auto status = npm::ParseNpmBasicTaskConfig(current_json.c_str(), &current);
     assert(status.error == npm::NpmBasicTaskConfigError::kNone);
-    assert(status.parameter_status.error == npm::NpmParameterErrorV1::kNone);
-    assert(v1.analysis.run_mode == npm::NpmRunMode::kRealtime);
-    assert(v1.analysis.result_mode == npm::NpmResultMode::kFinal);
-    assert(v1.analysis.output_interval_ns == npm::kNpmMinOutputIntervalNs);
-    assert(v1.analysis.payload_sample_packets == npm::kNpmMaxPayloadSamplePackets);
-    assert(v1.analysis.tcp_idle_timeout_ns == npm::kNpmMinIdleTimeoutNs);
-    assert(v1.analysis.udp_idle_timeout_ns == npm::kNpmMaxIdleTimeoutNs);
-    assert(v1.analysis.out_of_order_tolerance_ns == npm::kNpmMaxOutOfOrderToleranceNs);
-    assert(v1.analysis.max_active_sessions == npm::kNpmMaxActiveSessions);
-    assert(v1.analysis.max_tracked_bytes == npm::kNpmMaxTrackedBytes);
-    assert(v1.analysis.max_pending_output_bytes == npm::kNpmMaxPendingOutputBytes);
-    assert(v1.features.basic_enabled && v1.features.session_enabled);
-    assert(v1.features.observing == npm::NpmResultEntity::kSession);
-    assert(v1.features.session_max_tcp_ranges_per_direction == npm::kNpmMinSessionTcpRangesPerDirection);
-    assert(v1.domains.input_namespace == "pcapfile.capture");
-    assert(v1.domains.bindings.size() == 2);
+    assert(status.parameter_status.error == npm::NpmParameterError::kNone);
+    assert(current.analysis.run_mode == npm::NpmRunMode::kRealtime);
+    assert(current.analysis.result_mode == npm::NpmResultMode::kFinal);
+    assert(current.analysis.output_interval_ns == npm::kNpmMinOutputIntervalNs);
+    assert(current.analysis.payload_sample_packets == npm::kNpmMaxPayloadSamplePackets);
+    assert(current.analysis.tcp_idle_timeout_ns == npm::kNpmMinIdleTimeoutNs);
+    assert(current.analysis.udp_idle_timeout_ns == npm::kNpmMaxIdleTimeoutNs);
+    assert(current.analysis.out_of_order_tolerance_ns == npm::kNpmMaxOutOfOrderToleranceNs);
+    assert(current.analysis.max_active_sessions == npm::kNpmMaxActiveSessions);
+    assert(current.analysis.max_tracked_bytes == npm::kNpmMaxTrackedBytes);
+    assert(current.analysis.max_pending_output_bytes == npm::kNpmMaxPendingOutputBytes);
+    assert(current.features.basic_enabled && current.features.session_enabled);
+    assert(current.features.observing == npm::NpmResultEntity::kSession);
+    assert(current.features.session_max_tcp_ranges_per_direction == npm::kNpmMinSessionTcpRangesPerDirection);
+    assert(current.domains.input_namespace == "pcapfile.capture");
+    assert(current.domains.bindings.size() == 2);
 
-    const char* legacy_json =
-        R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:7;1:8","features":"basic,session","observing":"session_ipv4","run_mode":"realtime","result_mode":"final","overload_policy":"fail","output_interval_ns":"10000000","payload_sample_packets":"64","tcp_idle_timeout_ns":"1000000000","udp_idle_timeout_ns":"86400000000000","out_of_order_tolerance_ns":"60000000000","max_active_sessions":"10000000","max_tracked_bytes":"1099511627776","max_pending_output_bytes":"1099511627776","session_max_tcp_ranges_per_direction":"8"})JSON";
-    npm::NpmBasicTaskConfig legacy;
-    status = npm::ParseNpmBasicTaskConfig(legacy_json, &legacy);
-    assert(status.error == npm::NpmBasicTaskConfigError::kNone);
-    AssertEquivalentTaskConfig(v1, legacy);
-
-    v1_json.assign(v1_json.size(), 'x');
-    assert(v1.domains.input_namespace == "pcapfile.capture");
-    assert(v1.domains.bindings[1].observation_domain_id == 8);
-    assert(v1.features.session_max_tcp_ranges_per_direction == npm::kNpmMinSessionTcpRangesPerDirection);
+    current_json.assign(current_json.size(), 'x');
+    assert(current.domains.input_namespace == "pcapfile.capture");
+    assert(current.domains.bindings[1].observation_domain_id == 8);
+    assert(current.features.session_max_tcp_ranges_per_direction == npm::kNpmMinSessionTcpRangesPerDirection);
 
     npm::NpmBasicTaskConfig basic_only;
     status = npm::ParseNpmBasicTaskConfig(
@@ -7095,31 +7026,25 @@ void TestNpmBasicTaskConfigNormalizesParametersV1() {
 
 void TestNpmPeriodicConfigurationParsing() {
     for (const auto period : {15000000000LL, 30000000000LL, 60000000000LL}) {
-        for (const bool nested : {false, true}) {
-            npm::NpmBasicTaskConfig config;
-            const std::string json =
-                nested ? "{\"observing\":\"basic_ipv4\",\"parameters\":\"{\\\"schema_version\\\":1,\\\"core\\\":{"
-                         "\\\"output_interval_ns\\\":" +
-                             std::to_string(period) + "}}\"}"
-                       : "{\"observing\":\"basic_ipv4\",\"output_interval_ns\":\"" + std::to_string(period) + "\"}";
-            assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config).error == npm::NpmBasicTaskConfigError::kNone);
-            assert(config.analysis.output_interval_ns == period);
-            assert(config.analysis.result_mode == npm::NpmResultMode::kPeriodicSnapshot && !config.run_mode_explicit);
-        }
+        npm::NpmBasicTaskConfig config;
+        const std::string json =
+            "{\"observing\":\"basic_ipv4\",\"parameters\":\"{\\\"schema_version\\\":1,\\\"core\\\":{"
+            "\\\"output_interval_ns\\\":" +
+            std::to_string(period) + "}}\"}";
+        assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config).error == npm::NpmBasicTaskConfigError::kNone);
+        assert(config.analysis.output_interval_ns == period);
+        assert(config.analysis.result_mode == npm::NpmResultMode::kPeriodicSnapshot && !config.run_mode_explicit);
     }
     for (const auto mode : {"offline", "realtime"}) {
-        for (const bool nested : {false, true}) {
-            npm::NpmBasicTaskConfig config;
-            const std::string json = nested
-                                         ? "{\"observing\":\"basic_ipv4\",\"parameters\":\"{\\\"schema_version\\\":1,"
-                                           "\\\"core\\\":{\\\"run_mode\\\":\\\"" +
-                                               std::string(mode) + "\\\"}}\"}"
-                                         : "{\"observing\":\"basic_ipv4\",\"run_mode\":\"" + std::string(mode) + "\"}";
-            assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config).error == npm::NpmBasicTaskConfigError::kNone);
-            assert(config.run_mode_explicit && config.analysis.output_interval_ns == 30000000000LL);
-            assert(config.analysis.result_mode == npm::NpmResultMode::kPeriodicSnapshot);
-            assert((config.analysis.run_mode == npm::NpmRunMode::kRealtime) == (std::string_view(mode) == "realtime"));
-        }
+        npm::NpmBasicTaskConfig config;
+        const std::string json =
+            "{\"observing\":\"basic_ipv4\",\"parameters\":\"{\\\"schema_version\\\":1,"
+            "\\\"core\\\":{\\\"run_mode\\\":\\\"" +
+            std::string(mode) + "\\\"}}\"}";
+        assert(npm::ParseNpmBasicTaskConfig(json.c_str(), &config).error == npm::NpmBasicTaskConfigError::kNone);
+        assert(config.run_mode_explicit && config.analysis.output_interval_ns == 30000000000LL);
+        assert(config.analysis.result_mode == npm::NpmResultMode::kPeriodicSnapshot);
+        assert((config.analysis.run_mode == npm::NpmRunMode::kRealtime) == (std::string_view(mode) == "realtime"));
     }
     npm::NpmBasicTaskConfig config;
     assert(npm::ParseNpmBasicTaskConfig(R"({"observing":"basic_ipv4"})", &config).error ==
@@ -7127,8 +7052,8 @@ void TestNpmPeriodicConfigurationParsing() {
     assert(config.analysis.output_interval_ns == 30000000000LL && !config.run_mode_explicit);
 }
 
-void TestNpmBasicTaskConfigRejectsParameterSourceConflicts() {
-    static constexpr const char* kLegacyTuningFields[] = {
+void TestNpmBasicTaskConfigRejectsFlatTuningFields() {
+    static constexpr const char* kRemovedTuningFields[] = {
         "run_mode",
         "result_mode",
         "overload_policy",
@@ -7142,13 +7067,13 @@ void TestNpmBasicTaskConfigRejectsParameterSourceConflicts() {
         "max_pending_output_bytes",
         "session_max_tcp_ranges_per_direction",
     };
-    for (const char* field : kLegacyTuningFields) {
+    for (const char* field : kRemovedTuningFields) {
         const std::string json = std::string(R"JSON({"input_namespace":"a","source_domains":"0:0",)JSON") +
                                  R"JSON("parameters":"{\"schema_version\":1}",")JSON" + field +
                                  R"JSON(":"ignored"})JSON";
-        const std::string path = std::string("/") + field;
-        ParseTaskConfigFailure(json.c_str(), npm::NpmBasicTaskConfigError::kParameterSourceConflict, field,
-                               npm::NpmParameterErrorV1::kLegacyConflict, path.c_str());
+        ParseTaskConfigFailure(json.c_str(), npm::NpmBasicTaskConfigError::kUnknownField, field);
+        const std::string flat = std::string("{\"") + field + "\":\"1\"}";
+        ParseTaskConfigFailure(flat.c_str(), npm::NpmBasicTaskConfigError::kUnknownField, field);
     }
 
     npm::NpmBasicTaskConfig output;
@@ -7163,53 +7088,50 @@ void TestNpmBasicTaskConfigRejectsParameterSourceConflicts() {
 void TestNpmBasicTaskConfigPreservesParameterFailuresAtomically() {
     ParseTaskConfigFailure(
         R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":"","observing":"basic_ipv4"})JSON",
-        npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters", npm::NpmParameterErrorV1::kEmptyInput);
+        npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters", npm::NpmParameterError::kEmptyInput);
     ParseTaskConfigFailure(R"JSON({"observing":"basic_ipv4","input_namespace":"a","source_domains":"0:0",)JSON"
                            R"JSON("parameters":"{\"schema_version\":1,\"core\":{)JSON"
                            R"JSON(\"max_active_sessions\":\"1\"}}"})JSON",
                            npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
-                           npm::NpmParameterErrorV1::kInvalidType, "/core/max_active_sessions");
+                           npm::NpmParameterError::kInvalidType, "/core/max_active_sessions");
     ParseTaskConfigFailure(R"JSON({"input_namespace":"a","source_domains":"0:0","features":"session",)JSON"
                            R"JSON("observing":"session_ipv4",)JSON"
                            R"JSON("parameters":"{\"schema_version\":1,\"session\":{)JSON"
                            R"JSON(\"max_tcp_ranges_per_direction\":7}}"})JSON",
                            npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
-                           npm::NpmParameterErrorV1::kInvalidRange, "/session/max_tcp_ranges_per_direction");
+                           npm::NpmParameterError::kInvalidRange, "/session/max_tcp_ranges_per_direction");
     ParseTaskConfigFailure(
         R"JSON({"input_namespace":"a","source_domains":"0:0","parameters":{},"observing":"basic_ipv4"})JSON",
         npm::NpmBasicTaskConfigError::kNonStringValue, "parameters");
     ParseTaskConfigFailure(R"JSON({"observing":"basic_ipv4","input_namespace":"a","source_domains":"0:0",)JSON"
                            R"JSON("parameters":"{\"schema_version\":1}\u0000trailing"})JSON",
                            npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
-                           npm::NpmParameterErrorV1::kInvalidJson);
+                           npm::NpmParameterError::kInvalidJson);
 
     std::string oversized =
         R"JSON({"observing":"basic_ipv4","input_namespace":"a","source_domains":"0:0","parameters":")JSON";
-    oversized.append(npm::kNpmParametersMaxJsonBytesV1 + 1, 'x');
+    oversized.append(npm::kNpmParametersMaxJsonBytes + 1, 'x');
     oversized += R"JSON("})JSON";
     ParseTaskConfigFailure(oversized.c_str(), npm::NpmBasicTaskConfigError::kInvalidParameters, "parameters",
-                           npm::NpmParameterErrorV1::kJsonTooLarge);
+                           npm::NpmParameterError::kJsonTooLarge);
 }
 
-npm::NpmParameterStatusV1 ParseParametersFailure(const char* json, const npm::NpmParameterConsumersV1& consumers,
-                                                 npm::NpmParameterErrorV1 expected_error,
-                                                 const char* expected_path = "") {
-    npm::NpmTaskParametersV1 output;
+npm::NpmParameterStatus ParseParametersFailure(const char* json, const npm::NpmParameterConsumers& consumers,
+                                               npm::NpmParameterError expected_error, const char* expected_path = "") {
+    npm::NpmTaskParameters output;
     output.schema_version = 99;
-    output.source = npm::NpmParameterSourceV1::kLegacyWith;
     output.core.analysis = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kRealtime);
     output.core.analysis.max_active_sessions = 123;
     output.core.labeling_reference = "sentinel";
     output.core.labeling_memory_mib = 8;
     output.core.tcp_stream = {131072, 12345};
     output.basic.reset();
-    output.session = npm::NpmSessionModuleParametersV1{321};
+    output.session = npm::NpmSessionModuleParameters{321};
 
-    const auto status = npm::ParseNpmParametersV1(json, consumers, &output);
+    const auto status = npm::ParseNpmParameters(json, consumers, &output);
     assert(status.error == expected_error);
     assert(status.path == expected_path);
     assert(output.schema_version == 99);
-    assert(output.source == npm::NpmParameterSourceV1::kLegacyWith);
     assert(output.core.analysis.run_mode == npm::NpmRunMode::kRealtime);
     assert(output.core.analysis.max_active_sessions == 123);
     assert(output.core.labeling_reference == "sentinel");
@@ -7222,9 +7144,8 @@ npm::NpmParameterStatusV1 ParseParametersFailure(const char* json, const npm::Np
     return status;
 }
 
-void AssertEquivalentParameters(const npm::NpmTaskParametersV1& left, const npm::NpmTaskParametersV1& right) {
+void AssertEquivalentParameters(const npm::NpmTaskParameters& left, const npm::NpmTaskParameters& right) {
     assert(left.schema_version == right.schema_version);
-    assert(left.source == right.source);
     assert(left.core.analysis.run_mode == right.core.analysis.run_mode);
     assert(left.core.analysis.result_mode == right.core.analysis.result_mode);
     assert(left.core.analysis.output_interval_ns == right.core.analysis.output_interval_ns);
@@ -7251,9 +7172,9 @@ void AssertEquivalentParameters(const npm::NpmTaskParametersV1& left, const npm:
 void TestNpmTcpStreamParameters() {
     for (const char* json : {R"({"schema_version":1})", R"({"schema_version":1,"core":{}})",
                              R"({"schema_version":1,"core":{"tcp_stream":{}}})"}) {
-        npm::NpmTaskParametersV1 output;
+        npm::NpmTaskParameters output;
         output.core.tcp_stream = {65536, 0};
-        assert(npm::ParseNpmParametersV1(json, {}, &output).error == npm::NpmParameterErrorV1::kNone);
+        assert(npm::ParseNpmParameters(json, {}, &output).error == npm::NpmParameterError::kNone);
         assert(output.core.tcp_stream.max_buffered_bytes_per_direction == 1048576);
         assert(output.core.tcp_stream.gap_timeout_ns == 1000000000);
     }
@@ -7261,15 +7182,15 @@ void TestNpmTcpStreamParameters() {
         for (const auto timeout : {0LL, 12345LL, 60000000000LL}) {
             std::string json = R"({"schema_version":1,"core":{"tcp_stream":{"max_buffered_bytes_per_direction":)" +
                                std::to_string(bytes) + R"(,"gap_timeout_ns":)" + std::to_string(timeout) + "}}}";
-            npm::NpmTaskParametersV1 output;
-            assert(npm::ParseNpmParametersV1(json.c_str(), {}, &output).error == npm::NpmParameterErrorV1::kNone);
+            npm::NpmTaskParameters output;
+            assert(npm::ParseNpmParameters(json.c_str(), {}, &output).error == npm::NpmParameterError::kNone);
             json.assign(json.size(), 'x');
             assert(output.core.tcp_stream.max_buffered_bytes_per_direction == bytes);
             assert(output.core.tcp_stream.gap_timeout_ns == timeout);
             assert(!output.session && !output.core.labeling_reference);
         }
     }
-    using Error = npm::NpmParameterErrorV1;
+    using Error = npm::NpmParameterError;
     struct InvalidCase {
         const char* node;
         Error error;
@@ -7322,24 +7243,23 @@ void TestNpmTcpStreamParameters() {
            config.tcp_stream.gap_timeout_ns == 1000000000);
 }
 
-void TestNpmParametersV1OwnsCanonicalConfig() {
-    static_assert(std::is_default_constructible_v<npm::NpmTaskParametersV1>);
-    static_assert(std::is_same_v<decltype(npm::NpmParameterStatusV1::path), std::string>);
-    static_assert(npm::kNpmParametersMaxJsonBytesV1 == 64 * 1024);
-    static_assert(npm::kNpmParametersMaxDepthV1 == 64);
+void TestNpmParametersOwnsCanonicalConfig() {
+    static_assert(std::is_default_constructible_v<npm::NpmTaskParameters>);
+    static_assert(std::is_same_v<decltype(npm::NpmParameterStatus::path), std::string>);
+    static_assert(npm::kNpmParametersMaxJsonBytes == 64 * 1024);
+    static_assert(npm::kNpmParametersMaxDepth == 64);
 
-    npm::NpmTaskParametersV1 minimal;
-    auto status = npm::ParseNpmParametersV1(R"JSON({"schema_version":1})JSON", {}, &minimal);
-    assert(status.error == npm::NpmParameterErrorV1::kNone && status.path.empty());
+    npm::NpmTaskParameters minimal;
+    auto status = npm::ParseNpmParameters(R"JSON({"schema_version":1})JSON", {}, &minimal);
+    assert(status.error == npm::NpmParameterError::kNone && status.path.empty());
     assert(minimal.schema_version == 1);
-    assert(minimal.source == npm::NpmParameterSourceV1::kParametersV1);
     assert(minimal.core.analysis.run_mode == npm::NpmRunMode::kOffline);
     assert(minimal.core.analysis.result_mode == npm::NpmResultMode::kPeriodicSnapshot);
     assert(!minimal.core.labeling_reference.has_value());
     assert(!minimal.core.labeling_memory_mib.has_value());
     assert(minimal.basic.has_value() && !minimal.session.has_value());
 
-    npm::NpmParameterConsumersV1 consumers;
+    npm::NpmParameterConsumers consumers;
     consumers.session_enabled = true;
     std::string json = R"JSON({
         "future":{"opaque":null,"array":[1,{"nested":true}]},
@@ -7361,9 +7281,9 @@ void TestNpmParametersV1OwnsCanonicalConfig() {
         },
         "schema_version":1
     })JSON";
-    npm::NpmTaskParametersV1 first;
-    status = npm::ParseNpmParametersV1(json.c_str(), consumers, &first);
-    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    npm::NpmTaskParameters first;
+    status = npm::ParseNpmParameters(json.c_str(), consumers, &first);
+    assert(status.error == npm::NpmParameterError::kNone);
     assert(first.core.analysis.run_mode == npm::NpmRunMode::kRealtime);
     assert(first.core.analysis.result_mode == npm::NpmResultMode::kFinal);
     assert(first.core.analysis.output_interval_ns == npm::kNpmMinOutputIntervalNs);
@@ -7389,47 +7309,47 @@ void TestNpmParametersV1OwnsCanonicalConfig() {
         "basic":{},"session":{"max_tcp_ranges_per_direction":65536},
         "future":{"array":[1,{"nested":true}],"opaque":null}
     })JSON";
-    npm::NpmTaskParametersV1 second;
-    status = npm::ParseNpmParametersV1(reordered, consumers, &second);
-    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    npm::NpmTaskParameters second;
+    status = npm::ParseNpmParameters(reordered, consumers, &second);
+    assert(status.error == npm::NpmParameterError::kNone);
     AssertEquivalentParameters(first, second);
 
     json.assign(json.size(), 'x');
     assert(first.session->max_tcp_ranges_per_direction == npm::kNpmMaxSessionTcpRangesPerDirection);
 }
 
-void TestNpmParametersV1RejectsEnvelopeAndDuplicatesAtomically() {
-    const npm::NpmParameterConsumersV1 consumers;
-    ParseParametersFailure(nullptr, consumers, npm::NpmParameterErrorV1::kNullInput);
-    ParseParametersFailure("", consumers, npm::NpmParameterErrorV1::kEmptyInput);
-    auto status = npm::ParseNpmParametersV1("{}", consumers, nullptr);
-    assert(status.error == npm::NpmParameterErrorV1::kNullOutput && status.path.empty());
-    ParseParametersFailure("{", consumers, npm::NpmParameterErrorV1::kInvalidJson);
-    ParseParametersFailure("[]", consumers, npm::NpmParameterErrorV1::kInvalidEnvelope);
-    ParseParametersFailure("{}", consumers, npm::NpmParameterErrorV1::kMissingSchemaVersion, "/schema_version");
-    ParseParametersFailure(R"JSON({"schema_version":"1"})JSON", consumers, npm::NpmParameterErrorV1::kInvalidType,
+void TestNpmParametersRejectsEnvelopeAndDuplicatesAtomically() {
+    const npm::NpmParameterConsumers consumers;
+    ParseParametersFailure(nullptr, consumers, npm::NpmParameterError::kNullInput);
+    ParseParametersFailure("", consumers, npm::NpmParameterError::kEmptyInput);
+    auto status = npm::ParseNpmParameters("{}", consumers, nullptr);
+    assert(status.error == npm::NpmParameterError::kNullOutput && status.path.empty());
+    ParseParametersFailure("{", consumers, npm::NpmParameterError::kInvalidJson);
+    ParseParametersFailure("[]", consumers, npm::NpmParameterError::kInvalidEnvelope);
+    ParseParametersFailure("{}", consumers, npm::NpmParameterError::kMissingSchemaVersion, "/schema_version");
+    ParseParametersFailure(R"JSON({"schema_version":"1"})JSON", consumers, npm::NpmParameterError::kInvalidType,
                            "/schema_version");
-    ParseParametersFailure(R"JSON({"schema_version":2})JSON", consumers, npm::NpmParameterErrorV1::kUnsupportedVersion,
+    ParseParametersFailure(R"JSON({"schema_version":2})JSON", consumers, npm::NpmParameterError::kUnsupportedVersion,
                            "/schema_version");
     ParseParametersFailure(R"JSON({"schema_version":1,"schema_version":1})JSON", consumers,
-                           npm::NpmParameterErrorV1::kDuplicateField, "/schema_version");
+                           npm::NpmParameterError::kDuplicateField, "/schema_version");
     ParseParametersFailure(R"JSON({"schema_version":1,"core":{"run_mode":"offline","run_mode":"realtime"}})JSON",
-                           consumers, npm::NpmParameterErrorV1::kDuplicateField, "/core/run_mode");
+                           consumers, npm::NpmParameterError::kDuplicateField, "/core/run_mode");
     ParseParametersFailure(R"JSON({"schema_version":1,"future":{"nested":{"value":1,"value":2}}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kDuplicateField, "/future/nested/value");
-    ParseParametersFailure(R"JSON({"schema_version":1,"":7})JSON", consumers, npm::NpmParameterErrorV1::kInvalidType,
+                           npm::NpmParameterError::kDuplicateField, "/future/nested/value");
+    ParseParametersFailure(R"JSON({"schema_version":1,"":7})JSON", consumers, npm::NpmParameterError::kInvalidType,
                            "/");
 
     const std::string size_prefix = R"JSON({"schema_version":1,"future":{"padding":")JSON";
     const std::string size_suffix = R"JSON("}})JSON";
     std::string maximum_size = size_prefix;
-    maximum_size.append(npm::kNpmParametersMaxJsonBytesV1 - size_prefix.size() - size_suffix.size(), 'x');
+    maximum_size.append(npm::kNpmParametersMaxJsonBytes - size_prefix.size() - size_suffix.size(), 'x');
     maximum_size += size_suffix;
-    npm::NpmTaskParametersV1 maximum_size_output;
-    status = npm::ParseNpmParametersV1(maximum_size.c_str(), consumers, &maximum_size_output);
-    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    npm::NpmTaskParameters maximum_size_output;
+    status = npm::ParseNpmParameters(maximum_size.c_str(), consumers, &maximum_size_output);
+    assert(status.error == npm::NpmParameterError::kNone);
     std::string oversized = maximum_size + " ";
-    ParseParametersFailure(oversized.c_str(), consumers, npm::NpmParameterErrorV1::kJsonTooLarge);
+    ParseParametersFailure(oversized.c_str(), consumers, npm::NpmParameterError::kJsonTooLarge);
 
     const auto nested_json = [](std::size_t depth) {
         std::string json = R"JSON({"schema_version":1,"future":{"nested":)JSON";
@@ -7439,121 +7359,121 @@ void TestNpmParametersV1RejectsEnvelopeAndDuplicatesAtomically() {
         json += "}}";
         return json;
     };
-    const std::string maximum_depth = nested_json(npm::kNpmParametersMaxDepthV1 - 2);
-    npm::NpmTaskParametersV1 maximum_depth_output;
-    status = npm::ParseNpmParametersV1(maximum_depth.c_str(), consumers, &maximum_depth_output);
-    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    const std::string maximum_depth = nested_json(npm::kNpmParametersMaxDepth - 2);
+    npm::NpmTaskParameters maximum_depth_output;
+    status = npm::ParseNpmParameters(maximum_depth.c_str(), consumers, &maximum_depth_output);
+    assert(status.error == npm::NpmParameterError::kNone);
 
-    const std::string deep = nested_json(npm::kNpmParametersMaxDepthV1 - 1);
+    const std::string deep = nested_json(npm::kNpmParametersMaxDepth - 1);
     std::string deep_path = "/future/nested";
-    for (std::size_t depth = 0; depth < npm::kNpmParametersMaxDepthV1 - 1; ++depth) {
+    for (std::size_t depth = 0; depth < npm::kNpmParametersMaxDepth - 1; ++depth) {
         deep_path += "/0";
     }
-    ParseParametersFailure(deep.c_str(), consumers, npm::NpmParameterErrorV1::kNestingTooDeep, deep_path.c_str());
+    ParseParametersFailure(deep.c_str(), consumers, npm::NpmParameterError::kNestingTooDeep, deep_path.c_str());
 }
 
-void TestNpmParametersV1ConsumesOnlyEnabledAvailableModules() {
-    npm::NpmParameterConsumersV1 basic_only;
-    npm::NpmTaskParametersV1 output;
+void TestNpmParametersConsumesOnlyEnabledAvailableModules() {
+    npm::NpmParameterConsumers basic_only;
+    npm::NpmTaskParameters output;
     auto status =
-        npm::ParseNpmParametersV1(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":null},)JSON"
-                                  R"JSON("future":{"anything":false},"basic":{}})JSON",
-                                  basic_only, &output);
-    assert(status.error == npm::NpmParameterErrorV1::kNone);
+        npm::ParseNpmParameters(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":null},)JSON"
+                                R"JSON("future":{"anything":false},"basic":{}})JSON",
+                                basic_only, &output);
+    assert(status.error == npm::NpmParameterError::kNone);
     assert(output.basic.has_value() && !output.session.has_value());
 
-    status = npm::ParseNpmParametersV1(R"JSON({"schema_version":1,"session":{"unknown":"ignored"}})JSON", basic_only,
-                                       &output);
-    assert(status.error == npm::NpmParameterErrorV1::kNone && !output.session.has_value());
+    status =
+        npm::ParseNpmParameters(R"JSON({"schema_version":1,"session":{"unknown":"ignored"}})JSON", basic_only, &output);
+    assert(status.error == npm::NpmParameterError::kNone && !output.session.has_value());
     ParseParametersFailure(R"JSON({"schema_version":1,"future":7})JSON", basic_only,
-                           npm::NpmParameterErrorV1::kInvalidType, "/future");
+                           npm::NpmParameterError::kInvalidType, "/future");
     ParseParametersFailure(R"JSON({"schema_version":1,"basic":{"unknown":1}})JSON", basic_only,
-                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/basic/unknown");
+                           npm::NpmParameterError::kUnknownConsumedField, "/basic/unknown");
     ParseParametersFailure(R"JSON({"schema_version":1,"basic":{"":1}})JSON", basic_only,
-                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/basic/");
+                           npm::NpmParameterError::kUnknownConsumedField, "/basic/");
 
-    npm::NpmParameterConsumersV1 session = basic_only;
+    npm::NpmParameterConsumers session = basic_only;
     session.basic_enabled = false;
     session.session_enabled = true;
-    status = npm::ParseNpmParametersV1(R"JSON({"schema_version":1})JSON", session, &output);
-    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    status = npm::ParseNpmParameters(R"JSON({"schema_version":1})JSON", session, &output);
+    assert(status.error == npm::NpmParameterError::kNone);
     assert(!output.basic.has_value() && output.session.has_value());
     assert(output.session->max_tcp_ranges_per_direction == npm::kNpmDefaultSessionTcpRangesPerDirection);
     ParseParametersFailure(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":null}})JSON", session,
-                           npm::NpmParameterErrorV1::kInvalidType, "/session/max_tcp_ranges_per_direction");
+                           npm::NpmParameterError::kInvalidType, "/session/max_tcp_ranges_per_direction");
     ParseParametersFailure(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":"1024"}})JSON", session,
-                           npm::NpmParameterErrorV1::kInvalidType, "/session/max_tcp_ranges_per_direction");
+                           npm::NpmParameterError::kInvalidType, "/session/max_tcp_ranges_per_direction");
     ParseParametersFailure(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":7}})JSON", session,
-                           npm::NpmParameterErrorV1::kInvalidRange, "/session/max_tcp_ranges_per_direction");
+                           npm::NpmParameterError::kInvalidRange, "/session/max_tcp_ranges_per_direction");
     ParseParametersFailure(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":65537}})JSON", session,
-                           npm::NpmParameterErrorV1::kInvalidRange, "/session/max_tcp_ranges_per_direction");
+                           npm::NpmParameterError::kInvalidRange, "/session/max_tcp_ranges_per_direction");
     ParseParametersFailure(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":4294967296}})JSON",
-                           session, npm::NpmParameterErrorV1::kInvalidRange, "/session/max_tcp_ranges_per_direction");
+                           session, npm::NpmParameterError::kInvalidRange, "/session/max_tcp_ranges_per_direction");
     ParseParametersFailure(R"JSON({"schema_version":1,"session":{"max_tcp_ranges_per_direction":-1}})JSON", session,
-                           npm::NpmParameterErrorV1::kInvalidType, "/session/max_tcp_ranges_per_direction");
+                           npm::NpmParameterError::kInvalidType, "/session/max_tcp_ranges_per_direction");
     ParseParametersFailure(R"JSON({"schema_version":1,"session":{"unknown":1}})JSON", session,
-                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/session/unknown");
+                           npm::NpmParameterError::kUnknownConsumedField, "/session/unknown");
 
     session.session_available = false;
     ParseParametersFailure(R"JSON({"schema_version":1,"session":{}})JSON", session,
-                           npm::NpmParameterErrorV1::kUnavailableFeature, "/session");
+                           npm::NpmParameterError::kUnavailableFeature, "/session");
     session.session_enabled = false;
-    status = npm::ParseNpmParametersV1(R"JSON({"schema_version":1,"session":{"unknown":null}})JSON", session, &output);
-    assert(status.error == npm::NpmParameterErrorV1::kNone && !output.session.has_value());
+    status = npm::ParseNpmParameters(R"JSON({"schema_version":1,"session":{"unknown":null}})JSON", session, &output);
+    assert(status.error == npm::NpmParameterError::kNone && !output.session.has_value());
 }
 
-void TestNpmParametersV1UsesCoreNamespaceExclusively() {
-    const npm::NpmParameterConsumersV1 consumers;
-    npm::NpmTaskParametersV1 output;
-    auto status = npm::ParseNpmParametersV1(R"JSON({"schema_version":1,"core":{"max_active_sessions":123}})JSON",
-                                            consumers, &output);
-    assert(status.error == npm::NpmParameterErrorV1::kNone);
+void TestNpmParametersUsesCoreNamespaceExclusively() {
+    const npm::NpmParameterConsumers consumers;
+    npm::NpmTaskParameters output;
+    auto status = npm::ParseNpmParameters(R"JSON({"schema_version":1,"core":{"max_active_sessions":123}})JSON",
+                                          consumers, &output);
+    assert(status.error == npm::NpmParameterError::kNone);
     assert(output.core.analysis.max_active_sessions == 123);
 
     ParseParametersFailure(R"JSON({"schema_version":1,"framework":{}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/framework");
+                           npm::NpmParameterError::kUnknownConsumedField, "/framework");
     ParseParametersFailure(R"JSON({"schema_version":1,"core":{},"framework":{"max_active_sessions":123}})JSON",
-                           consumers, npm::NpmParameterErrorV1::kUnknownConsumedField, "/framework");
+                           consumers, npm::NpmParameterError::kUnknownConsumedField, "/framework");
 }
 
-void TestNpmParametersV1ValidatesCoreAndConditionalLabeling() {
-    npm::NpmParameterConsumersV1 consumers;
-    npm::NpmTaskParametersV1 retention;
+void TestNpmParametersValidatesCoreAndConditionalLabeling() {
+    npm::NpmParameterConsumers consumers;
+    npm::NpmTaskParameters retention;
     for (uint32_t days : {1U, 3650U}) {
         const std::string json =
             R"JSON({"schema_version":1,"core":{"result":{"retention_days":)JSON" + std::to_string(days) + "}}}";
-        assert(npm::ParseNpmParametersV1(json.c_str(), consumers, &retention).error == npm::NpmParameterErrorV1::kNone);
+        assert(npm::ParseNpmParameters(json.c_str(), consumers, &retention).error == npm::NpmParameterError::kNone);
         assert(retention.core.result_retention_days == days);
     }
     for (const char* invalid : {"0", "3651", "null", "\"1\""}) {
         const std::string json =
             std::string(R"JSON({"schema_version":1,"core":{"result":{"retention_days":)JSON") + invalid + "}}}";
         ParseParametersFailure(json.c_str(), consumers,
-                               invalid[0] == 'n' || invalid[0] == '"' ? npm::NpmParameterErrorV1::kInvalidType
-                                                                      : npm::NpmParameterErrorV1::kInvalidRange,
+                               invalid[0] == 'n' || invalid[0] == '"' ? npm::NpmParameterError::kInvalidType
+                                                                      : npm::NpmParameterError::kInvalidRange,
                                "/core/result/retention_days");
     }
     ParseParametersFailure(R"JSON({"schema_version":1,"core":{"result":{"unknown":1}}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/core/result/unknown");
+                           npm::NpmParameterError::kUnknownConsumedField, "/core/result/unknown");
     ParseParametersFailure(R"JSON({"schema_version":1,"core":{"unknown":1}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/core/unknown");
+                           npm::NpmParameterError::kUnknownConsumedField, "/core/unknown");
     ParseParametersFailure(R"JSON({"schema_version":1,"core":{"":1}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kUnknownConsumedField, "/core/");
+                           npm::NpmParameterError::kUnknownConsumedField, "/core/");
     ParseParametersFailure(R"JSON({"schema_version":1,"core":{"run_mode":null}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kInvalidType, "/core/run_mode");
+                           npm::NpmParameterError::kInvalidType, "/core/run_mode");
     ParseParametersFailure(R"JSON({"schema_version":1,"core":{"run_mode":"batch"}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kInvalidValue, "/core/run_mode");
+                           npm::NpmParameterError::kInvalidValue, "/core/run_mode");
     ParseParametersFailure(R"JSON({"schema_version":1,"core":{"max_active_sessions":"1"}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kInvalidType, "/core/max_active_sessions");
+                           npm::NpmParameterError::kInvalidType, "/core/max_active_sessions");
     ParseParametersFailure(R"JSON({"schema_version":1,"core":{"max_active_sessions":0}})JSON", consumers,
-                           npm::NpmParameterErrorV1::kInvalidRange, "/core/max_active_sessions");
+                           npm::NpmParameterError::kInvalidRange, "/core/max_active_sessions");
     ParseParametersFailure(R"JSON({"schema_version":1,"core":null})JSON", consumers,
-                           npm::NpmParameterErrorV1::kInvalidType, "/core");
+                           npm::NpmParameterError::kInvalidType, "/core");
 
-    npm::NpmTaskParametersV1 output;
-    auto status = npm::ParseNpmParametersV1(
+    npm::NpmTaskParameters output;
+    auto status = npm::ParseNpmParameters(
         R"JSON({"schema_version":1,"core":{"labeling":null,"labeling_memory_mib":"ignored"}})JSON", consumers, &output);
-    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    assert(status.error == npm::NpmParameterError::kNone);
     assert(!output.core.labeling_reference.has_value());
     assert(!output.core.labeling_memory_mib.has_value());
 
@@ -7563,12 +7483,12 @@ void TestNpmParametersV1ValidatesCoreAndConditionalLabeling() {
                                   "config.Rules@1", "config.rules@01"}) {
         const std::string json =
             std::string(R"JSON({"schema_version":1,"core":{"labeling":")JSON") + reference + R"JSON("}})JSON";
-        ParseParametersFailure(json.c_str(), consumers, npm::NpmParameterErrorV1::kInvalidExactReference,
+        ParseParametersFailure(json.c_str(), consumers, npm::NpmParameterError::kInvalidExactReference,
                                "/core/labeling");
     }
-    status = npm::ParseNpmParametersV1(R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7"}})JSON",
-                                       consumers, &output);
-    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    status = npm::ParseNpmParameters(R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7"}})JSON",
+                                     consumers, &output);
+    assert(status.error == npm::NpmParameterError::kNone);
     assert(output.core.labeling_reference == "config.corp-labels@7");
     assert(output.core.labeling_memory_mib == npm::kNpmDefaultLabelingMemoryMiB);
 
@@ -7576,14 +7496,14 @@ void TestNpmParametersV1ValidatesCoreAndConditionalLabeling() {
         const std::string json =
             R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7","labeling_memory_mib":)JSON" +
             std::to_string(memory_mib) + "}}";
-        status = npm::ParseNpmParametersV1(json.c_str(), consumers, &output);
-        assert(status.error == npm::NpmParameterErrorV1::kNone);
+        status = npm::ParseNpmParameters(json.c_str(), consumers, &output);
+        assert(status.error == npm::NpmParameterError::kNone);
         assert(output.core.labeling_memory_mib == memory_mib);
     }
-    status = npm::ParseNpmParametersV1(
+    status = npm::ParseNpmParameters(
         R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7","max_tracked_bytes":536870912,"labeling_memory_mib":256}})JSON",
         consumers, &output);
-    assert(status.error == npm::NpmParameterErrorV1::kNone);
+    assert(status.error == npm::NpmParameterError::kNone);
     assert(output.core.labeling_memory_mib == 256);
 
     for (const char* invalid : {"null", "\"64\"", "0", "7", "512"}) {
@@ -7592,22 +7512,22 @@ void TestNpmParametersV1ValidatesCoreAndConditionalLabeling() {
                 R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7","labeling_memory_mib":)JSON") +
             invalid + "}}";
         ParseParametersFailure(json.c_str(), consumers,
-                               invalid[0] == '"' || invalid[0] == 'n' ? npm::NpmParameterErrorV1::kInvalidType
-                                                                      : npm::NpmParameterErrorV1::kInvalidRange,
+                               invalid[0] == '"' || invalid[0] == 'n' ? npm::NpmParameterError::kInvalidType
+                                                                      : npm::NpmParameterError::kInvalidRange,
                                "/core/labeling_memory_mib");
     }
     ParseParametersFailure(
         R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7","max_tracked_bytes":538968064,"labeling_memory_mib":257}})JSON",
-        consumers, npm::NpmParameterErrorV1::kInvalidRange, "/core/labeling_memory_mib");
+        consumers, npm::NpmParameterError::kInvalidRange, "/core/labeling_memory_mib");
     ParseParametersFailure(
         R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7","labeling_memory_mib":256}})JSON",
-        consumers, npm::NpmParameterErrorV1::kInvalidRange, "/core/labeling_memory_mib");
+        consumers, npm::NpmParameterError::kInvalidRange, "/core/labeling_memory_mib");
     ParseParametersFailure(
         R"JSON({"schema_version":1,"core":{"labeling":"config.corp-labels@7","max_tracked_bytes":268435455,"labeling_memory_mib":128}})JSON",
-        consumers, npm::NpmParameterErrorV1::kInvalidRange, "/core/labeling_memory_mib");
+        consumers, npm::NpmParameterError::kInvalidRange, "/core/labeling_memory_mib");
 
     consumers.labeling_available = false;
-    ParseParametersFailure(R"JSON({"schema_version":1})JSON", consumers, npm::NpmParameterErrorV1::kUnavailableFeature,
+    ParseParametersFailure(R"JSON({"schema_version":1})JSON", consumers, npm::NpmParameterError::kUnavailableFeature,
                            "/labeling");
 }
 
@@ -7836,71 +7756,68 @@ std::unique_ptr<npm::NpmBasicTaskRuntime> CreateRealtimeRuntimeForTest(const npm
     return runtime;
 }
 
-void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Offline() {
+void TestNpmBasicTaskRuntimeCurrentInstancesOffline() {
     for (const bool observing_session : {false, true}) {
-        auto configs = MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode::kOffline, observing_session);
-        configs.legacy_json.assign(configs.legacy_json.size(), 'x');
-        configs.parameters_v1_json.assign(configs.parameters_v1_json.size(), 'y');
-        assert(configs.legacy.domains.input_namespace == "pcapfile.capture");
-        assert(configs.parameters_v1.domains.input_namespace == "pcapfile.capture");
+        auto configs = MakeRuntimeTaskConfig(npm::NpmRunMode::kOffline, observing_session);
+        configs.json.assign(configs.json.size(), 'y');
+        assert(configs.config.domains.input_namespace == "pcapfile.capture");
 
         ContextDictionary dictionary;
         ContextProtocol protocol(&dictionary);
         DualContextPool pool(&protocol);
         SinglePoolQuerier querier(&pool);
-        std::shared_ptr<arrow::Schema> legacy_schema;
-        std::shared_ptr<arrow::Schema> parameters_schema;
-        std::unique_ptr<npm::NpmBasicTaskRuntime> legacy_runtime;
-        std::unique_ptr<npm::NpmBasicTaskRuntime> parameters_runtime;
-        auto legacy_create = npm::NpmBasicTaskRuntime::Create(configs.legacy, &querier, flowsql::packet::PacketSchema(),
-                                                              &legacy_schema, &legacy_runtime);
-        auto parameters_create = npm::NpmBasicTaskRuntime::Create(
-            configs.parameters_v1, &querier, flowsql::packet::PacketSchema(), &parameters_schema, &parameters_runtime);
-        assert(legacy_create.error == npm::NpmBasicTaskRuntimeError::kNone);
-        assert(parameters_create.error == npm::NpmBasicTaskRuntimeError::kNone);
-        assert(legacy_schema != nullptr && parameters_schema != nullptr);
-        assert(legacy_schema->Equals(*parameters_schema, true));
-        assert(legacy_runtime != nullptr && parameters_runtime != nullptr);
-        AssertEquivalentTaskConfig(legacy_runtime->Config(), parameters_runtime->Config());
-        assert(legacy_runtime->State() == npm::NpmEofFlushState::kOpen);
-        assert(parameters_runtime->State() == npm::NpmEofFlushState::kOpen);
+        std::shared_ptr<arrow::Schema> first_schema;
+        std::shared_ptr<arrow::Schema> second_schema;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> first_runtime;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> second_runtime;
+        auto first_create = npm::NpmBasicTaskRuntime::Create(configs.config, &querier, flowsql::packet::PacketSchema(),
+                                                             &first_schema, &first_runtime);
+        auto second_create = npm::NpmBasicTaskRuntime::Create(configs.config, &querier, flowsql::packet::PacketSchema(),
+                                                              &second_schema, &second_runtime);
+        assert(first_create.error == npm::NpmBasicTaskRuntimeError::kNone);
+        assert(second_create.error == npm::NpmBasicTaskRuntimeError::kNone);
+        assert(first_schema != nullptr && second_schema != nullptr);
+        assert(first_schema->Equals(*second_schema, true));
+        assert(first_runtime != nullptr && second_runtime != nullptr);
+        assert(first_runtime->State() == npm::NpmEofFlushState::kOpen);
+        assert(second_runtime->State() == npm::NpmEofFlushState::kOpen);
         assert(pool.acquire_calls == 2 && pool.release_calls == 0);
 
         const auto packet = MakeIpv4TcpPacket("192.0.2.10", 41000, "198.51.100.20", 443, {0x16, 0x03}, kTcpAck, 101);
         auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 1)});
-        std::shared_ptr<arrow::RecordBatch> legacy_output;
-        std::shared_ptr<arrow::RecordBatch> parameters_output;
-        const auto legacy_status = legacy_runtime->ProcessOfflineBatch(input, &legacy_output);
-        const auto parameters_status = parameters_runtime->ProcessOfflineBatch(input, &parameters_output);
-        AssertEquivalentOfflineBatchStatus(legacy_status, parameters_status);
-        assert(legacy_status.error == npm::NpmBasicOfflineBatchError::kNone);
-        AssertEquivalentRecordBatch(legacy_output, parameters_output);
-        assert(legacy_output->num_rows() == 0);
-        assert(legacy_runtime->Sessions().size() == 1);
-        assert(parameters_runtime->Sessions().size() == 1);
-        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(), parameters_runtime->Budget()->Usage());
+        std::shared_ptr<arrow::RecordBatch> first_output;
+        std::shared_ptr<arrow::RecordBatch> second_output;
+        const auto first_status = first_runtime->ProcessOfflineBatch(input, &first_output);
+        const auto second_status = second_runtime->ProcessOfflineBatch(input, &second_output);
+        AssertEquivalentOfflineBatchStatus(first_status, second_status);
+        assert(first_status.error == npm::NpmBasicOfflineBatchError::kNone);
+        AssertEquivalentRecordBatch(first_output, second_output);
+        assert(first_output->num_rows() == 0);
+        assert(first_runtime->Sessions().size() == 1);
+        assert(second_runtime->Sessions().size() == 1);
+        AssertEquivalentBudgetUsage(first_runtime->Budget()->Usage(), second_runtime->Budget()->Usage());
 
-        legacy_output.reset();
-        parameters_output.reset();
-        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(), parameters_runtime->Budget()->Usage());
-        std::shared_ptr<arrow::RecordBatch> legacy_final;
-        std::shared_ptr<arrow::RecordBatch> parameters_final;
-        const auto legacy_flush = legacy_runtime->FlushOffline(100, &legacy_final);
-        const auto parameters_flush = parameters_runtime->FlushOffline(100, &parameters_final);
-        AssertEquivalentEofStatus(legacy_flush, parameters_flush);
-        assert(legacy_flush.error == npm::NpmEofFlushError::kNone);
-        AssertEquivalentRecordBatch(legacy_final, parameters_final);
-        assert(legacy_final->num_rows() == 1);
-        assert(legacy_runtime->State() == npm::NpmEofFlushState::kFlushed);
-        assert(parameters_runtime->State() == npm::NpmEofFlushState::kFlushed);
+        first_output.reset();
+        second_output.reset();
+        AssertEquivalentBudgetUsage(first_runtime->Budget()->Usage(), second_runtime->Budget()->Usage());
+        std::shared_ptr<arrow::RecordBatch> first_final;
+        std::shared_ptr<arrow::RecordBatch> second_final;
+        const auto first_flush = first_runtime->FlushOffline(100, &first_final);
+        const auto second_flush = second_runtime->FlushOffline(100, &second_final);
+        AssertEquivalentEofStatus(first_flush, second_flush);
+        assert(first_flush.error == npm::NpmEofFlushError::kNone);
+        AssertEquivalentRecordBatch(first_final, second_final);
+        assert(first_final->num_rows() == 1);
+        assert(first_runtime->State() == npm::NpmEofFlushState::kFlushed);
+        assert(second_runtime->State() == npm::NpmEofFlushState::kFlushed);
         assert(pool.release_calls == 2);
-        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(), parameters_runtime->Budget()->Usage());
-        assert(legacy_runtime->Budget()->Usage().pending_output_bytes > 0);
+        AssertEquivalentBudgetUsage(first_runtime->Budget()->Usage(), second_runtime->Budget()->Usage());
+        assert(first_runtime->Budget()->Usage().pending_output_bytes > 0);
 
-        legacy_final.reset();
-        parameters_final.reset();
-        AssertTaskBudgetUsage(legacy_runtime->Budget()->Usage(), 0, 0, 0, 0, legacy_runtime.get());
-        AssertTaskBudgetUsage(parameters_runtime->Budget()->Usage(), 0, 0, 0, 0, parameters_runtime.get());
+        first_final.reset();
+        second_final.reset();
+        AssertTaskBudgetUsage(first_runtime->Budget()->Usage(), 0, 0, 0, 0, first_runtime.get());
+        AssertTaskBudgetUsage(second_runtime->Budget()->Usage(), 0, 0, 0, 0, second_runtime.get());
     }
 }
 
@@ -8604,108 +8521,108 @@ void TestNpmBasicPeriodicOrderDiagnosticsAndStalledBudget() {
     }
 }
 
-void TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Realtime() {
+void TestNpmBasicTaskRuntimeCurrentInstancesRealtime() {
     constexpr int64_t interval_ns = 10'000'000;
     constexpr int64_t observed_start_ns = 1'700'000'000'000'000'000LL;
     for (const bool observing_session : {false, true}) {
-        auto configs = MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode::kRealtime, observing_session,
-                                                        flowsql::packet::AddressFamily::kIPv6);
-        configs.legacy_json.assign(configs.legacy_json.size(), 'x');
-        configs.parameters_v1_json.assign(configs.parameters_v1_json.size(), 'y');
+        auto configs =
+            MakeRuntimeTaskConfig(npm::NpmRunMode::kRealtime, observing_session, flowsql::packet::AddressFamily::kIPv6);
+        configs.json.assign(configs.json.size(), 'y');
 
         ContextDictionary dictionary;
         ContextProtocol protocol(&dictionary);
         DualContextPool pool(&protocol);
         SinglePoolQuerier querier(&pool);
-        std::shared_ptr<arrow::Schema> legacy_schema;
-        std::shared_ptr<arrow::Schema> parameters_schema;
-        std::unique_ptr<npm::NpmBasicTaskRuntime> legacy_runtime;
-        std::unique_ptr<npm::NpmBasicTaskRuntime> parameters_runtime;
-        const auto legacy_create = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
-            configs.legacy, &querier, flowsql::packet::PacketSchema(), AllRealtimeTimeCapabilities(), &legacy_schema,
-            &legacy_runtime);
-        const auto parameters_create = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
-            configs.parameters_v1, &querier, flowsql::packet::PacketSchema(), AllRealtimeTimeCapabilities(),
-            &parameters_schema, &parameters_runtime);
-        assert(legacy_create.error == npm::NpmBasicTaskRuntimeError::kNone);
-        assert(parameters_create.error == npm::NpmBasicTaskRuntimeError::kNone);
-        assert(legacy_schema != nullptr && parameters_schema != nullptr);
-        assert(legacy_schema->Equals(*parameters_schema, true));
-        AssertEquivalentTaskConfig(legacy_runtime->Config(), parameters_runtime->Config());
+        std::shared_ptr<arrow::Schema> first_schema;
+        std::shared_ptr<arrow::Schema> second_schema;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> first_runtime;
+        std::unique_ptr<npm::NpmBasicTaskRuntime> second_runtime;
+        const auto first_create = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
+            configs.config, &querier, flowsql::packet::PacketSchema(), AllRealtimeTimeCapabilities(), &first_schema,
+            &first_runtime);
+        const auto second_create = npm::NpmBasicTaskRuntime::CreateWithTimeCapabilities(
+            configs.config, &querier, flowsql::packet::PacketSchema(), AllRealtimeTimeCapabilities(), &second_schema,
+            &second_runtime);
+        assert(first_create.error == npm::NpmBasicTaskRuntimeError::kNone);
+        assert(second_create.error == npm::NpmBasicTaskRuntimeError::kNone);
+        assert(first_schema != nullptr && second_schema != nullptr);
+        assert(first_schema->Equals(*second_schema, true));
         assert(pool.acquire_calls == 2 && pool.release_calls == 0);
 
         const auto packet = MakeIpv6UdpPacket("2001:db8::10", 53010, "2001:db8::20", 53, {0x12, 0x34});
         auto packet_view = packet.View(0, 100);
         packet_view.meta.timestamp_ns = 1'000;
-        npm::NpmSessionSnapshotBatch legacy_ended;
-        npm::NpmSessionSnapshotBatch parameters_ended;
-        const auto legacy_process =
-            npm::ProcessNpmPacket(*MakeDomainLookup(legacy_runtime->Config().domains), packet_view, packet.layer,
-                                  legacy_runtime->Sessions(), *legacy_runtime->ProtocolContext().Identifier(),
-                                  legacy_runtime->Modules(), legacy_runtime->Collector(), &legacy_ended);
-        const auto parameters_process =
-            npm::ProcessNpmPacket(*MakeDomainLookup(parameters_runtime->Config().domains), packet_view, packet.layer,
-                                  parameters_runtime->Sessions(), *parameters_runtime->ProtocolContext().Identifier(),
-                                  parameters_runtime->Modules(), parameters_runtime->Collector(), &parameters_ended);
-        assert(legacy_process.error == npm::NpmPacketProcessError::kNone);
-        assert(parameters_process.error == legacy_process.error);
-        assert(parameters_process.binding_error == legacy_process.binding_error);
-        assert(parameters_process.session_error == legacy_process.session_error);
-        assert(parameters_process.module_error == legacy_process.module_error);
-        assert(legacy_ended.empty() && parameters_ended.empty());
-        assert(legacy_runtime->Sessions().size() == 1);
-        assert(parameters_runtime->Sessions().size() == 1);
-        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(), parameters_runtime->Budget()->Usage());
+        npm::NpmSessionSnapshotBatch first_ended;
+        npm::NpmSessionSnapshotBatch second_ended;
+        const auto first_process =
+            npm::ProcessNpmPacket(*MakeDomainLookup(first_runtime->Config().domains), packet_view, packet.layer,
+                                  first_runtime->Sessions(), *first_runtime->ProtocolContext().Identifier(),
+                                  first_runtime->Modules(), first_runtime->Collector(), &first_ended);
+        const auto second_process =
+            npm::ProcessNpmPacket(*MakeDomainLookup(second_runtime->Config().domains), packet_view, packet.layer,
+                                  second_runtime->Sessions(), *second_runtime->ProtocolContext().Identifier(),
+                                  second_runtime->Modules(), second_runtime->Collector(), &second_ended);
+        assert(first_process.error == npm::NpmPacketProcessError::kNone);
+        assert(second_process.error == first_process.error);
+        assert(second_process.binding_error == first_process.binding_error);
+        assert(second_process.session_error == first_process.session_error);
+        assert(second_process.module_error == first_process.module_error);
+        assert(first_ended.empty() && second_ended.empty());
+        assert(first_runtime->Sessions().size() == 1);
+        assert(second_runtime->Sessions().size() == 1);
+        AssertEquivalentBudgetUsage(first_runtime->Budget()->Usage(), second_runtime->Budget()->Usage());
 
-        auto legacy_output = MakeNpmPacketViewBatch();
-        auto parameters_output = MakeNpmPacketViewBatch();
-        const auto legacy_sentinel = legacy_output;
-        const auto parameters_sentinel = parameters_output;
-        auto legacy_status = legacy_runtime->DriveRealtimeMaintenance(
+        auto first_output = MakeNpmPacketViewBatch();
+        auto second_output = MakeNpmPacketViewBatch();
+        const auto first_sentinel = first_output;
+        const auto second_sentinel = second_output;
+        auto first_status = first_runtime->DriveRealtimeMaintenance(
             RealtimeMaintenanceInput(100, observed_start_ns, packet_view.meta.timestamp_ns, true, false, true, false),
-            &legacy_output);
-        auto parameters_status = parameters_runtime->DriveRealtimeMaintenance(
+            &first_output);
+        auto second_status = second_runtime->DriveRealtimeMaintenance(
             RealtimeMaintenanceInput(100, observed_start_ns, packet_view.meta.timestamp_ns, true, false, true, false),
-            &parameters_output);
-        AssertEquivalentRealtimeStatus(legacy_status, parameters_status);
-        assert(legacy_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
-        assert(!legacy_status.snapshot_due && !legacy_status.emitted);
-        assert(legacy_output == legacy_sentinel && parameters_output == parameters_sentinel);
+            &second_output);
+        AssertEquivalentRealtimeStatus(first_status, second_status);
+        assert(first_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+        assert(!first_status.snapshot_due && !first_status.emitted);
+        assert(first_output == first_sentinel && second_output == second_sentinel);
 
-        legacy_status = legacy_runtime->DriveRealtimeMaintenance(
+        first_status = first_runtime->DriveRealtimeMaintenance(
             RealtimeMaintenanceInput(100 + interval_ns, observed_start_ns + interval_ns,
-                                     interval_ns + configs.legacy.analysis.out_of_order_tolerance_ns, false, true, true,
+                                     interval_ns + configs.config.analysis.out_of_order_tolerance_ns, false, true, true,
                                      false),
-            &legacy_output);
-        parameters_status = parameters_runtime->DriveRealtimeMaintenance(
+            &first_output);
+        second_status = second_runtime->DriveRealtimeMaintenance(
             RealtimeMaintenanceInput(100 + interval_ns, observed_start_ns + interval_ns,
-                                     interval_ns + configs.legacy.analysis.out_of_order_tolerance_ns, false, true, true,
+                                     interval_ns + configs.config.analysis.out_of_order_tolerance_ns, false, true, true,
                                      false),
-            &parameters_output);
-        AssertEquivalentRealtimeStatus(legacy_status, parameters_status);
-        assert(legacy_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
-        assert(legacy_status.snapshot_due && legacy_status.emitted);
-        assert(legacy_status.active_sessions == 1 && legacy_status.ended_sessions == 0);
-        AssertEquivalentRecordBatch(legacy_output, parameters_output);
-        assert(legacy_output->num_rows() == 1);
+            &second_output);
+        AssertEquivalentRealtimeStatus(first_status, second_status);
+        assert(first_status.error == npm::NpmBasicRealtimeMaintenanceError::kNone);
+        assert(first_status.snapshot_due && first_status.emitted);
+        assert(first_status.active_sessions == 1 && first_status.ended_sessions == 0);
+        AssertEquivalentRecordBatch(first_output, second_output);
+        assert(first_output->num_rows() == 1);
         if (observing_session) {
-            assert(SessionResultColumn<arrow::UInt64Array>(legacy_output, 2)->Value(0) == 1);
+            assert(SessionResultColumn<arrow::UInt64Array>(first_output, 2)->Value(0) == 1);
         } else {
-            assert(BasicResultColumn<arrow::UInt64Array>(legacy_output, 2)->Value(0) == 1);
+            assert(BasicResultColumn<arrow::UInt64Array>(first_output, 2)->Value(0) == 1);
         }
-        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(), parameters_runtime->Budget()->Usage());
-        assert(legacy_runtime->Budget()->Usage().pending_output_bytes > 0);
+        AssertEquivalentBudgetUsage(first_runtime->Budget()->Usage(), second_runtime->Budget()->Usage());
+        assert(first_runtime->Budget()->Usage().pending_output_bytes > 0);
 
-        legacy_runtime->Cancel();
-        parameters_runtime->Cancel();
-        assert(legacy_runtime->State() == npm::NpmEofFlushState::kCancelled);
-        assert(parameters_runtime->State() == npm::NpmEofFlushState::kCancelled);
+        first_runtime->Cancel();
+        assert(second_runtime->State() == npm::NpmEofFlushState::kOpen);
+        assert(second_runtime->Sessions().size() == 1);
+        second_runtime->Cancel();
+        assert(first_runtime->State() == npm::NpmEofFlushState::kCancelled);
+        assert(second_runtime->State() == npm::NpmEofFlushState::kCancelled);
         assert(pool.release_calls == 2);
-        AssertEquivalentBudgetUsage(legacy_runtime->Budget()->Usage(), parameters_runtime->Budget()->Usage());
-        legacy_output.reset();
-        parameters_output.reset();
-        AssertTaskBudgetUsage(legacy_runtime->Budget()->Usage(), 0, 0, 0, 0, legacy_runtime.get());
-        AssertTaskBudgetUsage(parameters_runtime->Budget()->Usage(), 0, 0, 0, 0, parameters_runtime.get());
+        AssertEquivalentBudgetUsage(first_runtime->Budget()->Usage(), second_runtime->Budget()->Usage());
+        first_output.reset();
+        second_output.reset();
+        AssertTaskBudgetUsage(first_runtime->Budget()->Usage(), 0, 0, 0, 0, first_runtime.get());
+        AssertTaskBudgetUsage(second_runtime->Budget()->Usage(), 0, 0, 0, 0, second_runtime.get());
     }
 }
 
@@ -9901,10 +9818,10 @@ void TestNpmBasicTaskRuntimeCancelKeepsDeliveredOutputAlive() {
     AssertTaskBudgetUsage(budget->Usage(), 0, 0, 0, 0, runtime.get());
 }
 
-flowsql::BlockTransformTaskConfigV1 MakeOperatorTaskConfig(const std::string& task_id,
-                                                           const std::string& with_params_json,
-                                                           const std::string& pushed_filter_plan_json) {
-    flowsql::BlockTransformTaskConfigV1 config;
+flowsql::BlockTransformTaskConfig MakeOperatorTaskConfig(const std::string& task_id,
+                                                         const std::string& with_params_json,
+                                                         const std::string& pushed_filter_plan_json) {
+    flowsql::BlockTransformTaskConfig config;
     config.task_id = task_id.c_str();
     config.with_params_json = with_params_json.c_str();
     config.pushed_filter_plan_json = pushed_filter_plan_json.c_str();
@@ -9919,14 +9836,14 @@ void TestNpmBasicTaskPreservesLatePacketDiagnostic() {
     npm::NpmBasicOperator provider(&querier);
     const std::string task_id = "public-late-packet";
     const std::string json =
-        R"({"source_domains":"7:77","output_interval_ns":"10000000","out_of_order_tolerance_ns":"0","observing":"basic_ipv4"})";
+        R"JSON({"source_domains":"7:77","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"output_interval_ns\":10000000,\"out_of_order_tolerance_ns\":0}}"})JSON";
     const std::string filter = R"({"version":1,"root":null})";
-    flowsql::IBlockTransformTaskV1* task = nullptr;
+    flowsql::IBlockTransformTask* task = nullptr;
     assert(provider.CreateTask(MakeOperatorTaskConfig(task_id, json, filter), &task) == 0);
     std::shared_ptr<arrow::Schema> schema;
     assert(task->Open(flowsql::packet::PacketSchema(), &schema) == 0);
     const auto packet = MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1});
-    std::vector<flowsql::BlockTransformOutputV1> outputs;
+    std::vector<flowsql::BlockTransformOutput> outputs;
     assert(task->ProcessBlock(MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 7, 1, 1)}), 0, &outputs) == 0);
     outputs.clear();
     assert(task->ProcessBlock(MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 7, 20'000'000, 2)}), 0, &outputs) ==
@@ -9963,18 +9880,19 @@ void TestNpmBasicFinalUsesGenerationTime() {
             npm::NpmBasicOperator provider(&querier);
             const std::string task_id = "final-generation-time";
             const std::string json =
-                std::string(R"({"source_domains":"0:77","result_mode":"final","features":"basic,session",)"
-                            R"("observing":")") +
+                std::string(
+                    R"({"source_domains":"0:77","parameters":"{\"schema_version\":1,\"core\":{\"result_mode\":\"final\"}}","features":"basic,session",)"
+                    R"("observing":")") +
                 (observing_session ? "session_ipv4" : "basic_ipv4") + "\"}";
             const std::string filter = R"({"version":1,"root":null})";
-            flowsql::IBlockTransformTaskV1* task = nullptr;
+            flowsql::IBlockTransformTask* task = nullptr;
             assert(provider.CreateTask(MakeOperatorTaskConfig(task_id, json, filter), &task) == 0);
             std::shared_ptr<arrow::Schema> schema;
             assert(task->Open(flowsql::packet::PacketSchema(), &schema) == 0);
             const auto packet =
                 MakeIpv4TcpPacket("192.0.2.1", 50000, "192.0.2.2", 443, {1}, rst_close ? kTcpRst : kTcpAck);
             const auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 1'000'000'000, 1)});
-            std::vector<flowsql::BlockTransformOutputV1> outputs;
+            std::vector<flowsql::BlockTransformOutput> outputs;
             int64_t started_ns = ResultClockNowNs();
             assert(task->ProcessBlock(input, 0, &outputs) == 0);
             if (!rst_close) {
@@ -10023,12 +9941,12 @@ void TestNpmBasicOperatorCopiesConfigAndOwnsTasks() {
         R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","observing":"basic_ipv4"})";
     std::string filter_plan = R"({"version":1,"root":null})";
     auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
-    flowsql::IBlockTransformTaskV1* first = nullptr;
+    flowsql::IBlockTransformTask* first = nullptr;
     assert(provider.CreateTask(config, &first) == 0 && first != nullptr);
 
     auto* concrete = dynamic_cast<npm::NpmBasicTask*>(first);
     assert(concrete != nullptr);
-    auto* input_task = dynamic_cast<flowsql::IBlockTransformInputSourceTaskV1*>(first);
+    auto* input_task = dynamic_cast<flowsql::IBlockTransformInputSourceTask*>(first);
     assert(input_task != nullptr);
     assert(input_task->BindInputSource(nullptr) == EINVAL);
     assert(input_task->BindInputSource("") == EINVAL);
@@ -10051,34 +9969,34 @@ void TestNpmBasicOperatorCopiesConfigAndOwnsTasks() {
     with_json = R"({"input_namespace":"pcapfile.other","source_domains":"1:88","observing":"basic_ipv4"})";
     filter_plan = R"({"version":1,"root":null})";
     config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
-    flowsql::IBlockTransformTaskV1* second = nullptr;
+    flowsql::IBlockTransformTask* second = nullptr;
     assert(provider.CreateTask(config, &second) == 0);
     assert(second != nullptr && second != first);
     assert(dynamic_cast<npm::NpmBasicTask*>(second)->TaskId() == "task-owned-two");
 
-    provider.ReleaseTask(static_cast<flowsql::IBlockTransformTaskV1*>(nullptr));
+    provider.ReleaseTask(static_cast<flowsql::IBlockTransformTask*>(nullptr));
     provider.ReleaseTask(first);
     provider.ReleaseTask(second);
 
-    auto* sentinel = reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1);
-    config.contract_version = flowsql::kBlockTransformContractVersionV1 + 1;
+    auto* sentinel = reinterpret_cast<flowsql::IBlockTransformTask*>(1);
+    config.contract_version = flowsql::kBlockTransformContractVersion + 1;
     assert(provider.CreateTask(config, &sentinel) == EINVAL &&
-           sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
-    config.contract_version = flowsql::kBlockTransformContractVersionV1;
+           sentinel == reinterpret_cast<flowsql::IBlockTransformTask*>(1));
+    config.contract_version = flowsql::kBlockTransformContractVersion;
     config.task_id = nullptr;
     assert(provider.CreateTask(config, &sentinel) == EINVAL &&
-           sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
+           sentinel == reinterpret_cast<flowsql::IBlockTransformTask*>(1));
     config.task_id = "";
     assert(provider.CreateTask(config, &sentinel) == EINVAL &&
-           sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
+           sentinel == reinterpret_cast<flowsql::IBlockTransformTask*>(1));
     config.task_id = "valid";
     config.with_params_json = nullptr;
     assert(provider.CreateTask(config, &sentinel) == EINVAL &&
-           sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
+           sentinel == reinterpret_cast<flowsql::IBlockTransformTask*>(1));
     config.with_params_json = "{}";
     config.pushed_filter_plan_json = "";
     assert(provider.CreateTask(config, &sentinel) == EINVAL &&
-           sentinel == reinterpret_cast<flowsql::IBlockTransformTaskV1*>(1));
+           sentinel == reinterpret_cast<flowsql::IBlockTransformTask*>(1));
     assert(provider.CreateTask(config, nullptr) == EINVAL);
 }
 
@@ -10094,7 +10012,7 @@ void TestNpmBasicTaskObservingSchemaProbe() {
     const auto assert_probe = [&](const std::string& task_id, const std::string& with_json,
                                   const std::shared_ptr<arrow::Schema>& expected_schema) {
         const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
-        flowsql::IBlockTransformTaskV1* task = nullptr;
+        flowsql::IBlockTransformTask* task = nullptr;
         assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
 
         auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
@@ -10128,55 +10046,52 @@ void TestNpmBasicTaskObservingSchemaProbe() {
                  npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4));
 }
 
-void TestNpmBasicTaskProbeMatchesLegacyAndParametersV1() {
+void TestNpmBasicTaskProbeOwnsCurrentConfiguration() {
     for (const bool observing_session : {false, true}) {
-        auto configs = MakeEquivalentRuntimeTaskConfigs(npm::NpmRunMode::kOffline, observing_session);
-        const std::string expected_legacy_json = configs.legacy_json;
-        const std::string expected_parameters_json = configs.parameters_v1_json;
+        auto configs = MakeRuntimeTaskConfig(npm::NpmRunMode::kOffline, observing_session);
+        const std::string expected_first_json = configs.json;
+        const std::string expected_second_json = configs.json;
         ContextDictionary dictionary;
         ContextProtocol protocol(&dictionary);
         DualContextPool pool(&protocol);
         SinglePoolQuerier querier(&pool);
         npm::NpmBasicOperator provider(&querier);
         const std::string filter_plan = R"({"version":1,"root":null})";
-        const std::string legacy_task_id = observing_session ? "probe-legacy-session" : "probe-legacy-basic";
-        const std::string parameters_task_id =
-            observing_session ? "probe-parameters-session" : "probe-parameters-basic";
-        const auto legacy_config = MakeOperatorTaskConfig(legacy_task_id, configs.legacy_json, filter_plan);
-        const auto parameters_config =
-            MakeOperatorTaskConfig(parameters_task_id, configs.parameters_v1_json, filter_plan);
-        flowsql::IBlockTransformTaskV1* legacy_task = nullptr;
-        flowsql::IBlockTransformTaskV1* parameters_task = nullptr;
-        assert(provider.CreateTask(legacy_config, &legacy_task) == 0 && legacy_task != nullptr);
-        assert(provider.CreateTask(parameters_config, &parameters_task) == 0 && parameters_task != nullptr);
+        const std::string first_task_id = observing_session ? "probe-first-session" : "probe-first-basic";
+        const std::string second_task_id = observing_session ? "probe-second-session" : "probe-second-basic";
+        const auto first_config = MakeOperatorTaskConfig(first_task_id, configs.json, filter_plan);
+        const auto second_config = MakeOperatorTaskConfig(second_task_id, configs.json, filter_plan);
+        flowsql::IBlockTransformTask* first_task = nullptr;
+        flowsql::IBlockTransformTask* second_task = nullptr;
+        assert(provider.CreateTask(first_config, &first_task) == 0 && first_task != nullptr);
+        assert(provider.CreateTask(second_config, &second_task) == 0 && second_task != nullptr);
 
-        configs.legacy_json.assign(configs.legacy_json.size(), 'x');
-        configs.parameters_v1_json.assign(configs.parameters_v1_json.size(), 'y');
-        auto* legacy_concrete = dynamic_cast<npm::NpmBasicTask*>(legacy_task);
-        auto* parameters_concrete = dynamic_cast<npm::NpmBasicTask*>(parameters_task);
-        assert(legacy_concrete != nullptr && parameters_concrete != nullptr);
-        assert(legacy_concrete->WithParamsJson() == expected_legacy_json);
-        assert(parameters_concrete->WithParamsJson() == expected_parameters_json);
+        configs.json.assign(configs.json.size(), 'y');
+        auto* first_concrete = dynamic_cast<npm::NpmBasicTask*>(first_task);
+        auto* second_concrete = dynamic_cast<npm::NpmBasicTask*>(second_task);
+        assert(first_concrete != nullptr && second_concrete != nullptr);
+        assert(first_concrete->WithParamsJson() == expected_first_json);
+        assert(second_concrete->WithParamsJson() == expected_second_json);
 
-        std::shared_ptr<arrow::Schema> legacy_schema;
-        std::shared_ptr<arrow::Schema> parameters_schema;
-        assert(legacy_task->Open(flowsql::packet::PacketSchema(), &legacy_schema) == 0);
-        assert(parameters_task->Open(flowsql::packet::PacketSchema(), &parameters_schema) == 0);
-        assert(legacy_schema != nullptr && parameters_schema != nullptr);
-        assert(legacy_schema->Equals(*parameters_schema, true));
+        std::shared_ptr<arrow::Schema> first_schema;
+        std::shared_ptr<arrow::Schema> second_schema;
+        assert(first_task->Open(flowsql::packet::PacketSchema(), &first_schema) == 0);
+        assert(second_task->Open(flowsql::packet::PacketSchema(), &second_schema) == 0);
+        assert(first_schema != nullptr && second_schema != nullptr);
+        assert(first_schema->Equals(*second_schema, true));
         const auto expected_schema = observing_session
                                          ? npm::NpmSessionResultSchema(flowsql::packet::AddressFamily::kIPv4)
                                          : npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4);
-        assert(legacy_schema->Equals(*expected_schema, true));
-        assert(legacy_task->LastError().empty() && parameters_task->LastError().empty());
+        assert(first_schema->Equals(*expected_schema, true));
+        assert(first_task->LastError().empty() && second_task->LastError().empty());
         assert(pool.acquire_calls == 2 && pool.release_calls == 0);
 
-        legacy_task->Cancel();
+        first_task->Cancel();
         assert(pool.release_calls == 1);
-        parameters_task->Cancel();
+        second_task->Cancel();
         assert(pool.release_calls == 2);
-        provider.ReleaseTask(legacy_task);
-        provider.ReleaseTask(parameters_task);
+        provider.ReleaseTask(first_task);
+        provider.ReleaseTask(second_task);
         assert(pool.release_calls == 2);
     }
 }
@@ -10193,7 +10108,7 @@ void TestNpmBasicTaskOpenProcessAndFlush() {
     const std::string filter_plan = R"({"version":1,"root":null})";
     const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
 
-    flowsql::IBlockTransformTaskV1* task = nullptr;
+    flowsql::IBlockTransformTask* task = nullptr;
     assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
     auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
     std::shared_ptr<arrow::Schema> output_schema = sentinel_schema;
@@ -10204,16 +10119,15 @@ void TestNpmBasicTaskOpenProcessAndFlush() {
 
     const auto packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpAck, 101);
     auto first_input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 1)});
-    std::vector<flowsql::BlockTransformOutputV1> outputs;
-    assert(task->ProcessBlock(first_input, 11, &outputs) ==
-           static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
+    std::vector<flowsql::BlockTransformOutput> outputs;
+    assert(task->ProcessBlock(first_input, 11, &outputs) == static_cast<int>(flowsql::BlockTransformStatus::kContinue));
     assert(outputs.size() == 1 && outputs[0].batch != nullptr);
     assert(outputs[0].batch->num_rows() == 0 && outputs[0].ts_ms == 11);
     outputs.clear();
 
     auto out_of_order_input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 50, 2)});
     assert(task->ProcessBlock(out_of_order_input, 22, &outputs) ==
-           static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
+           static_cast<int>(flowsql::BlockTransformStatus::kContinue));
     assert(outputs.size() == 1 && outputs[0].batch->num_rows() == 0 && outputs[0].ts_ms == 22);
     outputs.clear();
 
@@ -10251,7 +10165,7 @@ void TestNpmBasicTaskRejectsInvalidCallsAtomically() {
 
     std::string with_json = "{";
     auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
-    flowsql::IBlockTransformTaskV1* task = nullptr;
+    flowsql::IBlockTransformTask* task = nullptr;
     assert(provider.CreateTask(config, &task) == 0);
     auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
     std::shared_ptr<arrow::Schema> output_schema = sentinel_schema;
@@ -10282,7 +10196,7 @@ void TestNpmBasicTaskRejectsInvalidCallsAtomically() {
     assert(repeated_schema == sentinel_schema);
     const auto repeated_error = task->LastError();
     assert(!repeated_error.empty() && pool.release_calls == 1);
-    std::vector<flowsql::BlockTransformOutputV1> outputs;
+    std::vector<flowsql::BlockTransformOutput> outputs;
     assert(task->ProcessBlock(nullptr, 0, &outputs) < 0 && outputs.empty());
     assert(task->LastError() == repeated_error);
     provider.ReleaseTask(task);
@@ -10309,7 +10223,7 @@ void TestNpmBasicTaskReportsConfigurationFailurePaths() {
     const auto assert_failure = [&](const std::string& task_id, const std::string& with_json,
                                     const std::vector<std::string>& expected_fragments) {
         const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
-        flowsql::IBlockTransformTaskV1* task = nullptr;
+        flowsql::IBlockTransformTask* task = nullptr;
         assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
         auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
         std::shared_ptr<arrow::Schema> output_schema = sentinel_schema;
@@ -10331,10 +10245,10 @@ void TestNpmBasicTaskReportsConfigurationFailurePaths() {
                    R"JSON("features":"basic,session","observing":"session_ipv4",)JSON"
                    R"JSON("parameters":"{\"schema_version\":1,\"session\":{\"max_tcp_ranges_per_direction\":7}}"})JSON",
                    {"invalid parameters", "/session/max_tcp_ranges_per_direction"});
-    assert_failure("task-parameter-source-conflict",
+    assert_failure("task-rejects-flat-field",
                    R"JSON({"observing":"basic_ipv4","input_namespace":"pcapfile.capture","source_domains":"0:77",)JSON"
                    R"JSON("run_mode":"offline","parameters":"{\"schema_version\":1}"})JSON",
-                   {"configuration source conflict", "/run_mode"});
+                   {"invalid configuration", "/run_mode"});
     assert_failure("task-six-modules-missing-dns-config",
                    R"({"features":"basic,session,dns,http1,tls,icmp","observing":"basic_ipv4"})",
                    {"runtime creation failed", "invalid module configuration", "/dns/primary_label_ids"});
@@ -10373,7 +10287,7 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
         R"("features":"basic,session","parameters":"{\"schema_version\":1}"})";
     const std::string ordinary_task_id = "ordinary-with-labeling-provider";
     auto config = MakeOperatorTaskConfig(ordinary_task_id, ordinary_json, filter_plan);
-    flowsql::IBlockTransformTaskV1* task = nullptr;
+    flowsql::IBlockTransformTask* task = nullptr;
     assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
     std::shared_ptr<arrow::Schema> output_schema = sentinel_schema;
     assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
@@ -10468,9 +10382,9 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     const auto labeled_packet =
         MakeIpv4TcpPacket("192.0.2.10", 51000, "198.51.100.20", 443, {0x16, 0x03}, kTcpAck, 700);
     auto labeled_input = MakeEncodedPacketBatch({MakeBatchPacketRecord(labeled_packet, 0, 100, 1)});
-    std::vector<flowsql::BlockTransformOutputV1> labeled_outputs;
+    std::vector<flowsql::BlockTransformOutput> labeled_outputs;
     assert(task->ProcessBlock(labeled_input, 17, &labeled_outputs) ==
-           static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
+           static_cast<int>(flowsql::BlockTransformStatus::kContinue));
     assert(labeled_outputs.size() == 1 && labeled_outputs[0].batch->num_rows() == 0);
     labeled_outputs.clear();
     assert(task->Flush(&labeled_outputs) == 0);
@@ -10500,7 +10414,7 @@ void TestNpmBasicTaskQueriesLabelingProviderConditionally() {
     assert(labeling_provider.captured_reserved_bytes == 64ULL * 1024ULL * 1024ULL);
     labeled_outputs.clear();
     assert(task->ProcessBlock(labeled_input, 18, &labeled_outputs) ==
-           static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
+           static_cast<int>(flowsql::BlockTransformStatus::kContinue));
     labeled_outputs.clear();
     assert(task->Flush(&labeled_outputs) == 0);
     assert(labeled_outputs.size() == 1 && labeled_outputs[0].batch->num_rows() == 1);
@@ -10539,7 +10453,7 @@ void TestRealFlowLabelingMatcherWithNpmBasicTask() {
     assert(loader->Load(libraries, 1) == 0);
     assert(loader->StartAll() == 0);
     auto* labeling_provider =
-        static_cast<flowsql::IFlowLabelingProviderV1*>(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER_V1));
+        static_cast<flowsql::IFlowLabelingProvider*>(loader->First(flowsql::IID_FLOW_LABELING_PROVIDER));
     auto* plugin = static_cast<flowsql::IPlugin*>(loader->First(flowsql::IID_PLUGIN));
     assert(labeling_provider != nullptr && plugin != nullptr);
 
@@ -10571,15 +10485,15 @@ void TestRealFlowLabelingMatcherWithNpmBasicTask() {
                                        : R"("features":"basic,labeling","observing":"basic_ipv4",)") +
             params + "}";
         const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
-        flowsql::IBlockTransformTaskV1* task = nullptr;
+        flowsql::IBlockTransformTask* task = nullptr;
         assert(provider.CreateTask(config, &task) == 0 && task != nullptr);
         std::shared_ptr<arrow::Schema> output_schema;
         assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
         assert(output_schema != nullptr && output_schema->GetFieldIndex("primary_label_id") >= 0);
         if (!session_result) assert(plugin->Stop() != 0 && "live task matcher prevents plugin Stop");
 
-        std::vector<flowsql::BlockTransformOutputV1> outputs;
-        assert(task->ProcessBlock(input, 1, &outputs) == static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
+        std::vector<flowsql::BlockTransformOutput> outputs;
+        assert(task->ProcessBlock(input, 1, &outputs) == static_cast<int>(flowsql::BlockTransformStatus::kContinue));
         outputs.clear();
         assert(task->Flush(&outputs) == 0 && outputs.size() == 1);
         const auto& batch = outputs[0].batch;
@@ -10600,8 +10514,8 @@ void TestRealFlowLabelingMatcherWithNpmBasicTask() {
 
     assert(registry.resolve_calls == 2);
     loader->StopAll();
-    flowsql::FlowLabelingDiagnosticV1 diagnostic;
-    assert(labeling_provider->RuntimeStatus(&diagnostic) == flowsql::FlowLabelingErrorV1::kUnavailable);
+    flowsql::FlowLabelingDiagnostic diagnostic;
+    assert(labeling_provider->RuntimeStatus(&diagnostic) == flowsql::FlowLabelingError::kUnavailable);
     assert(loader->Unload() == 0);
 }
 #endif
@@ -10620,8 +10534,8 @@ void TestNpmBasicTaskMethodPreconditions() {
     const auto packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpAck, 103);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 4)});
     auto sentinel_schema = arrow::schema({arrow::field("sentinel", arrow::int8())});
-    std::vector<flowsql::BlockTransformOutputV1> outputs;
-    flowsql::IBlockTransformTaskV1* task = nullptr;
+    std::vector<flowsql::BlockTransformOutput> outputs;
+    flowsql::IBlockTransformTask* task = nullptr;
 
     const std::string retained_with =
         R"JSON({"input_namespace":"pcapfile.capture","source_domains":"0:77","parameters":"{\"schema_version\":1,\"core\":{\"result\":{\"retention_days\":1}}}","observing":"basic_ipv4"})JSON";
@@ -10727,7 +10641,7 @@ void TestNpmBasicTaskCancelBeforeOpenAndDuringProcess() {
     const std::string filter_plan = R"({"version":1,"root":null})";
     const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
 
-    flowsql::IBlockTransformTaskV1* task = nullptr;
+    flowsql::IBlockTransformTask* task = nullptr;
     assert(provider.CreateTask(config, &task) == 0);
     task->Cancel();
     const auto preopen_error = task->LastError();
@@ -10749,7 +10663,7 @@ void TestNpmBasicTaskCancelBeforeOpenAndDuringProcess() {
     assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
     const auto packet = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {0x11}, kTcpAck, 102);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(packet, 0, 100, 3)});
-    std::vector<flowsql::BlockTransformOutputV1> outputs;
+    std::vector<flowsql::BlockTransformOutput> outputs;
     std::atomic<bool> process_finished{false};
     int process_rc = 0;
     std::thread worker([&]() {
@@ -10772,9 +10686,9 @@ void TestNpmBasicTaskCancelBeforeOpenAndDuringProcess() {
     provider.ReleaseTask(task);
 }
 
-flowsql::CaptureSourceSetV2 MakeCaptureSourceSet(flowsql::CaptureQueueIdentityV1 identity) {
+flowsql::CaptureSourceSet MakeCaptureSourceSet(flowsql::CaptureQueueIdentity identity) {
     identity.link_type = 1;
-    flowsql::CaptureSourceSetV2 sources;
+    flowsql::CaptureSourceSet sources;
     sources.inputs = {identity};
     sources.limits.max_packets_per_batch = 256;
     sources.limits.max_bytes_per_batch = 1048576;
@@ -10783,7 +10697,7 @@ flowsql::CaptureSourceSetV2 MakeCaptureSourceSet(flowsql::CaptureQueueIdentityV1
     return sources;
 }
 
-void TestNpmBasicV2PluginExports() {
+void TestNpmBasicPluginExports() {
     flowsql::test::ScopedSharedLibrary library(FLOWSQL_NPM_BASIC_PLUGIN_PATH);
     assert(library);
 
@@ -10791,39 +10705,37 @@ void TestNpmBasicV2PluginExports() {
         library.Symbol(flowsql::kCppOperatorPluginAbiVersionSymbol));
     auto operator_count =
         reinterpret_cast<flowsql::CppOperatorPluginCountFn>(library.Symbol(flowsql::kCppOperatorPluginCountSymbol));
-    auto describe = reinterpret_cast<flowsql::CppOperatorPluginDescribeV2Fn>(
-        library.Symbol(flowsql::kCppOperatorPluginDescribeV2Symbol));
-    auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityV2Fn>(
-        library.Symbol(flowsql::kCppOperatorPluginCreateCapabilityV2Symbol));
-    auto destroy = reinterpret_cast<flowsql::CppOperatorPluginDestroyCapabilityV2Fn>(
-        library.Symbol(flowsql::kCppOperatorPluginDestroyCapabilityV2Symbol));
+    auto describe = reinterpret_cast<flowsql::CppOperatorPluginDescribeFn>(
+        library.Symbol(flowsql::kCppOperatorPluginDescribeSymbol));
+    auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityFn>(
+        library.Symbol(flowsql::kCppOperatorPluginCreateCapabilitySymbol));
+    auto destroy = reinterpret_cast<flowsql::CppOperatorPluginDestroyCapabilityFn>(
+        library.Symbol(flowsql::kCppOperatorPluginDestroyCapabilitySymbol));
     assert(abi_version != nullptr && operator_count != nullptr && describe != nullptr);
     assert(create != nullptr && destroy != nullptr);
     assert(library.Symbol("pluginregist") == nullptr);
-    assert(library.Symbol(flowsql::kCppOperatorPluginCreateV1Symbol) == nullptr);
-    assert(library.Symbol(flowsql::kCppOperatorPluginDestroyV1Symbol) == nullptr);
-    assert(abi_version() == flowsql::kCppOperatorPluginAbiVersionV2);
-    assert(operator_count() == 2);
+    assert(library.Symbol("flowsql_create_operator") == nullptr);
+    assert(library.Symbol("flowsql_destroy_operator") == nullptr);
+    assert(abi_version() == flowsql::kCppOperatorPluginAbiVersion);
+    assert(operator_count() == 1);
 
-    flowsql::CppOperatorDescriptorV2 descriptor{};
-    descriptor.struct_size = flowsql::kCppOperatorDescriptorV2Size;
+    flowsql::CppOperatorDescriptor descriptor{};
+    descriptor.struct_size = flowsql::kCppOperatorDescriptorSize;
     assert(describe(0, &descriptor) == 0);
-    assert(descriptor.struct_size == flowsql::kCppOperatorDescriptorV2Size);
+    assert(descriptor.struct_size == flowsql::kCppOperatorDescriptorSize);
     assert(std::string(descriptor.category) == "npm");
     assert(std::string(descriptor.name) == "basic");
     assert(descriptor.description != nullptr && descriptor.description[0] != '\0');
-    assert(SameGuid(descriptor.contract_iid, flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V1));
+    assert(SameGuid(descriptor.contract_iid, flowsql::IID_BLOCK_TRANSFORM_OPERATOR));
 
-    flowsql::CppOperatorDescriptorV2 rejected{};
-    rejected.struct_size = flowsql::kCppOperatorDescriptorV2Size - 1;
+    flowsql::CppOperatorDescriptor rejected{};
+    rejected.struct_size = flowsql::kCppOperatorDescriptorSize - 1;
     rejected.category = "sentinel";
     assert(describe(0, &rejected) == EINVAL);
-    assert(rejected.struct_size == flowsql::kCppOperatorDescriptorV2Size - 1);
+    assert(rejected.struct_size == flowsql::kCppOperatorDescriptorSize - 1);
     assert(std::string(rejected.category) == "sentinel");
     assert(describe(-1, &descriptor) == EINVAL);
-    assert(describe(1, &descriptor) == 0);
-    assert(std::string(descriptor.category) == "npm" && std::string(descriptor.name) == "basic");
-    assert(SameGuid(descriptor.contract_iid, flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V2));
+    assert(describe(1, &descriptor) == EINVAL);
     assert(describe(2, &descriptor) == EINVAL);
     assert(describe(0, nullptr) == EINVAL);
     assert(create(-1, nullptr) == nullptr);
@@ -10839,15 +10751,15 @@ void TestNpmBasicV2PluginExports() {
     SinglePoolQuerier querier(&pool);
     void* capability = create(0, &querier);
     assert(capability != nullptr);
-    auto* provider = static_cast<flowsql::IBlockTransformOperatorV1*>(capability);
+    auto* provider = static_cast<flowsql::IBlockTransformOperator*>(capability);
     assert(provider->Category() == "npm" && provider->Name() == "basic");
 
-    const std::string task_id = "v2-capability";
+    const std::string task_id = "plugin-capability";
     const std::string with_json =
         R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","observing":"basic_ipv4"})";
     const std::string filter_plan = R"({"version":1,"root":null})";
     const auto config = MakeOperatorTaskConfig(task_id, with_json, filter_plan);
-    flowsql::IBlockTransformTaskV1* task = nullptr;
+    flowsql::IBlockTransformTask* task = nullptr;
     assert(provider->CreateTask(config, &task) == 0 && task != nullptr);
     std::shared_ptr<arrow::Schema> output_schema;
     assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
@@ -10856,8 +10768,8 @@ void TestNpmBasicV2PluginExports() {
 
     const auto rst = MakeIpv4TcpPacket("192.0.2.1", 41000, "198.51.100.2", 443, {}, kTcpRst, 104);
     auto input = MakeEncodedPacketBatch({MakeBatchPacketRecord(rst, 0, 100, 6)});
-    std::vector<flowsql::BlockTransformOutputV1> outputs;
-    assert(task->ProcessBlock(input, 44, &outputs) == static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
+    std::vector<flowsql::BlockTransformOutput> outputs;
+    assert(task->ProcessBlock(input, 44, &outputs) == static_cast<int>(flowsql::BlockTransformStatus::kContinue));
     assert(outputs.size() == 1 && outputs[0].batch != nullptr && outputs[0].ts_ms == 44);
     assert(outputs[0].batch->num_rows() == 0);
     outputs.clear();
@@ -10870,70 +10782,73 @@ void TestNpmBasicV2PluginExports() {
     outputs.clear();
     output_schema.reset();
 
-    void* v2_capability = create(1, &querier);
-    assert(v2_capability != nullptr);
-    auto* v2_provider = static_cast<flowsql::IBlockTransformOperatorV2*>(v2_capability);
-    flowsql::BlockTransformTaskConfigV2 v2_config{};
-    v2_config.struct_size = flowsql::kBlockTransformTaskConfigV2Size;
-    v2_config.contract_version = flowsql::kBlockTransformContractVersionV2;
-    v2_config.task_id = "v2-realtime";
-    v2_config.with_params_json =
-        R"({"input_namespace":"live","source_domains":"7:77","run_mode":"realtime","observing":"basic_ipv4"})";
-    v2_config.pushed_filter_plan_json = filter_plan.c_str();
-    flowsql::IBlockTransformTaskV2* v2_task = nullptr;
-    assert(v2_provider->CreateTask(v2_config, &v2_task) == 0 && v2_task != nullptr);
-    auto* capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTaskV2*>(v2_task);
+    void* capture_capability = create(0, &querier);
+    assert(capture_capability != nullptr);
+    auto* capture_provider = static_cast<flowsql::IBlockTransformOperator*>(capture_capability);
+    flowsql::BlockTransformTaskConfig capture_config{};
+    capture_config.struct_size = flowsql::kBlockTransformTaskConfigSize;
+    capture_config.contract_version = flowsql::kBlockTransformContractVersion;
+    capture_config.task_id = "capture-realtime";
+    capture_config.with_params_json =
+        R"JSON({"input_namespace":"live","source_domains":"7:77","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"run_mode\":\"realtime\"}}"})JSON";
+    capture_config.pushed_filter_plan_json = filter_plan.c_str();
+    flowsql::IBlockTransformTask* live_task = nullptr;
+    assert(capture_provider->CreateTask(capture_config, &live_task) == 0 && live_task != nullptr);
+    auto* capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTask*>(live_task);
     assert(capture_task != nullptr);
-    std::shared_ptr<arrow::Schema> v2_schema;
-    assert(v2_task->Open(flowsql::packet::PacketSchema(), &v2_schema) != 0);
-    v2_provider->ReleaseTask(v2_task);
+    std::shared_ptr<arrow::Schema> capture_schema;
+    assert(live_task->Open(flowsql::packet::PacketSchema(), &capture_schema) != 0);
+    capture_provider->ReleaseTask(live_task);
 
-    assert(v2_provider->CreateTask(v2_config, &v2_task) == 0 && v2_task != nullptr);
-    capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTaskV2*>(v2_task);
-    flowsql::CaptureQueueIdentityV1 identity;
+    assert(capture_provider->CreateTask(capture_config, &live_task) == 0 && live_task != nullptr);
+    capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTask*>(live_task);
+    flowsql::CaptureQueueIdentity identity;
     identity.source_name = "live.capture";
     identity.source_id = 7;
     identity.observation_domain_id = 77;
     identity.generation = 1;
     assert(capture_task->BindCaptureSources(MakeCaptureSourceSet(identity)) == 0);
     assert(capture_task->BindCaptureSources(MakeCaptureSourceSet(identity)) == EALREADY);
-    assert(v2_task->Open(flowsql::packet::PacketSchema(), &v2_schema) == 0);
-    assert(v2_schema != nullptr &&
-           v2_schema->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
-    flowsql::BlockTransformTimeDriveStateV1 time_state{};
-    time_state.struct_size = flowsql::kBlockTransformTimeDriveStateV1Size;
-    time_state.contract_version = flowsql::kBlockTransformTimeDriveVersionV1;
-    assert(v2_task->GetTimeDriveState(&time_state) == 0);
+    assert(live_task->Open(flowsql::packet::PacketSchema(), &capture_schema) == 0);
+    assert(capture_schema != nullptr &&
+           capture_schema->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4), true));
+    flowsql::BlockTransformTimeDriveState time_state{};
+    time_state.struct_size = flowsql::kBlockTransformTimeDriveStateSize;
+    time_state.contract_version = flowsql::kBlockTransformTimeDriveVersion;
+    assert(dynamic_cast<flowsql::IBlockTransformTimeDrivenTask*>(live_task)->GetTimeDriveState(&time_state) == 0);
     assert(time_state.armed == 1 && time_state.deadline_ns == 0);
-    flowsql::BlockTransformTimeEventV1 time_event{};
-    time_event.struct_size = flowsql::kBlockTransformTimeEventV1Size;
-    time_event.contract_version = flowsql::kBlockTransformTimeDriveVersionV1;
+    flowsql::BlockTransformTimeEvent time_event{};
+    time_event.struct_size = flowsql::kBlockTransformTimeEventSize;
+    time_event.contract_version = flowsql::kBlockTransformTimeDriveVersion;
     time_event.monotonic_now_ns = 100;
     time_event.wall_now_ns = 1'000'000'000;
-    std::vector<flowsql::BlockTransformOutputV1> time_outputs;
-    assert(v2_task->OnTime(time_event, &time_outputs) == 0 && time_outputs.empty());
-    assert(v2_task->GetTimeDriveState(&time_state) == 0);
+    std::vector<flowsql::BlockTransformOutput> time_outputs;
+    assert(dynamic_cast<flowsql::IBlockTransformTimeDrivenTask*>(live_task)->OnTime(time_event, &time_outputs) == 0 &&
+           time_outputs.empty());
+    assert(dynamic_cast<flowsql::IBlockTransformTimeDrivenTask*>(live_task)->GetTimeDriveState(&time_state) == 0);
     assert(time_state.armed == 1 && time_state.deadline_ns > 100);
     const int64_t first_snapshot_deadline = time_state.deadline_ns;
     const auto live_packet = MakeIpv4TcpPacket("192.0.2.10", 44000, "198.51.100.10", 443, {0x10}, kTcpAck, 100);
     auto live_batch = MakeEncodedPacketBatch({MakeBatchPacketRecord(live_packet, 7, 100, 1)});
-    std::vector<flowsql::BlockTransformOutputV1> packet_outputs;
-    assert(v2_task->ProcessBlock(live_batch, 1, &packet_outputs) == 0);
+    std::vector<flowsql::BlockTransformOutput> packet_outputs;
+    assert(live_task->ProcessBlock(live_batch, 1, &packet_outputs) == 0);
     assert(packet_outputs.size() == 1 && packet_outputs[0].batch != nullptr);
     packet_outputs.clear();
-    flowsql::CaptureProgressV1 fact;
+    flowsql::CaptureProgress fact;
     fact.source_id = 7;
     fact.generation = 1;
     fact.fact_sequence = 1;
     fact.capture_time_ns = 100;
     fact.packet_observed = true;
-    fact.backlog = flowsql::CaptureBacklogV1::kEmpty;
+    fact.backlog = flowsql::CaptureBacklog::kEmpty;
     assert(capture_task->AcceptCaptureFacts({fact}) == 0);
-    assert(v2_task->GetTimeDriveState(&time_state) == 0 && time_state.deadline_ns == 0);
+    assert(dynamic_cast<flowsql::IBlockTransformTimeDrivenTask*>(live_task)->GetTimeDriveState(&time_state) == 0 &&
+           time_state.deadline_ns == 0);
     time_event.monotonic_now_ns = 101;
     time_event.wall_now_ns = 500'000'000;
-    assert(v2_task->OnTime(time_event, &time_outputs) == 0 && time_outputs.empty());
-    assert(v2_task->GetTimeDriveState(&time_state) == 0);
+    assert(dynamic_cast<flowsql::IBlockTransformTimeDrivenTask*>(live_task)->OnTime(time_event, &time_outputs) == 0 &&
+           time_outputs.empty());
+    assert(dynamic_cast<flowsql::IBlockTransformTimeDrivenTask*>(live_task)->GetTimeDriveState(&time_state) == 0);
     assert(time_state.deadline_ns == first_snapshot_deadline);
     assert(capture_task->AcceptCaptureFacts({fact}) == EINVAL);
     fact.fact_sequence = 2;
@@ -10945,56 +10860,58 @@ void TestNpmBasicV2PluginExports() {
     fact.queue_id = 0;
     fact.capture_time_ns = 200;
     fact.packet_observed = false;
-    fact.backlog = flowsql::CaptureBacklogV1::kPresent;
+    fact.backlog = flowsql::CaptureBacklog::kPresent;
     assert(capture_task->AcceptCaptureFacts({fact}) == 0);
     time_event.monotonic_now_ns = 102;
-    assert(v2_task->OnTime(time_event, &time_outputs) == 0 && time_outputs.empty());
+    assert(dynamic_cast<flowsql::IBlockTransformTimeDrivenTask*>(live_task)->OnTime(time_event, &time_outputs) == 0 &&
+           time_outputs.empty());
     fact.fact_sequence = 3;
     fact.capture_time_ns = 300;
-    fact.backlog = flowsql::CaptureBacklogV1::kUnknown;
+    fact.backlog = flowsql::CaptureBacklog::kUnknown;
     assert(capture_task->AcceptCaptureFacts({fact}) == 0);
     time_event.monotonic_now_ns = 103;
-    assert(v2_task->OnTime(time_event, &time_outputs) == 0 && time_outputs.empty());
+    assert(dynamic_cast<flowsql::IBlockTransformTimeDrivenTask*>(live_task)->OnTime(time_event, &time_outputs) == 0 &&
+           time_outputs.empty());
     time_event.monotonic_now_ns = first_snapshot_deadline;
     time_event.wall_now_ns = 100'000'000;
-    assert(v2_task->OnTime(time_event, &time_outputs) == 0);
+    assert(dynamic_cast<flowsql::IBlockTransformTimeDrivenTask*>(live_task)->OnTime(time_event, &time_outputs) == 0);
     assert(time_outputs.empty());
     fact.fact_sequence = 4;
     fact.capture_time_ns = 31'000'000'000LL;
-    fact.backlog = flowsql::CaptureBacklogV1::kEmpty;
+    fact.backlog = flowsql::CaptureBacklog::kEmpty;
     fact.source_idle_confirmed = true;
     assert(capture_task->AcceptCaptureFacts({fact}) == 0);
     time_event.monotonic_now_ns = first_snapshot_deadline + 1;
-    assert(v2_task->OnTime(time_event, &time_outputs) == 0);
+    assert(dynamic_cast<flowsql::IBlockTransformTimeDrivenTask*>(live_task)->OnTime(time_event, &time_outputs) == 0);
     assert(time_outputs.size() == 1 && time_outputs[0].batch->num_rows() == 1);
     assert(time_outputs[0].batch->schema()->Equals(*npm::NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4),
                                                    true));
     assert(BasicResultColumn<arrow::BooleanArray>(time_outputs[0].batch, "period_complete")->Value(0));
-    assert(v2_task->GetTimeDriveState(&time_state) == 0);
+    assert(dynamic_cast<flowsql::IBlockTransformTimeDrivenTask*>(live_task)->GetTimeDriveState(&time_state) == 0);
     assert(time_state.deadline_ns > first_snapshot_deadline);
     time_outputs.clear();
-    v2_schema.reset();
-    v2_task->Cancel();
-    v2_provider->ReleaseTask(v2_task);
+    capture_schema.reset();
+    live_task->Cancel();
+    capture_provider->ReleaseTask(live_task);
 
     // Omitted input parameters inherit the named source and reader domain, not domain=source_id.
-    v2_config.task_id = "v2-input-defaults";
-    v2_config.with_params_json = R"({"observing":"basic_ipv4"})";
-    assert(v2_provider->CreateTask(v2_config, &v2_task) == 0 && v2_task != nullptr);
-    auto* input_task = dynamic_cast<flowsql::IBlockTransformInputSourceTaskV1*>(v2_task);
+    capture_config.task_id = "capture-input-defaults";
+    capture_config.with_params_json = R"({"observing":"basic_ipv4"})";
+    assert(capture_provider->CreateTask(capture_config, &live_task) == 0 && live_task != nullptr);
+    auto* input_task = dynamic_cast<flowsql::IBlockTransformInputSourceTask*>(live_task);
     assert(input_task != nullptr && input_task->BindInputSource("netadapter.eth0") == 0);
-    capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTaskV2*>(v2_task);
+    capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTask*>(live_task);
     assert(capture_task != nullptr && capture_task->BindCaptureSources(MakeCaptureSourceSet(identity)) == 0);
-    assert(v2_task->Open(flowsql::packet::PacketSchema(), &v2_schema) == 0);
-    assert(v2_task->ProcessBlock(live_batch, 1, &packet_outputs) == 0);
+    assert(live_task->Open(flowsql::packet::PacketSchema(), &capture_schema) == 0);
+    assert(live_task->ProcessBlock(live_batch, 1, &packet_outputs) == 0);
     packet_outputs.clear();
-    assert(v2_task->Flush(&packet_outputs) == 0);
+    assert(live_task->Flush(&packet_outputs) == 0);
     assert(packet_outputs.size() == 1 && packet_outputs[0].batch->num_rows() == 1);
     assert(BasicResultColumn<arrow::UInt64Array>(packet_outputs[0].batch, "observation_domain_id")->Value(0) == 77);
     packet_outputs.clear();
-    v2_schema.reset();
-    v2_provider->ReleaseTask(v2_task);
-    destroy(1, v2_capability);
+    capture_schema.reset();
+    capture_provider->ReleaseTask(live_task);
+    destroy(0, capture_capability);
 
     destroy(0, capability);
     destroy(0, nullptr);
@@ -11005,7 +10922,7 @@ struct ProtocolInputTrace {
     int aborted = 0;
     int prepared = 0;
     int snapshots = 0;
-    std::vector<npm::NpmInputKindV1> kinds;
+    std::vector<npm::NpmInputKind> kinds;
     std::vector<size_t> sizes;
     std::vector<bool> complete;
     std::vector<uint64_t> sessions;
@@ -11013,11 +10930,11 @@ struct ProtocolInputTrace {
     std::string json;
 };
 
-class CountingProtocolModule final : public npm::INpmProtocolModuleV1 {
+class CountingProtocolModule final : public npm::INpmProtocolModule {
  public:
     explicit CountingProtocolModule(ProtocolInputTrace* trace) : trace_(trace) { ++trace_->created; }
-    int OnInput(const npm::NpmInputEventV1& event, npm::INpmResultEmitterV1&) override {
-        assert(npm::ValidateNpmInputEventV1(event).error == npm::NpmProtocolContractErrorV1::kNone);
+    int OnInput(const npm::NpmInputEvent& event, npm::INpmResultEmitter&) override {
+        assert(npm::ValidateNpmInputEvent(event).error == npm::NpmProtocolContractError::kNone);
         trace_->kinds.push_back(event.kind);
         trace_->sizes.push_back(event.body.size);
         trace_->complete.push_back(event.body_complete);
@@ -11025,32 +10942,30 @@ class CountingProtocolModule final : public npm::INpmProtocolModuleV1 {
         trace_->order.push_back("packet");
         return 0;
     }
-    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override {
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitter&) override {
         ++trace_->snapshots;
         return 0;
     }
-    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t,
-                     npm::INpmResultEmitterV1&) override {
+    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t, npm::INpmResultEmitter&) override {
         trace_->order.push_back("end");
         return 0;
     }
     std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
-    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override { return 0; }
-    int Finish(int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnTime(const npm::NpmModuleTime&, npm::INpmResultEmitter&) override { return 0; }
+    int Finish(int64_t, npm::INpmResultEmitter&) override { return 0; }
     void Abort() noexcept override { ++trace_->aborted; }
 
  private:
     ProtocolInputTrace* trace_;
 };
 
-npm::NpmModuleRegistrationV1 CountingRegistration(std::string id, uint8_t mask, ProtocolInputTrace* trace,
-                                                  bool stream = false,
-                                                  std::optional<std::vector<uint32_t>> labels = {}) {
-    npm::NpmModuleRegistrationV1 entry;
+npm::NpmModuleRegistration CountingRegistration(std::string id, uint8_t mask, ProtocolInputTrace* trace,
+                                                bool stream = false, std::optional<std::vector<uint32_t>> labels = {}) {
+    npm::NpmModuleRegistration entry;
     entry.module_id = id;
     entry.entity_ids = {id + "_event"};
     entry.prepare = [id, mask, trace, stream, labels](const npm::NpmBasicTaskConfig&, std::string_view json,
-                                                      npm::NpmPreparedModuleV1* output) {
+                                                      npm::NpmPreparedModule* output) {
         ++trace->prepared;
         trace->json = json;
         output->plan.module_id = id;
@@ -11058,16 +10973,16 @@ npm::NpmModuleRegistrationV1 CountingRegistration(std::string id, uint8_t mask, 
         output->plan.requires_tcp_stream = stream;
         output->plan.requires_labeling = labels.has_value();
         output->plan.primary_label_ids = labels;
-        auto entity = npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
+        auto entity = npm::NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
         entity.entity_id = id + "_event";
         entity.module_id = id;
         output->plan.entities = {entity};
         output->create = [trace](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
-            npm::NpmModuleInstanceV1 instance;
+            npm::NpmModuleInstance instance;
             instance.protocol = std::make_unique<CountingProtocolModule>(trace);
             return instance;
         };
-        return npm::NpmProtocolContractStatusV1{};
+        return npm::NpmProtocolContractStatus{};
     };
     return entry;
 }
@@ -11127,10 +11042,10 @@ void TestIpv6WireVersionAndEthernetControlBounds() {
     control.layer.layers[0] = {static_cast<uint16_t>(flowsql::eLayer::ETHERNET), 0};
     control.layer.layers[1] = {static_cast<uint16_t>(flowsql::eLayer::IPv6), 14};
     control.layer.payload_offset = 54;
-    npm::NpmInputEventV1 event;
+    npm::NpmInputEvent event;
     assert(npm::BuildNpmControlInput(domains, control.View(1), control.layer, &event) ==
            npm::NpmSessionPacketError::kNone);
-    assert(event.kind == npm::NpmInputKindV1::kControlPacket && event.body.size == 16 && event.body[0] == 133);
+    assert(event.kind == npm::NpmInputKind::kControlPacket && event.body.size == 16 && event.body[0] == 133);
     assert(event.body_complete && !event.layer->ports_valid && event.observation_domain_id == 77);
 }
 
@@ -11148,30 +11063,29 @@ void TestNpmBasicTaskFlushAppliesPendingCaptureFacts() {
             ContextPool pool(&protocol);
             SinglePoolQuerier querier(&pool);
             npm::NpmBasicOperator provider(&querier);
-            flowsql::BlockTransformTaskConfigV2 config{};
-            config.struct_size = flowsql::kBlockTransformTaskConfigV2Size;
-            config.contract_version = flowsql::kBlockTransformContractVersionV2;
+            flowsql::BlockTransformTaskConfig config{};
+            config.struct_size = flowsql::kBlockTransformTaskConfigSize;
+            config.contract_version = flowsql::kBlockTransformContractVersion;
             config.task_id = "pending-capture-stop";
             config.with_params_json =
-                R"({"observing":"basic_ipv4","input_namespace":"live","source_domains":"0:77","features":"basic,icmp",)"
-                R"("output_interval_ns":"10000000","out_of_order_tolerance_ns":"0"})";
+                R"JSON({"observing":"basic_ipv4","input_namespace":"live","source_domains":"0:77","features":"basic,icmp","parameters":"{\"schema_version\":1,\"core\":{\"output_interval_ns\":10000000,\"out_of_order_tolerance_ns\":0}}"})JSON";
             config.pushed_filter_plan_json = R"({"version":1,"root":null})";
-            flowsql::IBlockTransformTaskV2* task = nullptr;
+            flowsql::IBlockTransformTask* task = nullptr;
             assert(provider.CreateTask(config, &task) == 0);
-            auto* capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTaskV2*>(task);
+            auto* capture_task = dynamic_cast<flowsql::IBlockTransformCaptureFactTask*>(task);
             assert(capture_task != nullptr);
-            flowsql::CaptureQueueIdentityV1 identity;
+            flowsql::CaptureQueueIdentity identity;
             identity.source_name = "review.live";
             identity.observation_domain_id = 77;
             identity.generation = 1;
             assert(capture_task->BindCaptureSources(MakeCaptureSourceSet(identity)) == 0);
             std::shared_ptr<arrow::Schema> schema;
             assert(task->Open(flowsql::packet::PacketSchema(), &schema) == 0);
-            std::vector<flowsql::BlockTransformOutputV1> outputs;
-            flowsql::CaptureProgressV1 fact;
+            std::vector<flowsql::BlockTransformOutput> outputs;
+            flowsql::CaptureProgress fact;
             fact.generation = 1;
             fact.packet_observed = true;
-            fact.backlog = flowsql::CaptureBacklogV1::kEmpty;
+            fact.backlog = flowsql::CaptureBacklog::kEmpty;
             for (const auto& record :
                  {MakeBatchPacketRecord(tcp, 0, 10'000'001, 1), MakeBatchPacketRecord(icmp, 0, 40'000'001, 2)}) {
                 assert(task->ProcessBlock(MakeEncodedPacketBatch({record}), 0, &outputs) == 0);
@@ -11201,12 +11115,12 @@ void TestNpmBasicTaskFlushAppliesPendingCaptureFacts() {
                 outputs.clear();
             };
             if (drive_before_flush) {
-                flowsql::BlockTransformTimeEventV1 time{};
-                time.struct_size = flowsql::kBlockTransformTimeEventV1Size;
-                time.contract_version = flowsql::kBlockTransformTimeDriveVersionV1;
+                flowsql::BlockTransformTimeEvent time{};
+                time.struct_size = flowsql::kBlockTransformTimeEventSize;
+                time.contract_version = flowsql::kBlockTransformTimeDriveVersion;
                 time.monotonic_now_ns = 100;
                 time.wall_now_ns = 1'700'000'000'000'000'000;
-                assert(task->OnTime(time, &outputs) == 0);
+                assert(dynamic_cast<flowsql::IBlockTransformTimeDrivenTask*>(task)->OnTime(time, &outputs) == 0);
                 collect();
             }
             if (cancel) {
@@ -11239,7 +11153,7 @@ void TestNpmBasicTaskFlushAppliesPendingCaptureFacts() {
 
 void TestProtocolCatalogOpenAndDispatch() {
     ProtocolInputTrace first, second, control;
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    auto catalog = npm::ProductionNpmModuleCatalog();
     assert(catalog.size() == 6);
     catalog.push_back(CountingRegistration("probe", 3, &first));
     catalog.push_back(CountingRegistration("mirror", 3, &second));
@@ -11296,7 +11210,7 @@ void TestProtocolCatalogOpenAndDispatch() {
 
 void TestProtocolOpenRejectionsAndControlCompatibility() {
     ProtocolInputTrace trace;
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    auto catalog = npm::ProductionNpmModuleCatalog();
     catalog.push_back(CountingRegistration("probe", 3, &trace, true, std::vector<uint32_t>{1001}));
     npm::NpmBasicTaskConfig config;
     assert(
@@ -11374,7 +11288,7 @@ void TestProtocolOpenRejectionsAndControlCompatibility() {
     input = MakeEncodedPacketBatch({record});
     assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
     assert(trace.sizes.back() == 9 && !trace.complete.back());
-    npm::NpmInputEventV1 event;
+    npm::NpmInputEvent event;
     const auto domains_owner = MakeDomainLookup({"capture", {{1, 77}}});
     const auto& domains = *domains_owner;
     auto malformed = MakeControlPacket();
@@ -11387,10 +11301,10 @@ void TestProtocolOpenRejectionsAndControlCompatibility() {
            npm::NpmSessionPacketError::kNonInitialFragment);
 }
 
-class ProtocolLabelMatcher final : public flowsql::IFlowLabelMatcherV1 {
+class ProtocolLabelMatcher final : public flowsql::IFlowLabelMatcher {
  public:
     explicit ProtocolLabelMatcher(LabelingMatcherStats* stats) : stats_(stats) {}
-    int ClassifyBatch(const flowsql::FlowLabelFactsV1* facts, uint32_t count, uint32_t* labels) const override {
+    int ClassifyBatch(const flowsql::FlowLabelFacts* facts, uint32_t count, uint32_t* labels) const override {
         ++stats_->classify_calls;
         for (uint32_t i = 0; i < count; ++i) {
             stats_->facts.push_back(facts[i]);
@@ -11398,7 +11312,7 @@ class ProtocolLabelMatcher final : public flowsql::IFlowLabelMatcherV1 {
         }
         return 0;
     }
-    bool FindLabel(uint32_t id, flowsql::FlowPrimaryLabelViewV1*) const override { return id == 1001; }
+    bool FindLabel(uint32_t id, flowsql::FlowPrimaryLabelView*) const override { return id == 1001; }
     void Release() noexcept override {
         ++stats_->release_calls;
         delete this;
@@ -11408,21 +11322,20 @@ class ProtocolLabelMatcher final : public flowsql::IFlowLabelMatcherV1 {
     LabelingMatcherStats* stats_;
 };
 
-class StreamContractModule final : public npm::INpmProtocolModuleV1, public npm::INpmTcpStreamConsumerV1 {
+class StreamContractModule final : public npm::INpmProtocolModule, public npm::INpmTcpStreamConsumer {
  public:
     explicit StreamContractModule(int* aborts) : aborts_(aborts) {}
-    int OnInput(const npm::NpmInputEventV1&, npm::INpmResultEmitterV1&) override { return 0; }
-    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return 0; }
-    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t,
-                     npm::INpmResultEmitterV1&) override {
+    int OnInput(const npm::NpmInputEvent&, npm::INpmResultEmitter&) override { return 0; }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitter&) override { return 0; }
+    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t, npm::INpmResultEmitter&) override {
         return 0;
     }
     std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
-    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override { return 0; }
-    int Finish(int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnTime(const npm::NpmModuleTime&, npm::INpmResultEmitter&) override { return 0; }
+    int Finish(int64_t, npm::INpmResultEmitter&) override { return 0; }
     void Abort() noexcept override { ++*aborts_; }
-    int OnTcpStreamReadable(const npm::NpmTcpStreamContextV1&, npm::INpmTcpStreamCursorV1&,
-                            npm::INpmResultEmitterV1&) override {
+    int OnTcpStreamReadable(const npm::NpmTcpStreamContext&, npm::INpmTcpStreamCursor&,
+                            npm::INpmResultEmitter&) override {
         assert(false && "T0 must not dispatch TCP stream events");
         return EINVAL;
     }
@@ -11432,51 +11345,51 @@ class StreamContractModule final : public npm::INpmProtocolModuleV1, public npm:
 };
 
 void TestNpmTcpStreamModuleInstanceContract() {
-    static_assert(std::is_abstract_v<npm::INpmTcpStreamCursorV1>);
-    static_assert(std::is_abstract_v<npm::INpmTcpStreamConsumerV1>);
+    static_assert(std::is_abstract_v<npm::INpmTcpStreamCursor>);
+    static_assert(std::is_abstract_v<npm::INpmTcpStreamConsumer>);
     static_assert(!std::is_abstract_v<CountingProtocolModule>);  // Existing V1 needs no new overrides.
-    using Error = npm::NpmProtocolContractErrorV1;
-    npm::NpmModulePlanV1 plan;
+    using Error = npm::NpmProtocolContractError;
+    npm::NpmModulePlan plan;
     plan.module_id = "probe";
     plan.requires_tcp_stream = true;
     int aborts = 0;
-    npm::NpmModuleInstanceV1 instance;
+    npm::NpmModuleInstance instance;
     auto module = std::make_unique<StreamContractModule>(&aborts);
     instance.tcp_stream_consumer = module.get();
     instance.protocol = std::move(module);
-    assert(npm::ValidateNpmModuleInstanceV1(plan, instance).error == Error::kNone);
+    assert(npm::ValidateNpmModuleInstance(plan, instance).error == Error::kNone);
     auto* consumer = instance.tcp_stream_consumer;
     instance.tcp_stream_consumer = nullptr;
-    auto status = npm::ValidateNpmModuleInstanceV1(plan, instance);
+    auto status = npm::ValidateNpmModuleInstance(plan, instance);
     assert(status.error == Error::kInvalidPlan && status.field == "probe/tcp_stream_consumer");
     StreamContractModule unrelated(&aborts);
     instance.tcp_stream_consumer = &unrelated;
-    assert(npm::ValidateNpmModuleInstanceV1(plan, instance).error == Error::kInvalidPlan);
+    assert(npm::ValidateNpmModuleInstance(plan, instance).error == Error::kInvalidPlan);
     instance.tcp_stream_consumer = consumer;
     auto moved = std::move(instance);
-    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kNone);
+    assert(npm::ValidateNpmModuleInstance(plan, moved).error == Error::kNone);
     plan.requires_tcp_stream = false;
-    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kInvalidPlan);
+    assert(npm::ValidateNpmModuleInstance(plan, moved).error == Error::kInvalidPlan);
     moved.tcp_stream_consumer = nullptr;
-    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kNone);
+    assert(npm::ValidateNpmModuleInstance(plan, moved).error == Error::kNone);
     ProtocolInputTrace trace;
     moved.protocol = std::make_unique<CountingProtocolModule>(&trace);
-    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kNone);
+    assert(npm::ValidateNpmModuleInstance(plan, moved).error == Error::kNone);
     plan.requires_tcp_stream = true;
     moved.tcp_stream_consumer = &unrelated;
-    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kInvalidPlan);
+    assert(npm::ValidateNpmModuleInstance(plan, moved).error == Error::kInvalidPlan);
     moved.protocol.reset();
-    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kInvalidPlan);
+    assert(npm::ValidateNpmModuleInstance(plan, moved).error == Error::kInvalidPlan);
     moved.tcp_stream_consumer = nullptr;
     plan.requires_tcp_stream = false;
-    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kInvalidPlan);
+    assert(npm::ValidateNpmModuleInstance(plan, moved).error == Error::kInvalidPlan);
     plan.module_id = "basic";
-    assert(npm::ValidateNpmModuleInstanceV1(plan, moved).error == Error::kNone);
+    assert(npm::ValidateNpmModuleInstance(plan, moved).error == Error::kNone);
     assert(aborts == 0);  // Validation has no lifecycle side effects.
 }
 
 void TestNpmTcpStreamOpenGatesAndFrozenConfig() {
-    using Error = npm::NpmProtocolContractErrorV1;
+    using Error = npm::NpmProtocolContractError;
     ContextDictionary dictionary;
     ContextProtocol protocol(&dictionary);
     ContextPool pool(&protocol);
@@ -11511,7 +11424,7 @@ void TestNpmTcpStreamOpenGatesAndFrozenConfig() {
     for (const auto& labels : std::vector<std::vector<uint32_t>>{{1001}, {}, {0}, {1001, 1001}, {999}}) {
         const int created_before = trace.created;
         const int aborted_before = trace.aborted;
-        auto catalog = npm::ProductionNpmModuleCatalogV1();
+        auto catalog = npm::ProductionNpmModuleCatalog();
         catalog.push_back(CountingRegistration("probe", 1, &trace, true, labels));
         assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic,labeling,probe","observing":"basic_ipv4"})", &config,
                                             true, catalog)
@@ -11532,15 +11445,15 @@ void TestNpmTcpStreamOpenGatesAndFrozenConfig() {
 
     // An undeclared consumer must fail before publishing the runtime, aborting already-created modules as well.
     int aborts = 0;
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    auto catalog = npm::ProductionNpmModuleCatalog();
     catalog.push_back(CountingRegistration("prior", 1, &trace));
     auto invalid = CountingRegistration("probe", 1, &trace);
     const auto prepare = invalid.prepare;
     invalid.prepare = [prepare, &aborts](const npm::NpmBasicTaskConfig& cfg, std::string_view text,
-                                         npm::NpmPreparedModuleV1* out) {
+                                         npm::NpmPreparedModule* out) {
         auto status = prepare(cfg, text, out);
         out->create = [&aborts](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
-            npm::NpmModuleInstanceV1 instance;
+            npm::NpmModuleInstance instance;
             auto module = std::make_unique<StreamContractModule>(&aborts);
             instance.tcp_stream_consumer = module.get();
             instance.protocol = std::move(module);
@@ -11568,8 +11481,8 @@ void TestNpmTcpStreamOpenGatesAndFrozenConfig() {
 
 void TestDnsT0OpenContract() {
     using Error = npm::NpmBasicTaskRuntimeError;
-    using ContractError = npm::NpmProtocolContractErrorV1;
-    const auto& production = npm::ProductionNpmModuleCatalogV1();
+    using ContractError = npm::NpmProtocolContractError;
+    const auto& production = npm::ProductionNpmModuleCatalog();
     assert(production.size() == 6 && production[0].module_id == "basic" && production[1].module_id == "session" &&
            production[2].module_id == "dns" && production[3].module_id == "http1" && production[4].module_id == "tls");
     ContextDictionary dictionary;
@@ -11582,22 +11495,22 @@ void TestDnsT0OpenContract() {
     int consumer_mode = 0;  // 0: valid; 1: missing; 2: wrong object.
     auto catalog = production;
     catalog.erase(catalog.begin() + 2);  // Replace production DNS with the controllable test module.
-    npm::NpmModuleRegistrationV1 registration;
+    npm::NpmModuleRegistration registration;
     registration.module_id = "dns";
     registration.entity_ids = {"dns_transaction_ipv4", "dns_transaction_ipv6"};
     registration.prepare = [&aborts, &consumer_mode, &unrelated](const npm::NpmBasicTaskConfig&, std::string_view json,
-                                                                 npm::NpmPreparedModuleV1* output) {
-        npm::NpmDnsConfigV1 dns;
-        const auto parsed = npm::ParseNpmDnsConfigV1(json, &dns);
-        if (parsed.error != npm::NpmDnsConfigErrorV1::kNone) {
+                                                                 npm::NpmPreparedModule* output) {
+        npm::NpmDnsConfig dns;
+        const auto parsed = npm::ParseNpmDnsConfig(json, &dns);
+        if (parsed.error != npm::NpmDnsConfigError::kNone) {
             const std::string prefix = "/dns/";
-            return npm::NpmProtocolContractStatusV1{
-                ContractError::kInvalidPlan, parsed.path == "/dns" ? "config" : parsed.path.substr(prefix.size())};
+            return npm::NpmProtocolContractStatus{ContractError::kInvalidPlan,
+                                                  parsed.path == "/dns" ? "config" : parsed.path.substr(prefix.size())};
         }
-        output->plan = npm::NpmDnsModulePlanV1(dns);
+        output->plan = npm::NpmDnsModulePlan(dns);
         output->create = [&aborts, &consumer_mode, &unrelated](npm::NpmProtocolContext&,
                                                                std::shared_ptr<npm::INpmTaskBudget>) {
-            npm::NpmModuleInstanceV1 instance;
+            npm::NpmModuleInstance instance;
             auto module = std::make_unique<StreamContractModule>(&aborts);
             instance.tcp_stream_consumer = consumer_mode == 1   ? nullptr
                                            : consumer_mode == 2 ? &unrelated
@@ -11605,7 +11518,7 @@ void TestDnsT0OpenContract() {
             instance.protocol = std::move(module);
             return instance;
         };
-        return npm::NpmProtocolContractStatusV1{};
+        return npm::NpmProtocolContractStatus{};
     };
     catalog[2] = std::move(registration);
 
@@ -11619,7 +11532,7 @@ void TestDnsT0OpenContract() {
                           std::shared_ptr<arrow::Schema>* schema, std::unique_ptr<npm::NpmBasicTaskRuntime>* runtime) {
         return npm::NpmBasicTaskRuntime::Create(
             config, &querier, flowsql::packet::PacketSchema(), schema, runtime, {},
-            matcher_available ? static_cast<flowsql::IFlowLabelMatcherV1*>(new ProtocolLabelMatcher(&matcher_stats))
+            matcher_available ? static_cast<flowsql::IFlowLabelMatcher*>(new ProtocolLabelMatcher(&matcher_stats))
                               : nullptr,
             catalog);
     };
@@ -11666,8 +11579,7 @@ void TestDnsT0OpenContract() {
     consumer_mode = 0;
     status = open(config, true, &schema, &runtime);
     assert(status.error == Error::kNone && runtime);
-    assert(
-        schema->Equals(*npm::NpmDnsTransactionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema, true));
+    assert(schema->Equals(*npm::NpmDnsTransactionEntityDescriptor(flowsql::packet::AddressFamily::kIPv4).schema, true));
     runtime->Cancel();
     runtime.reset();
     config = parse(
@@ -11682,8 +11594,9 @@ void TestDnsT0OpenContract() {
     assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic","observing":"dns_transaction_ipv4"})", &config, true,
                                         catalog)
                .error == npm::NpmBasicTaskConfigError::kObservingFeatureDisabled);
-    assert(npm::ParseNpmBasicTaskConfig(R"({"features":"dns,labeling","observing":"dns_transaction_ipv4"})", &config)
-               .error == npm::NpmBasicTaskConfigError::kNone);
+    assert(
+        npm::ParseNpmBasicTaskConfig(R"({"features":"dns,labeling","observing":"dns_transaction_ipv4"})", &config, true)
+            .error == npm::NpmBasicTaskConfigError::kNone);
     schema = sentinel;
     status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                               new ProtocolLabelMatcher(&matcher_stats));
@@ -11693,8 +11606,8 @@ void TestDnsT0OpenContract() {
 
 void TestHttp1T0OpenContract() {
     using Error = npm::NpmBasicTaskRuntimeError;
-    using ContractError = npm::NpmProtocolContractErrorV1;
-    const auto& production = npm::ProductionNpmModuleCatalogV1();
+    using ContractError = npm::NpmProtocolContractError;
+    const auto& production = npm::ProductionNpmModuleCatalog();
     assert(production.size() == 6 && production[0].module_id == "basic" && production[1].module_id == "session" &&
            production[2].module_id == "dns" && production[3].module_id == "http1" && production[4].module_id == "tls");
     ContextDictionary dictionary;
@@ -11706,22 +11619,22 @@ void TestHttp1T0OpenContract() {
     StreamContractModule unrelated(&aborts);
     int consumer_mode = 0;  // 0: valid; 1: missing; 2: wrong object.
     auto catalog = production;
-    npm::NpmModuleRegistrationV1 registration;
+    npm::NpmModuleRegistration registration;
     registration.module_id = "http1";
     registration.entity_ids = {"http1_transaction_ipv4", "http1_transaction_ipv6"};
     registration.prepare = [&aborts, &consumer_mode, &unrelated](const npm::NpmBasicTaskConfig&, std::string_view json,
-                                                                 npm::NpmPreparedModuleV1* output) {
-        npm::NpmHttp1ConfigV1 http1;
-        const auto parsed = npm::ParseNpmHttp1ConfigV1(json, &http1);
-        if (parsed.error != npm::NpmHttp1ConfigErrorV1::kNone) {
+                                                                 npm::NpmPreparedModule* output) {
+        npm::NpmHttp1Config http1;
+        const auto parsed = npm::ParseNpmHttp1Config(json, &http1);
+        if (parsed.error != npm::NpmHttp1ConfigError::kNone) {
             const std::string prefix = "/http1/";
-            return npm::NpmProtocolContractStatusV1{
+            return npm::NpmProtocolContractStatus{
                 ContractError::kInvalidPlan, parsed.path == "/http1" ? "config" : parsed.path.substr(prefix.size())};
         }
-        output->plan = npm::NpmHttp1ModulePlanV1(http1);
+        output->plan = npm::NpmHttp1ModulePlan(http1);
         output->create = [&aborts, &consumer_mode, &unrelated](npm::NpmProtocolContext&,
                                                                std::shared_ptr<npm::INpmTaskBudget>) {
-            npm::NpmModuleInstanceV1 instance;
+            npm::NpmModuleInstance instance;
             auto module = std::make_unique<StreamContractModule>(&aborts);
             instance.tcp_stream_consumer = consumer_mode == 1   ? nullptr
                                            : consumer_mode == 2 ? &unrelated
@@ -11729,7 +11642,7 @@ void TestHttp1T0OpenContract() {
             instance.protocol = std::move(module);
             return instance;
         };
-        return npm::NpmProtocolContractStatusV1{};
+        return npm::NpmProtocolContractStatus{};
     };
     catalog[3] = std::move(registration);
 
@@ -11743,7 +11656,7 @@ void TestHttp1T0OpenContract() {
                           std::shared_ptr<arrow::Schema>* schema, std::unique_ptr<npm::NpmBasicTaskRuntime>* runtime) {
         return npm::NpmBasicTaskRuntime::Create(
             config, &querier, flowsql::packet::PacketSchema(), schema, runtime, {},
-            matcher_available ? static_cast<flowsql::IFlowLabelMatcherV1*>(new ProtocolLabelMatcher(&matcher_stats))
+            matcher_available ? static_cast<flowsql::IFlowLabelMatcher*>(new ProtocolLabelMatcher(&matcher_stats))
                               : nullptr,
             catalog);
     };
@@ -11790,8 +11703,8 @@ void TestHttp1T0OpenContract() {
     consumer_mode = 0;
     status = open(config, true, &schema, &runtime);
     assert(status.error == Error::kNone && runtime);
-    assert(schema->Equals(*npm::NpmHttp1TransactionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema,
-                          true));
+    assert(
+        schema->Equals(*npm::NpmHttp1TransactionEntityDescriptor(flowsql::packet::AddressFamily::kIPv4).schema, true));
     runtime->Cancel();
     runtime.reset();
     config = parse(
@@ -11811,48 +11724,47 @@ void TestHttp1T0OpenContract() {
     status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                               new ProtocolLabelMatcher(&matcher_stats));
     assert(status.error == Error::kNone && runtime);
-    assert(schema->Equals(*npm::NpmHttp1TransactionEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema,
-                          true));
+    assert(
+        schema->Equals(*npm::NpmHttp1TransactionEntityDescriptor(flowsql::packet::AddressFamily::kIPv4).schema, true));
     runtime->Cancel();
     runtime.reset();
 }
 
-class IcmpContractModule final : public npm::INpmProtocolModuleV1 {
+class IcmpContractModule final : public npm::INpmProtocolModule {
  public:
-    int OnInput(const npm::NpmInputEventV1&, npm::INpmResultEmitterV1&) override { return 0; }
-    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return EINVAL; }
-    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t,
-                     npm::INpmResultEmitterV1&) override {
+    int OnInput(const npm::NpmInputEvent&, npm::INpmResultEmitter&) override { return 0; }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitter&) override { return EINVAL; }
+    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t, npm::INpmResultEmitter&) override {
         return EINVAL;
     }
     std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
-    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override { return 0; }
-    int Finish(int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnTime(const npm::NpmModuleTime&, npm::INpmResultEmitter&) override { return 0; }
+    int Finish(int64_t, npm::INpmResultEmitter&) override { return 0; }
     void Abort() noexcept override {}
 };
 
 void TestIcmpT0OpenContract() {
     using Error = npm::NpmBasicTaskRuntimeError;
-    using ContractError = npm::NpmProtocolContractErrorV1;
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    using ContractError = npm::NpmProtocolContractError;
+    auto catalog = npm::ProductionNpmModuleCatalog();
     catalog.pop_back();  // Replace production ICMP with the controllable Open contract module.
-    npm::NpmModuleRegistrationV1 registration;
+    npm::NpmModuleRegistration registration;
     registration.module_id = "icmp";
     registration.entity_ids = {"icmp_event_ipv4", "icmp_event_ipv6"};
-    registration.prepare = [](const npm::NpmBasicTaskConfig&, std::string_view json, npm::NpmPreparedModuleV1* out) {
-        npm::NpmIcmpConfigV1 config;
-        const auto parsed = npm::ParseNpmIcmpConfigV1(json, &config);
-        if (parsed.error != npm::NpmIcmpConfigErrorV1::kNone) {
-            return npm::NpmProtocolContractStatusV1{ContractError::kInvalidPlan,
-                                                    parsed.path == "/icmp" ? "config" : parsed.path.substr(6)};
+    registration.prepare = [](const npm::NpmBasicTaskConfig&, std::string_view json, npm::NpmPreparedModule* out) {
+        npm::NpmIcmpConfig config;
+        const auto parsed = npm::ParseNpmIcmpConfig(json, &config);
+        if (parsed.error != npm::NpmIcmpConfigError::kNone) {
+            return npm::NpmProtocolContractStatus{ContractError::kInvalidPlan,
+                                                  parsed.path == "/icmp" ? "config" : parsed.path.substr(6)};
         }
-        out->plan = npm::NpmIcmpModulePlanV1();
+        out->plan = npm::NpmIcmpModulePlan();
         out->create = [](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
-            npm::NpmModuleInstanceV1 instance;
+            npm::NpmModuleInstance instance;
             instance.protocol = std::make_unique<IcmpContractModule>();
             return instance;
         };
-        return npm::NpmProtocolContractStatusV1{};
+        return npm::NpmProtocolContractStatus{};
     };
     catalog.push_back(std::move(registration));
 
@@ -11871,9 +11783,9 @@ void TestIcmpT0OpenContract() {
     auto schema = sentinel;
     std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
     auto status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
-                                                   {}, nullptr, npm::ProductionNpmModuleCatalogV1());
+                                                   {}, nullptr, npm::ProductionNpmModuleCatalog());
     assert(status.error == Error::kNone && runtime);
-    assert(schema->Equals(*npm::NpmIcmpEventEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema, true));
+    assert(schema->Equals(*npm::NpmIcmpEventEntityDescriptor(flowsql::packet::AddressFamily::kIPv4).schema, true));
     runtime->Cancel();
     runtime.reset();
     schema = sentinel;
@@ -11890,7 +11802,7 @@ void TestIcmpT0OpenContract() {
     status = npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime, {},
                                               nullptr, catalog);
     assert(status.error == Error::kNone && runtime);
-    assert(schema->Equals(*npm::NpmIcmpEventEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema, true));
+    assert(schema->Equals(*npm::NpmIcmpEventEntityDescriptor(flowsql::packet::AddressFamily::kIPv4).schema, true));
     runtime->Cancel();
     runtime.reset();
 
@@ -11932,7 +11844,7 @@ void TestIcmpMixedBatchAndSplitEquivalence() {
         assert(
             npm::ParseNpmBasicTaskConfig(
                 R"({"input_namespace":"capture","source_domains":"1:77","features":"icmp","observing":"icmp_event_ipv4"})",
-                &config, false, npm::ProductionNpmModuleCatalogV1())
+                &config, false, npm::ProductionNpmModuleCatalog())
                 .error == npm::NpmBasicTaskConfigError::kNone);
         ContextDictionary dictionary;
         ContextProtocol protocol(&dictionary);
@@ -11972,8 +11884,8 @@ void TestIcmpMixedBatchAndSplitEquivalence() {
 
 void TestTlsT0OpenContract() {
     using Error = npm::NpmBasicTaskRuntimeError;
-    using ContractError = npm::NpmProtocolContractErrorV1;
-    const auto& production = npm::ProductionNpmModuleCatalogV1();
+    using ContractError = npm::NpmProtocolContractError;
+    const auto& production = npm::ProductionNpmModuleCatalog();
     assert(production.size() == 6 && production[4].module_id == "tls");
 
     ContextDictionary dictionary;
@@ -11986,22 +11898,22 @@ void TestTlsT0OpenContract() {
     int consumer_mode = 0;  // 0: same object; 1: absent; 2: unrelated object.
     auto catalog = production;
     catalog.erase(catalog.begin() + 4);  // Replace production TLS with the controllable Open contract module.
-    npm::NpmModuleRegistrationV1 registration;
+    npm::NpmModuleRegistration registration;
     registration.module_id = "tls";
     registration.entity_ids = {"tls_handshake_ipv4", "tls_handshake_ipv6"};
     registration.prepare = [&aborts, &consumer_mode, &unrelated](const npm::NpmBasicTaskConfig&, std::string_view json,
-                                                                 npm::NpmPreparedModuleV1* output) {
-        npm::NpmTlsConfigV1 tls;
-        const auto parsed = npm::ParseNpmTlsConfigV1(json, &tls);
-        if (parsed.error != npm::NpmTlsConfigErrorV1::kNone) {
+                                                                 npm::NpmPreparedModule* output) {
+        npm::NpmTlsConfig tls;
+        const auto parsed = npm::ParseNpmTlsConfig(json, &tls);
+        if (parsed.error != npm::NpmTlsConfigError::kNone) {
             const std::string prefix = "/tls/";
-            return npm::NpmProtocolContractStatusV1{
-                ContractError::kInvalidPlan, parsed.path == "/tls" ? "config" : parsed.path.substr(prefix.size())};
+            return npm::NpmProtocolContractStatus{ContractError::kInvalidPlan,
+                                                  parsed.path == "/tls" ? "config" : parsed.path.substr(prefix.size())};
         }
-        output->plan = npm::NpmTlsModulePlanV1(tls);
+        output->plan = npm::NpmTlsModulePlan(tls);
         output->create = [&aborts, &consumer_mode, &unrelated](npm::NpmProtocolContext&,
                                                                std::shared_ptr<npm::INpmTaskBudget>) {
-            npm::NpmModuleInstanceV1 instance;
+            npm::NpmModuleInstance instance;
             auto module = std::make_unique<StreamContractModule>(&aborts);
             instance.tcp_stream_consumer = consumer_mode == 1   ? nullptr
                                            : consumer_mode == 2 ? &unrelated
@@ -12009,7 +11921,7 @@ void TestTlsT0OpenContract() {
             instance.protocol = std::move(module);
             return instance;
         };
-        return npm::NpmProtocolContractStatusV1{};
+        return npm::NpmProtocolContractStatus{};
     };
     catalog.push_back(std::move(registration));
 
@@ -12023,7 +11935,7 @@ void TestTlsT0OpenContract() {
                           std::shared_ptr<arrow::Schema>* schema, std::unique_ptr<npm::NpmBasicTaskRuntime>* runtime) {
         return npm::NpmBasicTaskRuntime::Create(
             config, &querier, flowsql::packet::PacketSchema(), schema, runtime, {},
-            matcher_available ? static_cast<flowsql::IFlowLabelMatcherV1*>(new ProtocolLabelMatcher(&matcher_stats))
+            matcher_available ? static_cast<flowsql::IFlowLabelMatcher*>(new ProtocolLabelMatcher(&matcher_stats))
                               : nullptr,
             catalog);
     };
@@ -12076,7 +11988,7 @@ void TestTlsT0OpenContract() {
     consumer_mode = 0;
     status = open(config, true, &schema, &runtime);
     assert(status.error == Error::kNone && runtime);
-    assert(schema->Equals(*npm::NpmTlsHandshakeEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema, true));
+    assert(schema->Equals(*npm::NpmTlsHandshakeEntityDescriptor(flowsql::packet::AddressFamily::kIPv4).schema, true));
     runtime->Cancel();
     runtime.reset();
 
@@ -12111,14 +12023,14 @@ struct ProtocolLifecycleTrace {
     std::function<void()> on_time;
 };
 
-class LifecycleProtocolModule final : public npm::INpmProtocolModuleV1 {
+class LifecycleProtocolModule final : public npm::INpmProtocolModule {
  public:
     LifecycleProtocolModule(ProtocolLifecycleTrace* trace, std::shared_ptr<npm::INpmTaskBudget> budget)
         : trace_(trace), budget_(std::move(budget)) {
         ++trace_->created;
     }
 
-    int OnInput(const npm::NpmInputEventV1& event, npm::INpmResultEmitterV1&) override {
+    int OnInput(const npm::NpmInputEvent& event, npm::INpmResultEmitter&) override {
         const uint64_t session_id = event.session == nullptr ? 0 : event.session->session_id;
         trace_->order.push_back("input:" + std::to_string(session_id));
         const size_t count = session_id == 0 ? trace_->control_entity_count : 2;
@@ -12137,10 +12049,10 @@ class LifecycleProtocolModule final : public npm::INpmProtocolModuleV1 {
         return 0;
     }
 
-    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitter&) override { return 0; }
 
     int OnSessionEnd(const npm::NpmSessionView& session, npm::NpmSessionEndReason, int64_t,
-                     npm::INpmResultEmitterV1&) override {
+                     npm::INpmResultEmitter&) override {
         trace_->order.push_back("end:" + std::to_string(session.session_id));
         ReleaseIf([&](const Entity& entity) { return entity.session_id == session.session_id; });
         return 0;
@@ -12154,7 +12066,7 @@ class LifecycleProtocolModule final : public npm::INpmProtocolModuleV1 {
         return result;
     }
 
-    int OnTime(const npm::NpmModuleTimeV1& time, npm::INpmResultEmitterV1&) override {
+    int OnTime(const npm::NpmModuleTime& time, npm::INpmResultEmitter&) override {
         assert(time.watermark_ns.has_value());
         trace_->watermarks.push_back(*time.watermark_ns);
         trace_->order.push_back("time:" + std::to_string(*time.watermark_ns));
@@ -12167,7 +12079,7 @@ class LifecycleProtocolModule final : public npm::INpmProtocolModuleV1 {
         return 0;
     }
 
-    int Finish(int64_t, npm::INpmResultEmitterV1&) override {
+    int Finish(int64_t, npm::INpmResultEmitter&) override {
         ++trace_->finish_calls;
         trace_->order.push_back("finish");
         if (trace_->finish_error != 0) return trace_->finish_error;
@@ -12208,23 +12120,23 @@ class LifecycleProtocolModule final : public npm::INpmProtocolModuleV1 {
     std::vector<Entity> entities_;
 };
 
-npm::NpmModuleRegistrationV1 LifecycleRegistration(ProtocolLifecycleTrace* trace) {
-    npm::NpmModuleRegistrationV1 entry;
+npm::NpmModuleRegistration LifecycleRegistration(ProtocolLifecycleTrace* trace) {
+    npm::NpmModuleRegistration entry;
     entry.module_id = "lifecycle";
     entry.entity_ids = {"lifecycle_event"};
-    entry.prepare = [trace](const npm::NpmBasicTaskConfig&, std::string_view, npm::NpmPreparedModuleV1* output) {
+    entry.prepare = [trace](const npm::NpmBasicTaskConfig&, std::string_view, npm::NpmPreparedModule* output) {
         output->plan.module_id = "lifecycle";
-        output->plan.input_mask = npm::kNpmInputMaskV1;
-        auto entity = npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
+        output->plan.input_mask = npm::kNpmInputMask;
+        auto entity = npm::NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
         entity.module_id = "lifecycle";
         entity.entity_id = "lifecycle_event";
         output->plan.entities = {std::move(entity)};
         output->create = [trace](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget> budget) {
-            npm::NpmModuleInstanceV1 result;
+            npm::NpmModuleInstance result;
             result.protocol = std::make_unique<LifecycleProtocolModule>(trace, std::move(budget));
             return result;
         };
-        return npm::NpmProtocolContractStatusV1{};
+        return npm::NpmProtocolContractStatus{};
     };
     return entry;
 }
@@ -12237,7 +12149,7 @@ std::unique_ptr<npm::NpmBasicTaskRuntime> CreateLifecycleRuntime(ProtocolLifecyc
     config.features.basic_enabled = true;
     config.features.observing = npm::NpmResultEntity::kBasic;
     config.features.observing_entity = "basic_ipv4";
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    auto catalog = npm::ProductionNpmModuleCatalog();
     catalog.push_back(LifecycleRegistration(trace));
     std::shared_ptr<arrow::Schema> schema;
     std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
@@ -12305,7 +12217,7 @@ void TestProtocolLifecycleEofOrderAndObservingIndependence() {
             config.features.observing = npm::NpmResultEntity::kProtocol;
             config.features.observing_entity = "lifecycle_event";
         }
-        auto catalog = npm::ProductionNpmModuleCatalogV1();
+        auto catalog = npm::ProductionNpmModuleCatalog();
         catalog.push_back(LifecycleRegistration(&trace));
         std::shared_ptr<arrow::Schema> schema;
         std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
@@ -12397,7 +12309,7 @@ void TestProtocolLifecycleRealtimeDeferralAndCallbackCancel() {
     SinglePoolQuerier querier(&pool);
     auto config = MakeRuntimeTaskConfig(npm::NpmRunMode::kRealtime);
     config.analysis.out_of_order_tolerance_ns = 0;
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    auto catalog = npm::ProductionNpmModuleCatalog();
     catalog.push_back(LifecycleRegistration(&trace));
     config.features.module_ids = {"basic", "lifecycle"};
     std::shared_ptr<arrow::Schema> schema;
@@ -12436,10 +12348,10 @@ void TestProtocolLifecycleRealtimeDeferralAndCallbackCancel() {
     assert(trace.abort_calls == 1);
 }
 
-class UnexpectedManagedFactory final : public npm::INpmResultConsumerFactoryV1 {
+class UnexpectedManagedFactory final : public npm::INpmResultConsumerFactory {
  public:
-    int Create(const npm::NpmResultContextV1&, const std::vector<npm::NpmEntityDescriptorV1>&,
-               std::shared_ptr<npm::INpmTaskBudget>, std::unique_ptr<npm::INpmManagedResultConsumerV1>*) override {
+    int Create(const npm::NpmResultContext&, const std::vector<npm::NpmEntityDescriptor>&,
+               std::shared_ptr<npm::INpmTaskBudget>, std::unique_ptr<npm::INpmManagedResultConsumer>*) override {
         ++create_calls;
         return EFAULT;
     }
@@ -12450,14 +12362,14 @@ class UnexpectedManagedFactory final : public npm::INpmResultConsumerFactoryV1 {
 
 void TestProtocolLabelIsolationAndAtomicFactoryFailure() {
     ProtocolInputTrace selected, all, control;
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    auto catalog = npm::ProductionNpmModuleCatalog();
     catalog.push_back(CountingRegistration("selected", 1, &selected, false, std::vector<uint32_t>{1001}));
     catalog.push_back(CountingRegistration("all", 3, &all));
     catalog.push_back(CountingRegistration("control", 4, &control));
     npm::NpmBasicTaskConfig config;
     assert(
         npm::ParseNpmBasicTaskConfig(
-            R"({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,selected,all,control","out_of_order_tolerance_ns":"0","tcp_idle_timeout_ns":"1000000000","observing":"basic_ipv4"})",
+            R"JSON({"input_namespace":"capture","source_domains":"1:77","features":"basic,labeling,selected,all,control","observing":"basic_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"out_of_order_tolerance_ns\":0,\"tcp_idle_timeout_ns\":1000000000}}"})JSON",
             &config, true, catalog)
             .error == npm::NpmBasicTaskConfigError::kNone);
     ContextDictionary dictionary;
@@ -12504,10 +12416,10 @@ void TestProtocolLabelIsolationAndAtomicFactoryFailure() {
     // Fail after an earlier module was instantiated; neither runtime nor schema is published.
     auto prepare = catalog.back().prepare;
     catalog.back().prepare = [prepare](const npm::NpmBasicTaskConfig& cfg, std::string_view json,
-                                       npm::NpmPreparedModuleV1* out) {
+                                       npm::NpmPreparedModule* out) {
         auto status = prepare(cfg, json, out);
         out->create = [](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
-            return npm::NpmModuleInstanceV1{};
+            return npm::NpmModuleInstance{};
         };
         return status;
     };
@@ -12532,7 +12444,7 @@ struct ResultConsumerTrace {
     std::vector<std::string> entities;
     std::vector<int64_t> batch_sizes;
     std::vector<uint64_t> ids;
-    std::vector<npm::NpmResultContextV1> contexts;
+    std::vector<npm::NpmResultContext> contexts;
     std::vector<uint64_t> revisions;
     std::vector<bool> finals;
     std::vector<uint64_t> dns_domains;
@@ -12553,7 +12465,7 @@ struct ResultConsumerTrace {
     std::function<void()> on_finish;
     std::function<void()> on_cancel;
 };
-class RecordingResultConsumer final : public npm::INpmResultConsumerV1, public npm::INpmFamilyProgressConsumer {
+class RecordingResultConsumer final : public npm::INpmResultConsumer, public npm::INpmFamilyProgressConsumer {
  public:
     explicit RecordingResultConsumer(ResultConsumerTrace* trace) : trace_(trace) {}
     int PublishProgress(const npm::NpmFamilyPublicationRequest& progress,
@@ -12570,7 +12482,7 @@ class RecordingResultConsumer final : public npm::INpmResultConsumerV1, public n
         *confirmed = {progress, progress.key.run_id, position};
         return 0;
     }
-    int Consume(const npm::NpmResultContextV1& context, const npm::NpmEntityDescriptorV1& entity,
+    int Consume(const npm::NpmResultContext& context, const npm::NpmEntityDescriptor& entity,
                 const arrow::RecordBatch& rows) override {
         ++trace_->attempts;
         if (trace_->on_consume) trace_->on_consume();
@@ -12630,10 +12542,10 @@ class RecordingResultConsumer final : public npm::INpmResultConsumerV1, public n
     ResultConsumerTrace* trace_;
 };
 
-class EmittingProtocolModule final : public npm::INpmProtocolModuleV1 {
+class EmittingProtocolModule final : public npm::INpmProtocolModule {
  public:
     explicit EmittingProtocolModule(ProtocolInputTrace* trace) : trace_(trace) {}
-    int OnInput(const npm::NpmInputEventV1&, npm::INpmResultEmitterV1& emitter) override {
+    int OnInput(const npm::NpmInputEvent&, npm::INpmResultEmitter& emitter) override {
         auto result = MakeBasicEncodingResult(++next_id_);
         result.protocol_status = npm::NpmProtocolStatus::kUnknown;
         result.revision = 1;
@@ -12647,14 +12559,13 @@ class EmittingProtocolModule final : public npm::INpmProtocolModuleV1 {
         std::memset(values->mutable_data(), 0, values->size());
         return error;
     }
-    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return 0; }
-    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t,
-                     npm::INpmResultEmitterV1&) override {
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitter&) override { return 0; }
+    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t, npm::INpmResultEmitter&) override {
         return 0;
     }
     std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
-    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override { return 0; }
-    int Finish(int64_t, npm::INpmResultEmitterV1&) override {
+    int OnTime(const npm::NpmModuleTime&, npm::INpmResultEmitter&) override { return 0; }
+    int Finish(int64_t, npm::INpmResultEmitter&) override {
         trace_->order.push_back("finish");
         return 0;
     }
@@ -12664,16 +12575,16 @@ class EmittingProtocolModule final : public npm::INpmProtocolModuleV1 {
     ProtocolInputTrace* trace_;
     uint64_t next_id_ = 0;
 };
-npm::NpmModuleCatalogV1 EmittingCatalog(ProtocolInputTrace* trace) {
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
-    auto entry = CountingRegistration("emitting", npm::kNpmInputMaskV1, trace);
+npm::NpmModuleCatalog EmittingCatalog(ProtocolInputTrace* trace) {
+    auto catalog = npm::ProductionNpmModuleCatalog();
+    auto entry = CountingRegistration("emitting", npm::kNpmInputMask, trace);
     auto prepare = entry.prepare;
     entry.prepare = [prepare, trace](const npm::NpmBasicTaskConfig& config, std::string_view json,
-                                     npm::NpmPreparedModuleV1* out) {
+                                     npm::NpmPreparedModule* out) {
         const auto status = prepare(config, json, out);
-        out->plan.entities[0].revision_semantics = npm::NpmRevisionSemanticsV1::kEvent;
+        out->plan.entities[0].revision_semantics = npm::NpmRevisionSemantics::kEvent;
         out->create = [trace](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
-            npm::NpmModuleInstanceV1 instance;
+            npm::NpmModuleInstance instance;
             instance.protocol = std::make_unique<EmittingProtocolModule>(trace);
             return instance;
         };
@@ -12682,22 +12593,21 @@ npm::NpmModuleCatalogV1 EmittingCatalog(ProtocolInputTrace* trace) {
     catalog.push_back(entry);
     return catalog;
 }
-class TraceManagedResultFactory final : public npm::INpmResultConsumerFactoryV1 {
+class TraceManagedResultFactory final : public npm::INpmResultConsumerFactory {
  public:
     explicit TraceManagedResultFactory(ResultConsumerTrace* trace) : trace_(trace) {}
-    int Create(const npm::NpmResultContextV1&, const std::vector<npm::NpmEntityDescriptorV1>&,
-               std::shared_ptr<npm::INpmTaskBudget>,
-               std::unique_ptr<npm::INpmManagedResultConsumerV1>* output) override {
+    int Create(const npm::NpmResultContext&, const std::vector<npm::NpmEntityDescriptor>&,
+               std::shared_ptr<npm::INpmTaskBudget>, std::unique_ptr<npm::INpmManagedResultConsumer>* output) override {
         *output = std::make_unique<Managed>(trace_);
         return 0;
     }
     std::string LastError() const override { return {}; }
 
  private:
-    class Managed final : public npm::INpmManagedResultConsumerV1, public npm::INpmFamilyProgressConsumer {
+    class Managed final : public npm::INpmManagedResultConsumer, public npm::INpmFamilyProgressConsumer {
      public:
         explicit Managed(ResultConsumerTrace* trace) : delegate_(trace) {}
-        int Consume(const npm::NpmResultContextV1& context, const npm::NpmEntityDescriptorV1& entity,
+        int Consume(const npm::NpmResultContext& context, const npm::NpmEntityDescriptor& entity,
                     const arrow::RecordBatch& rows) override {
             return delegate_.Consume(context, entity, rows);
         }
@@ -12707,7 +12617,7 @@ class TraceManagedResultFactory final : public npm::INpmResultConsumerFactoryV1 
         }
         int Finish() override { return delegate_.Finish(); }
         void Cancel() noexcept override { delegate_.Cancel(); }
-        int FailRun(const npm::NpmResultFailureV1&) override { return 0; }
+        int FailRun(const npm::NpmResultFailure&) override { return 0; }
         std::string ResultJson() const override { return "{}"; }
 
      private:
@@ -12718,7 +12628,7 @@ class TraceManagedResultFactory final : public npm::INpmResultConsumerFactoryV1 
 
 std::unique_ptr<npm::NpmBasicTaskRuntime> CreateConsumingRuntime(
     npm::NpmBasicTaskConfig config, SinglePoolQuerier* querier, ResultConsumerTrace* trace,
-    const npm::NpmModuleCatalogV1& catalog = npm::ProductionNpmModuleCatalogV1()) {
+    const npm::NpmModuleCatalog& catalog = npm::ProductionNpmModuleCatalog()) {
     std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
     std::shared_ptr<arrow::Schema> schema;
     const bool managed = config.features.observing_entity.empty();
@@ -13054,7 +12964,7 @@ void TestResultRouterValidationBudgetAndUnobservedRelease() {
     auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
     auto budget = std::make_shared<npm::NpmTaskBudget>(config);
     auto invoke = [](const std::function<int()>& fn) { return fn(); };
-    auto basic = npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
+    auto basic = npm::NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
     auto another = basic;
     another.entity_id = "other";
     another.module_id = "other";
@@ -13095,36 +13005,35 @@ struct DualEntityProtocolTrace {
     std::atomic<int> aborts{0};
 };
 
-class DualEntityProtocolModule final : public npm::INpmProtocolModuleV1 {
+class DualEntityProtocolModule final : public npm::INpmProtocolModule {
  public:
     DualEntityProtocolModule(DualEntityProtocolTrace* trace, uint64_t first_id) : trace_(trace), next_id_(first_id) {}
 
-    int OnInput(const npm::NpmInputEventV1& input, npm::INpmResultEmitterV1& emitter) override {
-        assert(input.kind == npm::NpmInputKindV1::kControlPacket);
+    int OnInput(const npm::NpmInputEvent& input, npm::INpmResultEmitter& emitter) override {
+        assert(input.kind == npm::NpmInputKind::kControlPacket);
         assert(input.transport == nullptr && input.session == nullptr);
         ++trace_->inputs;
         const int left_error = EmitEvent("dual_left", emitter);
         return left_error == 0 ? EmitEvent("dual_right", emitter) : left_error;
     }
-    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override {
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitter&) override {
         assert(false);
         return EINVAL;
     }
-    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t,
-                     npm::INpmResultEmitterV1&) override {
+    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t, npm::INpmResultEmitter&) override {
         assert(false);
         return EINVAL;
     }
     std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
-    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override { return 0; }
-    int Finish(int64_t, npm::INpmResultEmitterV1&) override {
+    int OnTime(const npm::NpmModuleTime&, npm::INpmResultEmitter&) override { return 0; }
+    int Finish(int64_t, npm::INpmResultEmitter&) override {
         ++trace_->finishes;
         return 0;
     }
     void Abort() noexcept override { ++trace_->aborts; }
 
  private:
-    int EmitEvent(std::string_view entity, npm::INpmResultEmitterV1& emitter) {
+    int EmitEvent(std::string_view entity, npm::INpmResultEmitter& emitter) {
         auto result = MakeBasicEncodingResult(next_id_++);
         result.protocol_status = npm::NpmProtocolStatus::kUnknown;
         result.revision = 1;
@@ -13139,35 +13048,35 @@ class DualEntityProtocolModule final : public npm::INpmProtocolModuleV1 {
     uint64_t next_id_ = 0;
 };
 
-npm::NpmModuleCatalogV1 DualEntityCatalog(DualEntityProtocolTrace* trace, uint64_t first_id) {
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
-    npm::NpmModuleRegistrationV1 registration;
+npm::NpmModuleCatalog DualEntityCatalog(DualEntityProtocolTrace* trace, uint64_t first_id) {
+    auto catalog = npm::ProductionNpmModuleCatalog();
+    npm::NpmModuleRegistration registration;
     registration.module_id = "dual";
     registration.entity_ids = {"dual_left", "dual_right"};
     registration.prepare = [trace, first_id](const npm::NpmBasicTaskConfig&, std::string_view,
-                                             npm::NpmPreparedModuleV1* out) {
+                                             npm::NpmPreparedModule* out) {
         out->plan.module_id = "dual";
-        out->plan.input_mask = static_cast<uint8_t>(npm::NpmInputKindV1::kControlPacket);
+        out->plan.input_mask = static_cast<uint8_t>(npm::NpmInputKind::kControlPacket);
         for (const char* entity_id : {"dual_left", "dual_right"}) {
-            auto entity = npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
+            auto entity = npm::NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
             entity.entity_id = entity_id;
             entity.module_id = "dual";
-            entity.revision_semantics = npm::NpmRevisionSemanticsV1::kEvent;
+            entity.revision_semantics = npm::NpmRevisionSemantics::kEvent;
             out->plan.entities.push_back(std::move(entity));
         }
         out->create = [trace, first_id](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
-            npm::NpmModuleInstanceV1 result;
+            npm::NpmModuleInstance result;
             result.protocol = std::make_unique<DualEntityProtocolModule>(trace, first_id);
             return result;
         };
-        return npm::NpmProtocolContractStatusV1{};
+        return npm::NpmProtocolContractStatus{};
     };
     catalog.push_back(std::move(registration));
     return catalog;
 }
 
 void TestProtocolProductionCatalogAndConcurrentDualEntityControlRuntime() {
-    const auto& production = npm::ProductionNpmModuleCatalogV1();
+    const auto& production = npm::ProductionNpmModuleCatalog();
     assert(production.size() == 6);
     assert(production[0].module_id == "basic" &&
            production[0].entity_ids == (std::vector<std::string>{"basic_ipv4", "basic_ipv6"}));
@@ -13282,34 +13191,33 @@ struct StreamRuntimeTrace {
     npm::NpmBasicTaskRuntime* cancel_during_stream = nullptr;
 };
 
-class StreamRuntimeModule final : public npm::INpmProtocolModuleV1, public npm::INpmTcpStreamConsumerV1 {
+class StreamRuntimeModule final : public npm::INpmProtocolModule, public npm::INpmTcpStreamConsumer {
  public:
     explicit StreamRuntimeModule(StreamRuntimeTrace* trace) : trace_(trace) {}
-    int OnInput(const npm::NpmInputEventV1& event, npm::INpmResultEmitterV1&) override {
-        assert(event.kind == npm::NpmInputKindV1::kTcpPacket);
+    int OnInput(const npm::NpmInputEvent& event, npm::INpmResultEmitter&) override {
+        assert(event.kind == npm::NpmInputKind::kTcpPacket);
         trace_->calls.push_back("packet");
         return 0;
     }
-    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return 0; }
-    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t,
-                     npm::INpmResultEmitterV1&) override {
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitter&) override { return 0; }
+    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t, npm::INpmResultEmitter&) override {
         trace_->calls.push_back("module_end");
         ++trace_->module_ends;
         return 0;
     }
     std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
-    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override {
+    int OnTime(const npm::NpmModuleTime&, npm::INpmResultEmitter&) override {
         trace_->calls.push_back("time");
         return 0;
     }
-    int Finish(int64_t, npm::INpmResultEmitterV1&) override {
+    int Finish(int64_t, npm::INpmResultEmitter&) override {
         trace_->calls.push_back("finish");
         ++trace_->finishes;
         return 0;
     }
     void Abort() noexcept override { ++trace_->aborts; }
-    int OnTcpStreamReadable(const npm::NpmTcpStreamContextV1& context, npm::INpmTcpStreamCursorV1& cursor,
-                            npm::INpmResultEmitterV1&) override {
+    int OnTcpStreamReadable(const npm::NpmTcpStreamContext& context, npm::INpmTcpStreamCursor& cursor,
+                            npm::INpmResultEmitter&) override {
         assert(context.session && context.session->key);
         if (trace_->cancel_during_stream) {
             trace_->calls.push_back("cancel_stream");
@@ -13317,15 +13225,15 @@ class StreamRuntimeModule final : public npm::INpmProtocolModuleV1, public npm::
             return 0;
         }
         if (trace_->hold_stream) return 0;
-        npm::NpmTcpStreamEventV1 event;
+        npm::NpmTcpStreamEvent event;
         while (cursor.Peek(&event)) {
-            if (event.kind == npm::NpmTcpStreamEventKindV1::kData) {
+            if (event.kind == npm::NpmTcpStreamEventKind::kData) {
                 trace_->calls.push_back("data");
                 trace_->data.emplace_back(
                     context.session->key->Domain(), context.session->session_id, context.direction,
                     std::string(reinterpret_cast<const char*>(event.bytes.data), event.bytes.size));
                 assert(cursor.Consume(event.bytes.size) == 0);
-            } else if (event.kind == npm::NpmTcpStreamEventKindV1::kGap) {
+            } else if (event.kind == npm::NpmTcpStreamEventKind::kGap) {
                 trace_->calls.push_back("gap");
                 ++trace_->stream_gaps;
                 assert(cursor.Consume(0) == 0);
@@ -13343,29 +13251,29 @@ class StreamRuntimeModule final : public npm::INpmProtocolModuleV1, public npm::
     StreamRuntimeTrace* trace_;
 };
 
-npm::NpmModuleRegistrationV1 StreamRuntimeRegistration(const char* name, StreamRuntimeTrace* trace) {
-    npm::NpmModuleRegistrationV1 registration;
+npm::NpmModuleRegistration StreamRuntimeRegistration(const char* name, StreamRuntimeTrace* trace) {
+    npm::NpmModuleRegistration registration;
     registration.module_id = name;
     registration.entity_ids = {std::string(name) + "_event"};
     registration.prepare = [name = std::string(name), trace](const npm::NpmBasicTaskConfig&, std::string_view,
-                                                             npm::NpmPreparedModuleV1* output) {
+                                                             npm::NpmPreparedModule* output) {
         output->plan.module_id = name;
-        output->plan.input_mask = static_cast<uint8_t>(npm::NpmInputKindV1::kTcpPacket);
+        output->plan.input_mask = static_cast<uint8_t>(npm::NpmInputKind::kTcpPacket);
         output->plan.requires_labeling = true;
         output->plan.requires_tcp_stream = true;
         output->plan.primary_label_ids = std::vector<uint32_t>{1001};
-        auto entity = npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
+        auto entity = npm::NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
         entity.entity_id = name + "_event";
         entity.module_id = name;
         output->plan.entities = {entity};
         output->create = [trace](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
-            npm::NpmModuleInstanceV1 instance;
+            npm::NpmModuleInstance instance;
             auto module = std::make_unique<StreamRuntimeModule>(trace);
             instance.tcp_stream_consumer = module.get();
             instance.protocol = std::move(module);
             return instance;
         };
-        return npm::NpmProtocolContractStatusV1{};
+        return npm::NpmProtocolContractStatus{};
     };
     return registration;
 }
@@ -13379,7 +13287,7 @@ void TestTcpStreamRuntimeAdmissionAndLifecycle() {
     }
     for (const char* features : {"basic,labeling,alpha,beta", "beta,alpha,labeling,basic"}) {
         StreamRuntimeTrace alpha{"alpha"}, beta{"beta"};
-        auto catalog = npm::ProductionNpmModuleCatalogV1();
+        auto catalog = npm::ProductionNpmModuleCatalog();
         catalog.push_back(StreamRuntimeRegistration("alpha", &alpha));
         catalog.push_back(StreamRuntimeRegistration("beta", &beta));
         npm::NpmBasicTaskConfig config;
@@ -13458,7 +13366,7 @@ void TestTcpStreamRuntimeAdmissionAndLifecycle() {
 
 void TestMixedFamilyRuntimeOrderingAndCleanup() {
     StreamRuntimeTrace trace{"alpha"};
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    auto catalog = npm::ProductionNpmModuleCatalog();
     catalog.push_back(StreamRuntimeRegistration("alpha", &trace));
     ResultConsumerTrace family_results;
     npm::NpmBasicTaskConfig config;
@@ -13546,7 +13454,7 @@ void TestMixedFamilyRuntimeOrderingAndCleanup() {
 
 void TestTcpStreamRuntimeDeadlineAndCancel() {
     StreamRuntimeTrace trace{"alpha"};
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    auto catalog = npm::ProductionNpmModuleCatalog();
     catalog.push_back(StreamRuntimeRegistration("alpha", &trace));
     npm::NpmBasicTaskConfig config;
     assert(
@@ -13587,7 +13495,7 @@ void TestTcpStreamRuntimeDeadlineAndCancel() {
 void TestTcpStreamRuntimeFailureDiagnostics() {
     StreamRuntimeTrace trace{"alpha"};
     trace.hold_stream = true;
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    auto catalog = npm::ProductionNpmModuleCatalog();
     catalog.push_back(StreamRuntimeRegistration("alpha", &trace));
     npm::NpmBasicTaskConfig config;
     assert(
@@ -13628,7 +13536,7 @@ void TestTcpStreamRuntimeFailureDiagnostics() {
 
 void TestTcpStreamRuntimeCancelInsideCallback() {
     StreamRuntimeTrace alpha{"alpha"}, beta{"beta"};
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
+    auto catalog = npm::ProductionNpmModuleCatalog();
     catalog.push_back(StreamRuntimeRegistration("alpha", &alpha));
     catalog.push_back(StreamRuntimeRegistration("beta", &beta));
     npm::NpmBasicTaskConfig config;
@@ -13713,10 +13621,10 @@ struct StreamResultTrace {
     int module_aborts = 0;
 };
 
-class StreamResultConsumer final : public npm::INpmResultConsumerV1 {
+class StreamResultConsumer final : public npm::INpmResultConsumer {
  public:
     explicit StreamResultConsumer(StreamResultTrace* trace) : trace_(trace) {}
-    int Consume(const npm::NpmResultContextV1& context, const npm::NpmEntityDescriptorV1& entity,
+    int Consume(const npm::NpmResultContext& context, const npm::NpmEntityDescriptor& entity,
                 const arrow::RecordBatch& rows) override {
         assert(!context.run_id.empty());
         if (trace_->run_id.empty()) trace_->run_id = context.run_id;
@@ -13737,29 +13645,28 @@ class StreamResultConsumer final : public npm::INpmResultConsumerV1 {
     StreamResultTrace* trace_;
 };
 
-class StreamResultModule final : public npm::INpmProtocolModuleV1, public npm::INpmTcpStreamConsumerV1 {
+class StreamResultModule final : public npm::INpmProtocolModule, public npm::INpmTcpStreamConsumer {
  public:
     explicit StreamResultModule(StreamResultTrace* trace) : trace_(trace) {}
-    int OnInput(const npm::NpmInputEventV1&, npm::INpmResultEmitterV1&) override { return 0; }
-    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return 0; }
-    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t,
-                     npm::INpmResultEmitterV1&) override {
+    int OnInput(const npm::NpmInputEvent&, npm::INpmResultEmitter&) override { return 0; }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitter&) override { return 0; }
+    int OnSessionEnd(const npm::NpmSessionView&, npm::NpmSessionEndReason, int64_t, npm::INpmResultEmitter&) override {
         return 0;
     }
     std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
-    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override { return 0; }
-    int Finish(int64_t, npm::INpmResultEmitterV1&) override {
+    int OnTime(const npm::NpmModuleTime&, npm::INpmResultEmitter&) override { return 0; }
+    int Finish(int64_t, npm::INpmResultEmitter&) override {
         ++trace_->module_finishes;
         return 0;
     }
     void Abort() noexcept override { ++trace_->module_aborts; }
-    int OnTcpStreamReadable(const npm::NpmTcpStreamContextV1& context, npm::INpmTcpStreamCursorV1& cursor,
-                            npm::INpmResultEmitterV1& emitter) override {
-        npm::NpmTcpStreamEventV1 event;
+    int OnTcpStreamReadable(const npm::NpmTcpStreamContext& context, npm::INpmTcpStreamCursor& cursor,
+                            npm::INpmResultEmitter& emitter) override {
+        npm::NpmTcpStreamEvent event;
         while (cursor.Peek(&event)) {
             assert(context.session && context.session->session_id > 0);
             std::vector<uint8_t> payload;
-            if (event.kind == npm::NpmTcpStreamEventKindV1::kData)
+            if (event.kind == npm::NpmTcpStreamEventKind::kData)
                 payload.assign(event.bytes.data, event.bytes.data + event.bytes.size);
             auto batch = arrow::RecordBatch::Make(
                 StreamEventSchema(), 1,
@@ -13776,7 +13683,7 @@ class StreamResultModule final : public npm::INpmProtocolModuleV1, public npm::I
                                       : MakeOneNullArray<arrow::Int64Builder>()});
             const int error = emitter.Emit("stream_event", *batch);
             if (error) return error;
-            if (cursor.Consume(event.kind == npm::NpmTcpStreamEventKindV1::kData ? event.bytes.size : 0)) return EINVAL;
+            if (cursor.Consume(event.kind == npm::NpmTcpStreamEventKind::kData ? event.bytes.size : 0)) return EINVAL;
         }
         return 0;
     }
@@ -13786,31 +13693,31 @@ class StreamResultModule final : public npm::INpmProtocolModuleV1, public npm::I
     uint64_t next_id_ = 1;
 };
 
-npm::NpmModuleCatalogV1 StreamResultCatalog(StreamResultTrace* trace) {
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
-    npm::NpmModuleRegistrationV1 registration;
+npm::NpmModuleCatalog StreamResultCatalog(StreamResultTrace* trace) {
+    auto catalog = npm::ProductionNpmModuleCatalog();
+    npm::NpmModuleRegistration registration;
     registration.module_id = "stream_probe";
     registration.entity_ids = {"stream_event"};
-    registration.prepare = [trace](const npm::NpmBasicTaskConfig&, std::string_view, npm::NpmPreparedModuleV1* out) {
+    registration.prepare = [trace](const npm::NpmBasicTaskConfig&, std::string_view, npm::NpmPreparedModule* out) {
         out->plan.module_id = "stream_probe";
-        out->plan.input_mask = static_cast<uint8_t>(npm::NpmInputKindV1::kTcpPacket);
+        out->plan.input_mask = static_cast<uint8_t>(npm::NpmInputKind::kTcpPacket);
         out->plan.requires_labeling = true;
         out->plan.requires_tcp_stream = true;
         out->plan.primary_label_ids = std::vector<uint32_t>{1001};
-        npm::NpmEntityDescriptorV1 entity;
+        npm::NpmEntityDescriptor entity;
         entity.entity_id = "stream_event";
         entity.module_id = "stream_probe";
         entity.schema = StreamEventSchema();
-        entity.revision_semantics = npm::NpmRevisionSemanticsV1::kEvent;
+        entity.revision_semantics = npm::NpmRevisionSemantics::kEvent;
         out->plan.entities = {entity};
         out->create = [trace](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
-            npm::NpmModuleInstanceV1 instance;
+            npm::NpmModuleInstance instance;
             auto module = std::make_unique<StreamResultModule>(trace);
             instance.tcp_stream_consumer = module.get();
             instance.protocol = std::move(module);
             return instance;
         };
-        return npm::NpmProtocolContractStatusV1{};
+        return npm::NpmProtocolContractStatus{};
     };
     catalog.push_back(std::move(registration));
     return catalog;
@@ -13899,59 +13806,59 @@ void TestTcpStreamRecordBatchTypedResultRouting() {
     assert(one_batch.session_rows == split.session_rows && split.session_rows == session_observed.session_rows);
     const auto& events = split.consumed;
     assert(events.size() == 4);
-    assert(std::get<1>(events[0]) == static_cast<uint8_t>(npm::NpmTcpStreamEventKindV1::kData));
+    assert(std::get<1>(events[0]) == static_cast<uint8_t>(npm::NpmTcpStreamEventKind::kData));
     assert(std::get<2>(events[0]) == 0 && std::get<3>(events[0]) == 3 && std::get<4>(events[0]) == "ABC");
     assert(std::get<5>(events[0]) == 10);
-    assert(std::get<1>(events[1]) == static_cast<uint8_t>(npm::NpmTcpStreamEventKindV1::kGap));
+    assert(std::get<1>(events[1]) == static_cast<uint8_t>(npm::NpmTcpStreamEventKind::kGap));
     assert(std::get<2>(events[1]) == 3 && std::get<3>(events[1]) == 5 && std::get<4>(events[1]).empty());
-    assert(std::get<1>(events[2]) == static_cast<uint8_t>(npm::NpmTcpStreamEventKindV1::kData));
+    assert(std::get<1>(events[2]) == static_cast<uint8_t>(npm::NpmTcpStreamEventKind::kData));
     assert(std::get<2>(events[2]) == 5 && std::get<3>(events[2]) == 7 && std::get<4>(events[2]) == "FG");
     assert(std::get<5>(events[2]) == 11);
-    assert(std::get<1>(events[3]) == static_cast<uint8_t>(npm::NpmTcpStreamEventKindV1::kEnd));
+    assert(std::get<1>(events[3]) == static_cast<uint8_t>(npm::NpmTcpStreamEventKind::kEnd));
     assert(std::get<2>(events[3]) == 7 && std::get<3>(events[3]) == 7);
     assert(std::get<0>(events[0]) == static_cast<uint8_t>(npm::NpmPacketDirection::kAToB));
 }
 
 struct TlsStreamTrace {
-    std::vector<npm::NpmTlsFramedEventV1> hellos;
+    std::vector<npm::NpmTlsFramedEvent> hellos;
     int packets = 0;
     int finishes = 0;
     int aborts = 0;
 };
 
-class TlsStreamProbe final : public npm::INpmProtocolModuleV1, public npm::INpmTcpStreamConsumerV1 {
+class TlsStreamProbe final : public npm::INpmProtocolModule, public npm::INpmTcpStreamConsumer {
  public:
     explicit TlsStreamProbe(TlsStreamTrace* trace) : trace_(trace) {}
-    int OnInput(const npm::NpmInputEventV1& input, npm::INpmResultEmitterV1&) override {
-        assert(input.kind == npm::NpmInputKindV1::kTcpPacket);
+    int OnInput(const npm::NpmInputEvent& input, npm::INpmResultEmitter&) override {
+        assert(input.kind == npm::NpmInputKind::kTcpPacket);
         ++trace_->packets;
         return 0;
     }
-    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitter&) override { return 0; }
     int OnSessionEnd(const npm::NpmSessionView& session, npm::NpmSessionEndReason, int64_t,
-                     npm::INpmResultEmitterV1&) override {
+                     npm::INpmResultEmitter&) override {
         framers_.erase(session.session_id);
         return 0;
     }
     std::optional<int64_t> NextEventDeadlineNs() const override { return {}; }
-    int OnTime(const npm::NpmModuleTimeV1&, npm::INpmResultEmitterV1&) override { return 0; }
-    int Finish(int64_t, npm::INpmResultEmitterV1&) override {
+    int OnTime(const npm::NpmModuleTime&, npm::INpmResultEmitter&) override { return 0; }
+    int Finish(int64_t, npm::INpmResultEmitter&) override {
         assert(framers_.empty());
         ++trace_->finishes;
         return 0;
     }
     void Abort() noexcept override { ++trace_->aborts; }
-    int OnTcpStreamReadable(const npm::NpmTcpStreamContextV1& context, npm::INpmTcpStreamCursorV1& cursor,
-                            npm::INpmResultEmitterV1&) override {
+    int OnTcpStreamReadable(const npm::NpmTcpStreamContext& context, npm::INpmTcpStreamCursor& cursor,
+                            npm::INpmResultEmitter&) override {
         assert(context.session);
         auto [entry, inserted] = framers_.try_emplace(context.session->session_id, 4096);
         (void)inserted;
-        npm::NpmTcpStreamEventV1 event;
+        npm::NpmTcpStreamEvent event;
         while (cursor.Peek(&event)) {
-            std::vector<npm::NpmTlsFramedEventV1> parsed;
+            std::vector<npm::NpmTlsFramedEvent> parsed;
             const auto error = entry->second.Consume(context, event, &parsed);
-            if (error != npm::NpmTlsFramerErrorV1::kNone) return EINVAL;
-            if (cursor.Consume(event.kind == npm::NpmTcpStreamEventKindV1::kData ? event.bytes.size : 0)) return EINVAL;
+            if (error != npm::NpmTlsFramerError::kNone) return EINVAL;
+            if (cursor.Consume(event.kind == npm::NpmTcpStreamEventKind::kData ? event.bytes.size : 0)) return EINVAL;
             for (auto& fact : parsed) {
                 if (fact.hello) trace_->hellos.push_back(std::move(fact));
             }
@@ -13961,30 +13868,30 @@ class TlsStreamProbe final : public npm::INpmProtocolModuleV1, public npm::INpmT
 
  private:
     TlsStreamTrace* trace_;
-    std::map<uint64_t, npm::NpmTlsFramerV1> framers_;
+    std::map<uint64_t, npm::NpmTlsFramer> framers_;
 };
 
 struct TlsTrackerTrace {
-    std::vector<npm::NpmTlsHandshakeResultV1> results;
+    std::vector<npm::NpmTlsHandshakeResult> results;
     std::vector<std::string> calls;
     int aborts = 0;
 };
 
-class TlsTrackerProbe final : public npm::INpmProtocolModuleV1, public npm::INpmTcpStreamConsumerV1 {
+class TlsTrackerProbe final : public npm::INpmProtocolModule, public npm::INpmTcpStreamConsumer {
  public:
     explicit TlsTrackerProbe(TlsTrackerTrace* trace) : trace_(trace) {}
-    int OnInput(const npm::NpmInputEventV1& input, npm::INpmResultEmitterV1&) override {
-        assert(input.kind == npm::NpmInputKindV1::kTcpPacket);
+    int OnInput(const npm::NpmInputEvent& input, npm::INpmResultEmitter&) override {
+        assert(input.kind == npm::NpmInputKind::kTcpPacket);
         return 0;
     }
-    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitterV1&) override { return 0; }
+    int OnSessionSnapshot(const npm::NpmSessionView&, int64_t, npm::INpmResultEmitter&) override { return 0; }
     int OnSessionEnd(const npm::NpmSessionView& session, npm::NpmSessionEndReason reason, int64_t observed,
-                     npm::INpmResultEmitterV1&) override {
+                     npm::INpmResultEmitter&) override {
         trace_->calls.push_back("session_end");
         auto found = trackers_.find(session.session_id);
         if (found == trackers_.end()) return 0;
-        std::optional<npm::NpmTlsHandshakeResultV1> result;
-        if (found->second.OnSessionEnd(reason, observed, &result) != npm::NpmTlsTrackerErrorV1::kNone) return EINVAL;
+        std::optional<npm::NpmTlsHandshakeResult> result;
+        if (found->second.OnSessionEnd(reason, observed, &result) != npm::NpmTlsTrackerError::kNone) return EINVAL;
         if (result) trace_->results.push_back(std::move(*result));
         trackers_.erase(found);
         return 0;
@@ -13997,18 +13904,18 @@ class TlsTrackerProbe final : public npm::INpmProtocolModuleV1, public npm::INpm
         }
         return minimum;
     }
-    int OnTime(const npm::NpmModuleTimeV1& time, npm::INpmResultEmitterV1&) override {
+    int OnTime(const npm::NpmModuleTime& time, npm::INpmResultEmitter&) override {
         trace_->calls.push_back("time");
         if (!time.watermark_ns) return 0;
         for (auto& item : trackers_) {
-            std::optional<npm::NpmTlsHandshakeResultV1> result;
-            if (item.second.OnCaptureWatermark(*time.watermark_ns, &result) != npm::NpmTlsTrackerErrorV1::kNone)
+            std::optional<npm::NpmTlsHandshakeResult> result;
+            if (item.second.OnCaptureWatermark(*time.watermark_ns, &result) != npm::NpmTlsTrackerError::kNone)
                 return EINVAL;
             if (result) trace_->results.push_back(std::move(*result));
         }
         return 0;
     }
-    int Finish(int64_t, npm::INpmResultEmitterV1&) override {
+    int Finish(int64_t, npm::INpmResultEmitter&) override {
         assert(trackers_.empty());
         trace_->calls.push_back("finish");
         return 0;
@@ -14018,18 +13925,18 @@ class TlsTrackerProbe final : public npm::INpmProtocolModuleV1, public npm::INpm
         trackers_.clear();
         ++trace_->aborts;
     }
-    int OnTcpStreamReadable(const npm::NpmTcpStreamContextV1& context, npm::INpmTcpStreamCursorV1& cursor,
-                            npm::INpmResultEmitterV1&) override {
+    int OnTcpStreamReadable(const npm::NpmTcpStreamContext& context, npm::INpmTcpStreamCursor& cursor,
+                            npm::INpmResultEmitter&) override {
         assert(context.session);
         auto [found, inserted] =
-            trackers_.try_emplace(context.session->session_id, context.session->session_id, npm::NpmTlsConfigV1{});
+            trackers_.try_emplace(context.session->session_id, context.session->session_id, npm::NpmTlsConfig{});
         (void)inserted;
-        npm::NpmTcpStreamEventV1 event;
+        npm::NpmTcpStreamEvent event;
         while (cursor.Peek(&event)) {
-            trace_->calls.push_back(event.kind == npm::NpmTcpStreamEventKindV1::kEnd ? "stream_end" : "data");
-            std::optional<npm::NpmTlsHandshakeResultV1> result;
-            if (found->second.Consume(context, event, &result) != npm::NpmTlsTrackerErrorV1::kNone) return EINVAL;
-            if (cursor.Consume(event.kind == npm::NpmTcpStreamEventKindV1::kData ? event.bytes.size : 0)) return EINVAL;
+            trace_->calls.push_back(event.kind == npm::NpmTcpStreamEventKind::kEnd ? "stream_end" : "data");
+            std::optional<npm::NpmTlsHandshakeResult> result;
+            if (found->second.Consume(context, event, &result) != npm::NpmTlsTrackerError::kNone) return EINVAL;
+            if (cursor.Consume(event.kind == npm::NpmTcpStreamEventKind::kData ? event.bytes.size : 0)) return EINVAL;
             if (result) trace_->results.push_back(std::move(*result));
         }
         return 0;
@@ -14037,61 +13944,61 @@ class TlsTrackerProbe final : public npm::INpmProtocolModuleV1, public npm::INpm
 
  private:
     TlsTrackerTrace* trace_;
-    std::map<uint64_t, npm::NpmTlsHandshakeTrackerV1> trackers_;
+    std::map<uint64_t, npm::NpmTlsHandshakeTracker> trackers_;
 };
 
-npm::NpmModuleCatalogV1 TlsTrackerCatalog(TlsTrackerTrace* trace) {
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
+npm::NpmModuleCatalog TlsTrackerCatalog(TlsTrackerTrace* trace) {
+    auto catalog = npm::ProductionNpmModuleCatalog();
     catalog.erase(catalog.begin() + 4);
-    npm::NpmModuleRegistrationV1 registration;
+    npm::NpmModuleRegistration registration;
     registration.module_id = "tls";
     registration.entity_ids = {"tls_handshake_ipv4", "tls_handshake_ipv6"};
     registration.prepare = [trace](const npm::NpmBasicTaskConfig&, std::string_view json,
-                                   npm::NpmPreparedModuleV1* output) {
-        npm::NpmTlsConfigV1 config;
-        if (npm::ParseNpmTlsConfigV1(json, &config).error != npm::NpmTlsConfigErrorV1::kNone)
-            return npm::NpmProtocolContractStatusV1{npm::NpmProtocolContractErrorV1::kInvalidPlan, "tls"};
-        output->plan = npm::NpmTlsModulePlanV1(config);
+                                   npm::NpmPreparedModule* output) {
+        npm::NpmTlsConfig config;
+        if (npm::ParseNpmTlsConfig(json, &config).error != npm::NpmTlsConfigError::kNone)
+            return npm::NpmProtocolContractStatus{npm::NpmProtocolContractError::kInvalidPlan, "tls"};
+        output->plan = npm::NpmTlsModulePlan(config);
         output->create = [trace](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
-            npm::NpmModuleInstanceV1 instance;
+            npm::NpmModuleInstance instance;
             auto module = std::make_unique<TlsTrackerProbe>(trace);
             instance.tcp_stream_consumer = module.get();
             instance.protocol = std::move(module);
             return instance;
         };
-        return npm::NpmProtocolContractStatusV1{};
+        return npm::NpmProtocolContractStatus{};
     };
     catalog.push_back(std::move(registration));
     return catalog;
 }
 
-npm::NpmModuleCatalogV1 TlsStreamCatalog(TlsStreamTrace* trace) {
-    auto catalog = npm::ProductionNpmModuleCatalogV1();
+npm::NpmModuleCatalog TlsStreamCatalog(TlsStreamTrace* trace) {
+    auto catalog = npm::ProductionNpmModuleCatalog();
     catalog.erase(catalog.begin() + 4);
-    npm::NpmModuleRegistrationV1 registration;
+    npm::NpmModuleRegistration registration;
     registration.module_id = "tls";
     registration.entity_ids = {"tls_handshake_ipv4", "tls_handshake_ipv6"};
     registration.prepare = [trace](const npm::NpmBasicTaskConfig&, std::string_view json,
-                                   npm::NpmPreparedModuleV1* output) {
-        npm::NpmTlsConfigV1 tls;
-        if (npm::ParseNpmTlsConfigV1(json, &tls).error != npm::NpmTlsConfigErrorV1::kNone) {
-            return npm::NpmProtocolContractStatusV1{npm::NpmProtocolContractErrorV1::kInvalidPlan, "tls"};
+                                   npm::NpmPreparedModule* output) {
+        npm::NpmTlsConfig tls;
+        if (npm::ParseNpmTlsConfig(json, &tls).error != npm::NpmTlsConfigError::kNone) {
+            return npm::NpmProtocolContractStatus{npm::NpmProtocolContractError::kInvalidPlan, "tls"};
         }
-        output->plan = npm::NpmTlsModulePlanV1(tls);
+        output->plan = npm::NpmTlsModulePlan(tls);
         output->create = [trace](npm::NpmProtocolContext&, std::shared_ptr<npm::INpmTaskBudget>) {
-            npm::NpmModuleInstanceV1 instance;
+            npm::NpmModuleInstance instance;
             auto module = std::make_unique<TlsStreamProbe>(trace);
             instance.tcp_stream_consumer = module.get();
             instance.protocol = std::move(module);
             return instance;
         };
-        return npm::NpmProtocolContractStatusV1{};
+        return npm::NpmProtocolContractStatus{};
     };
     catalog.push_back(std::move(registration));
     return catalog;
 }
 
-npm::NpmModuleCatalogV1 TlsResultCatalog() { return npm::ProductionNpmModuleCatalogV1(); }
+npm::NpmModuleCatalog TlsResultCatalog() { return npm::ProductionNpmModuleCatalog(); }
 
 void TlsAppendU16(std::string* bytes, uint16_t value) {
     bytes->push_back(static_cast<char>(value >> 8));
@@ -14132,7 +14039,7 @@ std::string TlsTestHello(bool server) {
     return TlsTestRecord(TlsTestMessage(1, body + extensions));
 }
 
-std::vector<npm::NpmTlsFramedEventV1> RunTlsStreamBatches(bool split_batches) {
+std::vector<npm::NpmTlsFramedEvent> RunTlsStreamBatches(bool split_batches) {
     TlsStreamTrace trace;
     auto catalog = TlsStreamCatalog(&trace);
     npm::NpmBasicTaskConfig config;
@@ -14248,8 +14155,8 @@ void TestTlsT2RuntimeFinalDrain() {
     assert(runtime->ProcessOfflineBatch(input, &output).error == npm::NpmBasicOfflineBatchError::kNone);
     input.reset();
     output.reset();
-    assert(trace.results.size() == 1 && trace.results[0].outcome == npm::NpmTlsOutcomeV1::kIncomplete);
-    assert(trace.results[0].incomplete_reason == npm::NpmTlsIncompleteReasonV1::kSessionEnd);
+    assert(trace.results.size() == 1 && trace.results[0].outcome == npm::NpmTlsOutcome::kIncomplete);
+    assert(trace.results[0].incomplete_reason == npm::NpmTlsIncompleteReason::kSessionEnd);
     const auto stream_end = std::find(trace.calls.begin(), trace.calls.end(), "stream_end");
     const auto session_end = std::find(trace.calls.begin(), trace.calls.end(), "session_end");
     assert(stream_end != trace.calls.end() && session_end != trace.calls.end() && stream_end < session_end);
@@ -14262,7 +14169,7 @@ void TestTlsT2RuntimeFinalDrain() {
 }
 
 void TestDnsT3RuntimeRouting() {
-    const auto& catalog = npm::ProductionNpmModuleCatalogV1();
+    const auto& catalog = npm::ProductionNpmModuleCatalog();
 
     const std::vector<uint8_t> query = {0, 9, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 'a', 0, 0, 1, 0, 1};
     auto answer = query;
@@ -14360,7 +14267,7 @@ void TestDnsT3RuntimeRouting() {
 }
 
 void TestHttp1T3RuntimeRouting() {
-    const auto& catalog = npm::ProductionNpmModuleCatalogV1();
+    const auto& catalog = npm::ProductionNpmModuleCatalog();
     const std::string request = "GET /a HTTP/1.1\r\nHost: example.test\r\n\r\n";
     const std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
     std::vector<flowsql::testing::PacketRecord> packets;
@@ -14698,7 +14605,7 @@ void TestOfflineIcmpDeadlinesBeforeReply() {
                         npm::NpmBasicTaskConfig config;
                         assert(
                             npm::ParseNpmBasicTaskConfig(
-                                R"({"input_namespace":"capture","source_domains":"1:77","features":"icmp","observing":"icmp_event_ipv4","out_of_order_tolerance_ns":"0"})",
+                                R"JSON({"input_namespace":"capture","source_domains":"1:77","features":"icmp","observing":"icmp_event_ipv4","parameters":"{\"schema_version\":1,\"core\":{\"out_of_order_tolerance_ns\":0}}"})JSON",
                                 &config)
                                 .error == npm::NpmBasicTaskConfigError::kNone);
                         config.analysis.out_of_order_tolerance_ns = tolerance;
@@ -14760,7 +14667,7 @@ void TestResultRouterPreservesSlicedNullableColumns() {
     auto config = MakeRuntimeTaskConfig();
     auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
     auto invoke = [](const std::function<int()>& fn) { return fn(); };
-    npm::NpmResultRouter router({npm::NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4)}, "basic_ipv4",
+    npm::NpmResultRouter router({npm::NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv4)}, "basic_ipv4",
                                 npm::MakeNpmResultContext("slice"), budget, {}, invoke);
     auto first = MakeBasicEncodingResult(1);
     auto second = MakeBasicEncodingResult(2);
@@ -14844,7 +14751,7 @@ void TestMatcherReservationFollowsOwnership() {
             std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
             const auto created = npm::NpmBasicTaskRuntime::Create(
                 config, &querier, scenario == 2 ? nullptr : flowsql::packet::PacketSchema(), &schema, &runtime, budget,
-                new RecordingLabelMatcher(&labels), npm::ProductionNpmModuleCatalogV1(), {}, {},
+                new RecordingLabelMatcher(&labels), npm::ProductionNpmModuleCatalog(), {}, {},
                 scenario == 4 ? &failing_factory : nullptr, reserved);
             std::shared_ptr<arrow::RecordBatch> output;
             if (scenario >= 2 && scenario <= 4) {
@@ -15042,7 +14949,7 @@ void TestFamilyProtocolRuntime() {
             std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
             assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema,
                                                     &runtime, budget, new ProtocolLabelMatcher(&labels),
-                                                    npm::ProductionNpmModuleCatalogV1(),
+                                                    npm::ProductionNpmModuleCatalog(),
                                                     std::make_unique<RecordingResultConsumer>(&trace))
                        .error == npm::NpmBasicTaskRuntimeError::kNone);
             std::shared_ptr<arrow::RecordBatch> output;
@@ -15097,35 +15004,36 @@ void TestFamilyBasicSessionResultsAndSelection() {
     }
     assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic","observing":"session_ipv6"})", &parsed).error ==
            npm::NpmBasicTaskConfigError::kObservingFeatureDisabled);
-    assert(npm::ParseNpmBasicTaskConfig("{}", &parsed, false, npm::ProductionNpmModuleCatalogV1(), "default", true)
-               .error == npm::NpmBasicTaskConfigError::kNone);
+    assert(
+        npm::ParseNpmBasicTaskConfig("{}", &parsed, false, npm::ProductionNpmModuleCatalog(), "default", true).error ==
+        npm::NpmBasicTaskConfigError::kNone);
     assert(parsed.features.observing_entity.empty());
-    assert(npm::ParseNpmBasicTaskConfig(R"({"observing":""})", &parsed, false, npm::ProductionNpmModuleCatalogV1(),
+    assert(npm::ParseNpmBasicTaskConfig(R"({"observing":""})", &parsed, false, npm::ProductionNpmModuleCatalog(),
                                         "default", true)
                .error == npm::NpmBasicTaskConfigError::kInvalidObserving);
 
     {
-        class Managed final : public npm::INpmManagedResultConsumerV1 {
+        class Managed final : public npm::INpmManagedResultConsumer {
          public:
             explicit Managed(ResultConsumerTrace* trace) : delegate_(trace) {}
-            int Consume(const npm::NpmResultContextV1& context, const npm::NpmEntityDescriptorV1& entity,
+            int Consume(const npm::NpmResultContext& context, const npm::NpmEntityDescriptor& entity,
                         const arrow::RecordBatch& rows) override {
                 return delegate_.Consume(context, entity, rows);
             }
             int Finish() override { return delegate_.Finish(); }
             void Cancel() noexcept override { delegate_.Cancel(); }
-            int FailRun(const npm::NpmResultFailureV1&) override { return EIO; }
+            int FailRun(const npm::NpmResultFailure&) override { return EIO; }
             std::string ResultJson() const override { return "{}"; }
 
          private:
             RecordingResultConsumer delegate_;
         };
-        class Factory final : public npm::INpmResultConsumerFactoryV1 {
+        class Factory final : public npm::INpmResultConsumerFactory {
          public:
             explicit Factory(ResultConsumerTrace* trace) : trace_(trace) {}
-            int Create(const npm::NpmResultContextV1&, const std::vector<npm::NpmEntityDescriptorV1>& entities,
+            int Create(const npm::NpmResultContext&, const std::vector<npm::NpmEntityDescriptor>& entities,
                        std::shared_ptr<npm::INpmTaskBudget>,
-                       std::unique_ptr<npm::INpmManagedResultConsumerV1>* output) override {
+                       std::unique_ptr<npm::INpmManagedResultConsumer>* output) override {
                 assert(entities.size() == 4);
                 *output = std::make_unique<Managed>(trace_);
                 return 0;
@@ -15143,14 +15051,14 @@ void TestFamilyBasicSessionResultsAndSelection() {
         SinglePoolQuerier querier(&pool);
         npm::NpmBasicTaskConfig config;
         assert(npm::ParseNpmBasicTaskConfig(R"({"features":"basic,session"})", &config, false,
-                                            npm::ProductionNpmModuleCatalogV1(), "default", true)
+                                            npm::ProductionNpmModuleCatalog(), "default", true)
                    .error == npm::NpmBasicTaskConfigError::kNone);
         config.analysis.result_mode = npm::NpmResultMode::kFinal;
         auto budget = std::make_shared<npm::NpmTaskBudget>(config.analysis);
         std::shared_ptr<arrow::Schema> schema;
         std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
         assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
-                                                budget, nullptr, npm::ProductionNpmModuleCatalogV1(), {},
+                                                budget, nullptr, npm::ProductionNpmModuleCatalog(), {},
                                                 "managed-family", &factory)
                    .error == npm::NpmBasicTaskRuntimeError::kNone);
         assert(schema->num_fields() == 0);
@@ -15187,7 +15095,7 @@ void TestFamilyBasicSessionResultsAndSelection() {
         std::shared_ptr<arrow::Schema> schema;
         std::unique_ptr<npm::NpmBasicTaskRuntime> runtime;
         assert(npm::NpmBasicTaskRuntime::Create(config, &querier, flowsql::packet::PacketSchema(), &schema, &runtime,
-                                                budget, nullptr, npm::ProductionNpmModuleCatalogV1(),
+                                                budget, nullptr, npm::ProductionNpmModuleCatalog(),
                                                 std::make_unique<RecordingResultConsumer>(&trace))
                    .error == npm::NpmBasicTaskRuntimeError::kNone);
         const auto p4 = MakeIpv4TcpPacket("1.2.3.4", 50000, "255.255.255.255", 443, {0xff}, kTcpAck, 100);
@@ -15227,32 +15135,32 @@ void TestFamilyBasicSessionResultsAndSelection() {
 }
 
 void TestSafeResultProgress() {
-    flowsql::CaptureSourceSetV2 sources;
-    flowsql::CaptureQueueIdentityV1 first, second_input;
+    flowsql::CaptureSourceSet sources;
+    flowsql::CaptureQueueIdentity first, second_input;
     first.source_id = 1;
     second_input.source_id = 2;
     sources.inputs = {first, second_input};
-    flowsql::CaptureProgressTrackerV2 tracker(sources);
-    flowsql::CaptureProgressV1 a, b;
+    flowsql::MultiInputCaptureProgressTracker tracker(sources);
+    flowsql::CaptureProgress a, b;
     a.source_id = 1;
     b.source_id = 2;
     a.fact_sequence = b.fact_sequence = 1;
     a.capture_time_ns = 100;
     b.capture_time_ns = 80;
     a.source_idle_confirmed = b.source_idle_confirmed = true;
-    a.backlog = b.backlog = flowsql::CaptureBacklogV1::kEmpty;
-    assert(tracker.Observe({a}) == flowsql::CaptureProgressErrorV1::kNone && !tracker.CommonCandidateNs());
-    assert(tracker.Observe({b}) == flowsql::CaptureProgressErrorV1::kNone && tracker.CommonCandidateNs() == 80);
+    a.backlog = b.backlog = flowsql::CaptureBacklog::kEmpty;
+    assert(tracker.Observe({a}) == flowsql::CaptureProgressError::kNone && !tracker.CommonCandidateNs());
+    assert(tracker.Observe({b}) == flowsql::CaptureProgressError::kNone && tracker.CommonCandidateNs() == 80);
     b.fact_sequence = 2;
-    b.backlog = flowsql::CaptureBacklogV1::kPresent;
-    assert(tracker.Observe({b}) == flowsql::CaptureProgressErrorV1::kNone && !tracker.CommonCandidateNs());
+    b.backlog = flowsql::CaptureBacklog::kPresent;
+    assert(tracker.Observe({b}) == flowsql::CaptureProgressError::kNone && !tracker.CommonCandidateNs());
     b.fact_sequence = 3;
-    b.backlog = flowsql::CaptureBacklogV1::kUnknown;
-    assert(tracker.Observe({b}) == flowsql::CaptureProgressErrorV1::kNone && !tracker.CommonCandidateNs());
+    b.backlog = flowsql::CaptureBacklog::kUnknown;
+    assert(tracker.Observe({b}) == flowsql::CaptureProgressError::kNone && !tracker.CommonCandidateNs());
     b.fact_sequence = 4;
-    b.backlog = flowsql::CaptureBacklogV1::kEmpty;
+    b.backlog = flowsql::CaptureBacklog::kEmpty;
     b.capture_time_ns = 150;
-    assert(tracker.Observe({b}) == flowsql::CaptureProgressErrorV1::kNone && tracker.CommonCandidateNs() == 100);
+    assert(tracker.Observe({b}) == flowsql::CaptureProgressError::kNone && tracker.CommonCandidateNs() == 100);
     constexpr int64_t second = npm::kNpmNanosecondsPerSecond;
     ContextDictionary dictionary;
     ContextProtocol protocol(&dictionary);
@@ -15470,23 +15378,23 @@ int main(int argc, char** argv) {
     TestNpmBasicTaskConfigRejectsMappingsAndRanges();
     TestNpmBasicTaskConfigNumericBoundaries();
     TestNpmBasicTaskConfigFeatureSelection();
-    TestNpmBasicTaskConfigNormalizesParametersV1();
+    TestNpmBasicTaskConfigNormalizesParameters();
     TestNpmPeriodicConfigurationParsing();
-    TestNpmBasicTaskConfigRejectsParameterSourceConflicts();
+    TestNpmBasicTaskConfigRejectsFlatTuningFields();
     TestNpmBasicTaskConfigPreservesParameterFailuresAtomically();
-    TestNpmParametersV1OwnsCanonicalConfig();
-    TestNpmParametersV1RejectsEnvelopeAndDuplicatesAtomically();
-    TestNpmParametersV1ConsumesOnlyEnabledAvailableModules();
-    TestNpmParametersV1UsesCoreNamespaceExclusively();
-    TestNpmParametersV1ValidatesCoreAndConditionalLabeling();
+    TestNpmParametersOwnsCanonicalConfig();
+    TestNpmParametersRejectsEnvelopeAndDuplicatesAtomically();
+    TestNpmParametersConsumesOnlyEnabledAvailableModules();
+    TestNpmParametersUsesCoreNamespaceExclusively();
+    TestNpmParametersValidatesCoreAndConditionalLabeling();
     TestNpmTaskBudgetLimitsAtomicityAndIsolation();
     TestNpmTaskBudgetConcurrentAccountingAndSharedLifetime();
-    TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Offline();
+    TestNpmBasicTaskRuntimeCurrentInstancesOffline();
     TestNpmBasicTaskRuntimeCreatesExclusiveInitialState();
     TestNpmBasicTaskRuntimeSelectsObservedSchema();
     TestNpmBasicTaskRuntimeRejectsOpenFailuresAtomically();
     TestNpmBasicTaskRuntimeRealtimeCapabilityInjection();
-    TestNpmBasicTaskRuntimeMatchesLegacyAndParametersV1Realtime();
+    TestNpmBasicTaskRuntimeCurrentInstancesRealtime();
     TestNpmBasicPeriodicOrderDiagnosticsAndStalledBudget();
     TestNpmBasicTaskRuntimeRealtimeMaintenanceAndRevisions();
     TestNpmBasicTaskRuntimeRoutesRealtimePeriodicSnapshots();
@@ -15514,7 +15422,7 @@ int main(int argc, char** argv) {
     TestNpmBasicFinalUsesGenerationTime();
     TestNpmBasicOperatorCopiesConfigAndOwnsTasks();
     TestNpmBasicTaskObservingSchemaProbe();
-    TestNpmBasicTaskProbeMatchesLegacyAndParametersV1();
+    TestNpmBasicTaskProbeOwnsCurrentConfiguration();
     TestNpmBasicTaskOpenProcessAndFlush();
     TestNpmBasicTaskRejectsInvalidCallsAtomically();
     TestNpmBasicTaskReportsConfigurationFailurePaths();
@@ -15525,6 +15433,6 @@ int main(int argc, char** argv) {
     TestNpmBasicTaskMethodPreconditions();
     TestNpmBasicTaskCancelBeforeOpenAndDuringProcess();
     TestNpmBasicTaskFlushAppliesPendingCaptureFacts();
-    TestNpmBasicV2PluginExports();
+    TestNpmBasicPluginExports();
     return 0;
 }

@@ -88,15 +88,15 @@ std::shared_ptr<arrow::RecordBatch> SampleBatch(int64_t rows = 4) {
         {number_array, name_array});
 }
 
-class FakeProvider : public IDataFrameSnapshotProviderV1 {
+class FakeProvider : public IDataFrameSnapshotProvider {
  public:
-    int List(std::vector<DataFrameSourceV1>* output, std::string* error) override {
+    int List(std::vector<DataFrameSource>* output, std::string* error) override {
         output->push_back({"source-a", "dataframe.sample"});
         output->push_back({"source-b", "dataframe.other"});
         (void)error;
         return 0;
     }
-    int Acquire(const DataFrameSnapshotRequestV1& request, DataFrameSnapshotV1* output, std::string* error) override {
+    int Acquire(const DataFrameSnapshotRequest& request, DataFrameSnapshot* output, std::string* error) override {
         if (slow) {
             for (int i = 0; i < 100 && !request.cancelled->load(); ++i) std::this_thread::sleep_for(10ms);
             *error = "CANCELLED";
@@ -135,8 +135,8 @@ class FakeProvider : public IDataFrameSnapshotProviderV1 {
 class Server {
  public:
     explicit Server(catalog::DataFrameTransferStore& store) {
-        server_.Get("/channels/dataframe/exploration/v1/sources", [this](const auto&, auto& response) {
-            std::vector<DataFrameSourceV1> sources;
+        server_.Get("/channels/dataframe/exploration/sources", [this](const auto&, auto& response) {
+            std::vector<DataFrameSource> sources;
             std::string error;
             provider_->List(&sources, &error);
             std::string body = "{\"sources\":[";
@@ -146,16 +146,16 @@ class Server {
             }
             response.set_content(body + "]}", "application/json");
         });
-        server_.Post("/channels/dataframe/exploration/v1/snapshots/acquire", [this, &store](const auto& request,
-                                                                                            auto& response) {
+        server_.Post("/channels/dataframe/exploration/snapshots/acquire", [this, &store](const auto& request,
+                                                                                         auto& response) {
             rapidjson::Document document;
             document.Parse(request.body.c_str());
-            DataFrameSnapshotRequestV1 snapshot_request;
+            DataFrameSnapshotRequest snapshot_request;
             snapshot_request.source_id = document["source_id"].GetString();
             snapshot_request.max_bytes = document["max_bytes"].GetUint64();
             snapshot_request.deadline = std::chrono::steady_clock::now() + 10s;
             snapshot_request.cancelled = cancelled_;
-            catalog::DataFrameTransferInfoV1 info;
+            catalog::DataFrameTransferInfo info;
             std::string error;
             const int status =
                 store.Acquire(*provider_, document["request_id"].GetString(), snapshot_request, &info, &error);
@@ -173,7 +173,7 @@ class Server {
                     "\"nullable\":true},{\"name\":\"label\",\"type\":\"string\",\"nullable\":true}]}",
                 "application/json");
         });
-        server_.Post("/channels/dataframe/exploration/v1/snapshots/release",
+        server_.Post("/channels/dataframe/exploration/snapshots/release",
                      [&store](const auto& request, auto& response) {
                          rapidjson::Document document;
                          document.Parse(request.body.c_str());
@@ -224,7 +224,7 @@ void TestTransferLifecycle() {
     CHECK(error.empty());
     CHECK(sources.size() == 2 && sources[0].label == "dataframe.sample");
 
-    visualization::DataFrameSnapshotInfoV1 snapshot;
+    visualization::DataFrameSnapshotInfo snapshot;
     CHECK(client.Acquire("request-1", "source-a", 8 * 1024 * 1024, nullptr, 5000, &snapshot, &error));
     CHECK(error.empty());
     CHECK(snapshot.row_count == 4 && snapshot.ipc_bytes > 0);
@@ -253,7 +253,7 @@ void TestTransferLifecycle() {
     CHECK(!client.Lookup(snapshot.snapshot_id, nullptr, nullptr));
 
     // A second transfer survives an abrupt publisher shutdown: the mapping owns the pages.
-    visualization::DataFrameSnapshotInfoV1 survivor;
+    visualization::DataFrameSnapshotInfo survivor;
     CHECK(client.Acquire("request-2", "source-a", 8 * 1024 * 1024, nullptr, 5000, &survivor, &error));
     store.Stop();
     server.Stop();
@@ -282,7 +282,7 @@ void TestBudgetsAndCancellation() {
     visualization::DataFrameTransferClient client;
     CHECK(client.Init(server.Base(), shared, 5000));
     std::string error;
-    visualization::DataFrameSnapshotInfoV1 snapshot;
+    visualization::DataFrameSnapshotInfo snapshot;
 
     CHECK(!client.Acquire("request-big", "source-a", 64, nullptr, 5000, &snapshot, &error));
     CHECK(error == "SNAPSHOT_LIMIT");
@@ -309,8 +309,8 @@ void TestBudgetsAndCancellation() {
 
     // Transfer leases expire and retire their objects without a receiver.
     provider.retain_bytes = 1024;
-    catalog::DataFrameTransferInfoV1 info;
-    DataFrameSnapshotRequestV1 request;
+    catalog::DataFrameTransferInfo info;
+    DataFrameSnapshotRequest request;
     request.source_id = "source-a";
     request.max_bytes = 8 * 1024 * 1024;
     request.deadline = std::chrono::steady_clock::now() + 5s;
@@ -340,20 +340,20 @@ void TestDataPlaneUnavailable() {
     const auto root = TemporaryDirectory();
     catalog::DataFrameTransferStore store;
     std::string error;
-    DataFrameSnapshotRequestV1 request;
+    DataFrameSnapshotRequest request;
     request.source_id = "source-a";
     request.max_bytes = 1024;
     request.deadline = std::chrono::steady_clock::now() + 1s;
     request.cancelled = std::make_shared<std::atomic_bool>(false);
     FakeProvider provider;
-    catalog::DataFrameTransferInfoV1 info;
+    catalog::DataFrameTransferInfo info;
     CHECK(store.Acquire(provider, "request", request, &info, &error) != 0);
     CHECK(error == "DATA_PLANE_UNAVAILABLE");
 
     visualization::DataFrameTransferClient client;
     CHECK(!client.Init("http://127.0.0.1:1", "", 1000));
     CHECK(!client.Available());
-    visualization::DataFrameSnapshotInfoV1 snapshot;
+    visualization::DataFrameSnapshotInfo snapshot;
     CHECK(!client.Acquire("request", "source-a", 1024, nullptr, 1000, &snapshot, &error));
     CHECK(error == "DATA_PLANE_UNAVAILABLE");
 

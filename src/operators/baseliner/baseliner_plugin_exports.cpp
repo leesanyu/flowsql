@@ -5,15 +5,15 @@
 #include "baseliner_operator.h"
 #include "operator_contract_package.h"
 
-extern "C" const char* flowsql_operator_data_contract_v1(int index) {
+extern "C" const char* flowsql_operator_data_contract(int index) {
     return index == 0 ? flowsql::contracts::kBaselinerContract : nullptr;
 }
-extern "C" int flowsql_abi_version() { return flowsql::kCppOperatorPluginAbiVersionV2; }
+extern "C" int flowsql_abi_version() { return flowsql::kCppOperatorPluginAbiVersion; }
 extern "C" int flowsql_operator_count() { return 1; }
-extern "C" int flowsql_describe_operator(int index, flowsql::CppOperatorDescriptorV2* output) {
-    if (index != 0 || !output || output->struct_size < flowsql::kCppOperatorDescriptorV2Size) return EINVAL;
-    *output = {flowsql::kCppOperatorDescriptorV2Size, "explore", "baseliner",
-               "Configured baseline evaluation and forecast", flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V2};
+extern "C" int flowsql_describe_operator(int index, flowsql::CppOperatorDescriptor* output) {
+    if (index != 0 || !output || output->struct_size < flowsql::kCppOperatorDescriptorSize) return EINVAL;
+    *output = {flowsql::kCppOperatorDescriptorSize, "explore", "baseliner",
+               "Configured baseline evaluation and forecast", flowsql::IID_BLOCK_TRANSFORM_OPERATOR};
     return 0;
 }
 extern "C" void* flowsql_create_operator_capability(int index, flowsql::IQuerier* querier) {
@@ -22,14 +22,14 @@ extern "C" void* flowsql_create_operator_capability(int index, flowsql::IQuerier
         auto provider = std::make_unique<flowsql::baseliner::BaselinerOperator>();
         provider->SetHostManagedContract();
         if (provider->Load(querier) != 0 || provider->Start() != 0) return nullptr;
-        return static_cast<flowsql::IBlockTransformOperatorV2*>(provider.release());
+        return static_cast<flowsql::IBlockTransformOperator*>(provider.release());
     } catch (...) {
         return nullptr;
     }
 }
 extern "C" void flowsql_destroy_operator_capability(int index, void* capability) {
     if (index != 0 || !capability) return;
-    auto* provider = static_cast<flowsql::IBlockTransformOperatorV2*>(capability);
+    auto* provider = static_cast<flowsql::IBlockTransformOperator*>(capability);
     try {
         delete provider;
     } catch (...) {
@@ -37,7 +37,6 @@ extern "C" void flowsql_destroy_operator_capability(int index, void* capability)
 }
 BEGIN_PLUGIN_REGIST(flowsql::baseliner::BaselinerOperator)
 ____INTERFACE(flowsql::IID_PLUGIN, flowsql::IPlugin)
-____INTERFACE(flowsql::IID_BLOCK_TRANSFORM_OPERATOR_V2, flowsql::IBlockTransformOperatorV2)
-____INTERFACE(flowsql::IID_BLOCK_TRANSFORM_EXECUTION_POLICY_PROVIDER_V1,
-              flowsql::IBlockTransformExecutionPolicyProviderV1)
+____INTERFACE(flowsql::IID_BLOCK_TRANSFORM_OPERATOR, flowsql::IBlockTransformOperator)
+____INTERFACE(flowsql::IID_BLOCK_TRANSFORM_EXECUTION_POLICY_PROVIDER, flowsql::IBlockTransformExecutionPolicyProvider)
 END_PLUGIN_REGIST()

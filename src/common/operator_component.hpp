@@ -28,15 +28,15 @@ inline std::string ComponentDigest(const void* symbol) {
     return dataset::Hex(digest, length);
 }
 inline int RegisterComponent(IQuerier* querier, const std::string& category, const std::string& name,
-                             const std::string& digest, const std::string& declaration,
-                             OperatorComponentContractV1* out, DataSemanticsErrorV1* error) {
+                             const std::string& digest, const std::string& declaration, OperatorComponentContract* out,
+                             DataSemanticsError* error) {
     *out = {category, name, digest, "", "", declaration.empty() ? "missing" : "unavailable"};
     auto* catalog =
-        querier ? static_cast<IOperatorContractCatalogV1*>(querier->First(IID_OPERATOR_CONTRACT_CATALOG_V1)) : nullptr;
+        querier ? static_cast<IOperatorContractCatalog*>(querier->First(IID_OPERATOR_CONTRACT_CATALOG)) : nullptr;
     if (!catalog) return dataset::Fail(error, "UNAVAILABLE", "operator contract catalog unavailable");
-    OperatorComponentContractV1 previous;
+    OperatorComponentContract previous;
     if (catalog->Lookup(category.c_str(), name.c_str(), &previous, error)) return -1;
-    std::vector<PreparedOperatorContractV1> prepared;
+    std::vector<PreparedOperatorContract> prepared;
     if (catalog->Prepare({{category, name, digest, declaration, previous.component_revision}}, &prepared, error) ||
         catalog->Commit(prepared, error))
         return -1;

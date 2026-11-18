@@ -23,18 +23,18 @@
 namespace flowsql {
 
 /** Reusable per-reader admission and buffer-lifetime guard; the backend still owns its RX buffers. */
-class CaptureReaderStateV1 final {
+class CaptureReaderState final {
  public:
     enum class Terminal : uint8_t { kOpen, kEof, kCancelled, kError };
 
-    CaptureReaderStateV1() = default;
-    CaptureReaderStateV1(const CaptureReaderStateV1&) = delete;
-    CaptureReaderStateV1& operator=(const CaptureReaderStateV1&) = delete;
+    CaptureReaderState() = default;
+    CaptureReaderState(const CaptureReaderState&) = delete;
+    CaptureReaderState& operator=(const CaptureReaderState&) = delete;
 
-    int Open(const CaptureQueueIdentityV1& identity, const CaptureReaderLimitsV1& limits) {
+    int Open(const CaptureQueueIdentity& identity, const CaptureReaderLimits& limits) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (opened_) return EALREADY;
-        if (ValidateCaptureReaderDescriptionV1(identity, limits) != CaptureDescriptionErrorV1::kNone) return EINVAL;
+        if (ValidateCaptureReaderDescription(identity, limits) != CaptureDescriptionError::kNone) return EINVAL;
         if (identity.generation <= last_generation_) return EINVAL;
         source_name_ = identity.source_name;
         identity_ = identity;
@@ -189,9 +189,9 @@ class CaptureReaderStateV1 final {
         counters_.available_mask |= kCaptureSourceDroppedPacketsAvailable;
     }
 
-    int ReadCounters(CaptureCountersV1* output) const {
-        if (!output || output->struct_size < sizeof(CaptureCountersV1) ||
-            output->contract_version != kCaptureBlockStreamContractVersionV1) {
+    int ReadCounters(CaptureCounters* output) const {
+        if (!output || output->struct_size < sizeof(CaptureCounters) ||
+            output->contract_version != kCaptureFactContractVersion) {
             return EINVAL;
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -221,9 +221,9 @@ class CaptureReaderStateV1 final {
     uint64_t last_generation_ = 0;
     Terminal terminal_ = Terminal::kOpen;
     std::string source_name_;
-    CaptureQueueIdentityV1 identity_;
-    CaptureReaderLimitsV1 limits_;
-    CaptureCountersV1 counters_;
+    CaptureQueueIdentity identity_;
+    CaptureReaderLimits limits_;
+    CaptureCounters counters_;
     std::optional<uint64_t> last_packet_sequence_;
     std::unordered_map<const arrow::RecordBatch*, Lease> outstanding_;
     std::unordered_map<uint64_t, const arrow::RecordBatch*> active_slots_;

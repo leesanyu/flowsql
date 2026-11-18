@@ -173,9 +173,9 @@ class Runtime {
         return result->status;
     }
 
-    flowsql::IConfigChannelRegistryV1* Registry() const {
+    flowsql::IConfigChannelRegistry* Registry() const {
         auto* registry =
-            static_cast<flowsql::IConfigChannelRegistryV1*>(loader_->First(flowsql::IID_CONFIG_CHANNEL_REGISTRY_V1));
+            static_cast<flowsql::IConfigChannelRegistry*>(loader_->First(flowsql::IID_CONFIG_CHANNEL_REGISTRY));
         assert(registry);
         return registry;
     }
@@ -198,7 +198,7 @@ struct BoundTask {
     uint64_t value = 0;
     unsigned resolve_calls = 0;
 
-    void Open(flowsql::IConfigChannelRegistryV1* registry) {
+    void Open(flowsql::IConfigChannelRegistry* registry) {
         assert(library);
         std::string error;
         ++resolve_calls;
@@ -228,7 +228,7 @@ std::string Read(const fs::path& path) {
 
 std::string TenThousandLabelConfig() {
     std::string yaml =
-        "api_version: flowsql.io/flow-labeling/v1alpha1\n"
+        "api_version: flowsql.io/flow-labeling\n"
         "kind: FlowLabelingSet\n"
         "labels:\n";
     yaml.reserve(2 * 1024 * 1024);
@@ -251,7 +251,7 @@ std::string TenThousandLabelConfig() {
 
 #ifdef FLOWSQL_CONFIG_LABELING_E2E
 std::string FlowLabelingConfig(uint32_t label_id) {
-    return "api_version: flowsql.io/flow-labeling/v1alpha1\n"
+    return "api_version: flowsql.io/flow-labeling\n"
            "kind: FlowLabelingSet\n"
            "spec:\n"
            "  engine:\n"
@@ -344,14 +344,14 @@ std::shared_ptr<arrow::RecordBatch> LabelingInput() {
 void RunPublishedLabelingTask(Runtime* runtime, const char* reference, uint32_t expected_label) {
     flowsql::test::ScopedSharedLibrary library(FLOWSQL_NPM_BASIC_PLUGIN_PATH);
     assert(library);
-    auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityV2Fn>(
-        library.Symbol(flowsql::kCppOperatorPluginCreateCapabilityV2Symbol));
-    auto destroy = reinterpret_cast<flowsql::CppOperatorPluginDestroyCapabilityV2Fn>(
-        library.Symbol(flowsql::kCppOperatorPluginDestroyCapabilityV2Symbol));
+    auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityFn>(
+        library.Symbol(flowsql::kCppOperatorPluginCreateCapabilitySymbol));
+    auto destroy = reinterpret_cast<flowsql::CppOperatorPluginDestroyCapabilityFn>(
+        library.Symbol(flowsql::kCppOperatorPluginDestroyCapabilitySymbol));
     assert(create != nullptr && destroy != nullptr);
     void* capability = create(0, runtime->Querier());
     assert(capability != nullptr);
-    auto* provider = static_cast<flowsql::IBlockTransformOperatorV1*>(capability);
+    auto* provider = static_cast<flowsql::IBlockTransformOperator*>(capability);
 
     const std::string task_id = std::string("config-labeling-") + reference;
     const std::string with_json =
@@ -359,19 +359,19 @@ void RunPublishedLabelingTask(Runtime* runtime, const char* reference, uint32_t 
             R"({"input_namespace":"pcapfile.capture","source_domains":"0:77","features":"basic,labeling","observing":"basic_ipv4",)") +
         R"("parameters":"{\"schema_version\":1,\"core\":{\"labeling\":\")" + reference + R"(\"}}"})";
     const std::string filter_plan = R"({"version":1,"root":null})";
-    flowsql::BlockTransformTaskConfigV1 config;
+    flowsql::BlockTransformTaskConfig config;
     config.task_id = task_id.c_str();
     config.with_params_json = with_json.c_str();
     config.pushed_filter_plan_json = filter_plan.c_str();
-    flowsql::IBlockTransformTaskV1* task = nullptr;
+    flowsql::IBlockTransformTask* task = nullptr;
     assert(provider->CreateTask(config, &task) == 0 && task != nullptr);
     std::shared_ptr<arrow::Schema> output_schema;
     assert(task->Open(flowsql::packet::PacketSchema(), &output_schema) == 0);
     assert(output_schema != nullptr && output_schema->GetFieldByName("primary_label_id") != nullptr);
 
-    std::vector<flowsql::BlockTransformOutputV1> outputs;
+    std::vector<flowsql::BlockTransformOutput> outputs;
     assert(task->ProcessBlock(LabelingInput(), 1, &outputs) ==
-           static_cast<int>(flowsql::BlockTransformStatusV1::kContinue));
+           static_cast<int>(flowsql::BlockTransformStatus::kContinue));
     outputs.clear();
     assert(task->Flush(&outputs) == 0 && outputs.size() == 1);
     const auto& output = outputs[0].batch;
@@ -440,7 +440,7 @@ void Seed(const fs::path& root) {
 
         const std::string ten_k_labels = TenThousandLabelConfig();
         assert(ten_k_labels.size() > 512 * 1024 && ten_k_labels.size() < kMaxContentBytes);
-        const std::string labeling_schema = "flowsql.io/flow-labeling/v1alpha1";
+        const std::string labeling_schema = "flowsql.io/flow-labeling";
         const auto ten_k_result =
             Parse(runtime.Post("publish", PublishRequest("ten-k-labels", 0, ten_k_labels, "yaml", 0, labeling_schema)));
         flowsql::ConfigChannelSnapshot ten_k_snapshot;

@@ -16,8 +16,8 @@
 
 namespace flowsql::npm {
 
-enum class NpmHttp1OutcomeV1 : uint8_t { kMatched, kRequestOnly, kResponseOnly };
-enum class NpmHttp1IncompleteReasonV1 : uint8_t {
+enum class NpmHttp1Outcome : uint8_t { kMatched, kRequestOnly, kResponseOnly };
+enum class NpmHttp1IncompleteReason : uint8_t {
     kNone,
     kNoPendingRequest,
     kResponseNotObservedByDeadline,
@@ -32,64 +32,64 @@ enum class NpmHttp1IncompleteReasonV1 : uint8_t {
     kSessionEnd,
 };
 
-const char* NpmHttp1OutcomeNameV1(NpmHttp1OutcomeV1 outcome) noexcept;
-const char* NpmHttp1IncompleteReasonNameV1(NpmHttp1IncompleteReasonV1 reason) noexcept;
+const char* NpmHttp1OutcomeName(NpmHttp1Outcome outcome) noexcept;
+const char* NpmHttp1IncompleteReasonName(NpmHttp1IncompleteReason reason) noexcept;
 
 /** Owned transaction facts. The later result encoder supplies normalized endpoint columns. */
-struct NpmHttp1TransactionResultV1 {
+struct NpmHttp1TransactionResult {
     uint64_t entity_instance_id = 0;
     uint64_t session_id = 0;
-    NpmHttp1OutcomeV1 outcome = NpmHttp1OutcomeV1::kRequestOnly;
-    NpmHttp1IncompleteReasonV1 incomplete_reason = NpmHttp1IncompleteReasonV1::kNone;
+    NpmHttp1Outcome outcome = NpmHttp1Outcome::kRequestOnly;
+    NpmHttp1IncompleteReason incomplete_reason = NpmHttp1IncompleteReason::kNone;
     int64_t observed_at_ns = 0;
     std::optional<NpmPacketDirection> request_direction;
     std::optional<NpmPacketDirection> response_direction;
-    std::optional<NpmHttp1MessageHeadV1> request;
-    std::optional<NpmHttp1MessageHeadV1> response;
+    std::optional<NpmHttp1MessageHead> request;
+    std::optional<NpmHttp1MessageHead> response;
     std::optional<int64_t> latency_ns;
     uint32_t informational_count = 0;
 };
 
 /** Task-private FIFO tracker; successful calls append rows, errors abort the enclosing task. */
-class NpmHttp1TransactionTrackerV1 final {
+class NpmHttp1TransactionTracker final {
  public:
-    explicit NpmHttp1TransactionTrackerV1(NpmHttp1ConfigV1 config, std::shared_ptr<INpmTaskBudget> budget = {})
+    explicit NpmHttp1TransactionTracker(NpmHttp1Config config, std::shared_ptr<INpmTaskBudget> budget = {})
         : config_(std::move(config)), budget_(std::move(budget)) {}
-    ~NpmHttp1TransactionTrackerV1() { Abort(); }
+    ~NpmHttp1TransactionTracker() { Abort(); }
 
-    int OnStreamEvent(uint64_t session_id, NpmPacketDirection direction, NpmTcpStreamOriginV1 origin,
-                      const NpmTcpStreamEventV1& event, int64_t observed_at_ns,
-                      std::vector<NpmHttp1TransactionResultV1>* results);
-    int OnCaptureWatermark(std::optional<int64_t> watermark_ns, std::vector<NpmHttp1TransactionResultV1>* results);
+    int OnStreamEvent(uint64_t session_id, NpmPacketDirection direction, NpmTcpStreamOrigin origin,
+                      const NpmTcpStreamEvent& event, int64_t observed_at_ns,
+                      std::vector<NpmHttp1TransactionResult>* results);
+    int OnCaptureWatermark(std::optional<int64_t> watermark_ns, std::vector<NpmHttp1TransactionResult>* results);
     std::optional<int64_t> NextEventDeadlineNs() const noexcept;
     int OnSessionEnd(uint64_t session_id, NpmSessionEndReason reason, int64_t observed_at_ns,
-                     std::vector<NpmHttp1TransactionResultV1>* results);
+                     std::vector<NpmHttp1TransactionResult>* results);
     void Abort() noexcept;
-    void ReleaseResults(std::vector<NpmHttp1TransactionResultV1>* results) noexcept;
+    void ReleaseResults(std::vector<NpmHttp1TransactionResult>* results) noexcept;
     size_t ActiveSessions() const noexcept { return sessions_.size(); }
 
  private:
     struct Pending {
         uint64_t entity_instance_id = 0;
         uint64_t request_message_id = 0;
-        NpmHttp1MessageHeadV1 request;
+        NpmHttp1MessageHead request;
         bool request_body_complete = false;
         std::optional<int64_t> deadline_ns;
         uint32_t informational_count = 0;
         uint64_t response_message_id = 0;
-        std::optional<NpmHttp1MessageHeadV1> response;
+        std::optional<NpmHttp1MessageHead> response;
         bool response_body_complete = false;
     };
     struct Orphan {
         uint64_t entity_instance_id = 0;
         uint64_t message_id = 0;
-        NpmHttp1MessageHeadV1 response;
+        NpmHttp1MessageHead response;
         bool body_complete = false;
     };
     struct Session {
         explicit Session(uint32_t max_header_bytes)
-            : framers{NpmHttp1FramerV1(max_header_bytes), NpmHttp1FramerV1(max_header_bytes)} {}
-        std::array<NpmHttp1FramerV1, 2> framers;
+            : framers{NpmHttp1Framer(max_header_bytes), NpmHttp1Framer(max_header_bytes)} {}
+        std::array<NpmHttp1Framer, 2> framers;
         std::optional<NpmPacketDirection> request_direction;
         std::deque<Pending> pending;
         std::optional<Orphan> orphan;
@@ -99,15 +99,15 @@ class NpmHttp1TransactionTrackerV1 final {
     };
 
     int ProcessMessages(uint64_t session_id, Session* session, NpmPacketDirection direction,
-                        const std::vector<NpmHttp1FramedMessageV1>& messages, int64_t observed_at_ns,
-                        std::vector<NpmHttp1TransactionResultV1>* results);
+                        const std::vector<NpmHttp1FramedMessage>& messages, int64_t observed_at_ns,
+                        std::vector<NpmHttp1TransactionResult>* results);
     int EmitReady(uint64_t session_id, Session* session, int64_t observed_at_ns,
-                  std::vector<NpmHttp1TransactionResultV1>* results);
-    void Seal(uint64_t session_id, Session* session, NpmHttp1IncompleteReasonV1 first_reason,
-              NpmHttp1IncompleteReasonV1 later_reason, int64_t observed_at_ns,
-              std::vector<NpmHttp1TransactionResultV1>* results);
-    NpmHttp1ResponseContextV1 ResponseContext(const Session& session,
-                                              const std::vector<NpmHttp1FramedMessageV1>& messages) const;
+                  std::vector<NpmHttp1TransactionResult>* results);
+    void Seal(uint64_t session_id, Session* session, NpmHttp1IncompleteReason first_reason,
+              NpmHttp1IncompleteReason later_reason, int64_t observed_at_ns,
+              std::vector<NpmHttp1TransactionResult>* results);
+    NpmHttp1ResponseContext ResponseContext(const Session& session,
+                                            const std::vector<NpmHttp1FramedMessage>& messages) const;
     uint64_t NextId() noexcept;
     bool Reserve(uint64_t bytes);
     void Release(uint64_t bytes) noexcept;
@@ -115,7 +115,7 @@ class NpmHttp1TransactionTrackerV1 final {
     uint64_t PendingCharge() const noexcept;
     uint64_t EventCharge(size_t bytes) const noexcept;
 
-    NpmHttp1ConfigV1 config_;
+    NpmHttp1Config config_;
     std::shared_ptr<INpmTaskBudget> budget_;
     std::map<uint64_t, Session> sessions_;
     uint64_t next_id_ = 1;

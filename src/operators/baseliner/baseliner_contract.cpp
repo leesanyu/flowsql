@@ -628,7 +628,7 @@ TaskConfig Parse(const Json& obj) {
         auto scope = OptStr(*state, "release_scope", "/state_policy", "RuntimeOnly");
         OneOf(scope, {"RuntimeOnly", "AllState"}, "/state_policy/release_scope");
         c.state.release_scope =
-            scope == "RuntimeOnly" ? BaselineStateReleaseScopeV1::kRuntimeOnly : BaselineStateReleaseScopeV1::kAllState;
+            scope == "RuntimeOnly" ? BaselineStateReleaseScope::kRuntimeOnly : BaselineStateReleaseScope::kAllState;
         c.state.idle_timeout_ms = U(*state, "idle_timeout_ms", "/state_policy", 0, 0, 365ULL * 86400000);
         c.state.maintenance_max_releases = U(*state, "maintenance_max_releases", "/state_policy", 16, 1, 4096);
         c.state.maintenance_max_bytes =
@@ -775,7 +775,7 @@ ConfigStatus NormalizeInlineConfig(std::string_view json, std::string_view sql_s
         return error.status;
     }
 }
-ConfigStatus ResolveConfig(std::string_view with_json, std::string_view sql_source, IConfigChannelRegistryV1* registry,
+ConfigStatus ResolveConfig(std::string_view with_json, std::string_view sql_source, IConfigChannelRegistry* registry,
                            ConfigSnapshot* output) {
     if (!output) return {ConfigError::kValue, "", "null output"};
     try {

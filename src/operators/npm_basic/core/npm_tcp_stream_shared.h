@@ -13,8 +13,8 @@ namespace flowsql::npm {
 /** Names and consumers belong to the frozen task catalog and outlive the direction and its failure report. */
 struct NpmTcpStreamSubscription {
     std::string_view module_id;
-    INpmTcpStreamConsumerV1* consumer = nullptr;
-    INpmResultEmitterV1* emitter = nullptr;
+    INpmTcpStreamConsumer* consumer = nullptr;
+    INpmResultEmitter* emitter = nullptr;
 };
 
 struct NpmTcpStreamFailure {
@@ -31,7 +31,7 @@ struct NpmTcpStreamFailure {
  */
 class NpmTcpStreamSharedDirection final : private INpmTcpStreamEventSink {
  public:
-    static NpmTcpStreamError Create(NpmTcpStreamConfigV1 config, std::shared_ptr<INpmTaskBudget> budget,
+    static NpmTcpStreamError Create(NpmTcpStreamConfig config, std::shared_ptr<INpmTaskBudget> budget,
                                     uint64_t session_id, NpmPacketDirection direction,
                                     Span<const NpmTcpStreamSubscription> subscriptions,
                                     std::unique_ptr<NpmTcpStreamSharedDirection>* output,
@@ -42,7 +42,7 @@ class NpmTcpStreamSharedDirection final : private INpmTcpStreamEventSink {
 
     NpmTcpStreamError Push(const NpmSessionView& session, const NpmPacketView& packet);
     NpmTcpStreamError AdvanceWatermark(const NpmSessionView& session, int64_t watermark_ns);
-    NpmTcpStreamError End(const NpmSessionView& session, NpmTcpStreamEndReasonV1 reason,
+    NpmTcpStreamError End(const NpmSessionView& session, NpmTcpStreamEndReason reason,
                           std::optional<NpmSessionEndReason> session_reason, int64_t observed_at_ns);
     void Abort() noexcept;
 
@@ -53,7 +53,7 @@ class NpmTcpStreamSharedDirection final : private INpmTcpStreamEventSink {
 
  private:
     struct Event {
-        NpmTcpStreamEventV1 view;
+        NpmTcpStreamEvent view;
         std::unique_ptr<uint8_t[]> data;
         uint64_t allocated_bytes = 0;
         size_t remaining = 0;
@@ -78,12 +78,11 @@ class NpmTcpStreamSharedDirection final : private INpmTcpStreamEventSink {
     class Cursor;
     class Emitter;
 
-    NpmTcpStreamSharedDirection(NpmTcpStreamConfigV1 config, std::shared_ptr<INpmTaskBudget> budget,
-                                uint64_t session_id, NpmPacketDirection direction);
-    void Initialize(NpmTcpStreamConfigV1 config, Span<const NpmTcpStreamSubscription> subscriptions);
-    int Emit(const NpmTcpStreamEventV1& event) override;
-    int EmitOwned(const NpmTcpStreamEventV1& event, std::unique_ptr<uint8_t[]>& data,
-                  uint64_t allocated_bytes) override;
+    NpmTcpStreamSharedDirection(NpmTcpStreamConfig config, std::shared_ptr<INpmTaskBudget> budget, uint64_t session_id,
+                                NpmPacketDirection direction);
+    void Initialize(NpmTcpStreamConfig config, Span<const NpmTcpStreamSubscription> subscriptions);
+    int Emit(const NpmTcpStreamEvent& event) override;
+    int EmitOwned(const NpmTcpStreamEvent& event, std::unique_ptr<uint8_t[]>& data, uint64_t allocated_bytes) override;
     void Reserve(uint64_t bytes);
     void Latch(NpmTcpStreamError error, std::string_view consumer = {}) noexcept;
     bool Begin(const NpmSessionView& session);

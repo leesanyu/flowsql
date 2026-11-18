@@ -107,8 +107,8 @@ bool Trained(const RollingState& state, const BootstrapSeed* seed) {
 }  // namespace model
 
 template <class T>
-BaselineModelParametersV1 CheckpointAccess::ScalarParameters(const T& task, const std::string& key, uint64_t limit) {
-    BaselineModelParametersV1 result;
+BaselineModelParameters CheckpointAccess::ScalarParameters(const T& task, const std::string& key, uint64_t limit) {
+    BaselineModelParameters result;
     const auto found = task.rolling_states_.find(key);
     if (found == task.rolling_states_.end()) return result;
     const auto& state = found->second;
@@ -131,9 +131,9 @@ BaselineModelParametersV1 CheckpointAccess::ScalarParameters(const T& task, cons
     result.parameters_json = std::move(stream.content);
     return result;
 }
-BaselineModelParametersV1 CheckpointAccess::RelationParameters(const BaselineRelationTask& task, const std::string& key,
-                                                               uint64_t limit) {
-    BaselineModelParametersV1 result;
+BaselineModelParameters CheckpointAccess::RelationParameters(const BaselineRelationTask& task, const std::string& key,
+                                                             uint64_t limit) {
+    BaselineModelParameters result;
     checkpoint::BoundedStream stream(limit);
     checkpoint::Writer w(stream);
     model::FieldsWriter f{w};
@@ -208,11 +208,11 @@ BaselineModelParametersV1 CheckpointAccess::RelationParameters(const BaselineRel
     return result;
 }
 BaselineStatus CheckpointAccess::ModelParameters(const BaselineTaskBase& task, std::string_view key, uint64_t limit,
-                                                 BaselineModelParametersV1* output) {
-    if (!output || key.empty() || !limit || limit > kBaselineCheckpointMaxBytesV1 || task.closed_)
+                                                 BaselineModelParameters* output) {
+    if (!output || key.empty() || !limit || limit > kBaselineCheckpointMaxBytes || task.closed_)
         return BaselineStatus::kInvalidArgument;
     try {
-        BaselineModelParametersV1 result;
+        BaselineModelParameters result;
         if (auto* t = dynamic_cast<const BaselineValueTask*>(&task))
             result = ScalarParameters(*t, std::string(key), limit);
         else if (auto* t = dynamic_cast<const BaselineRatioTask*>(&task))
@@ -228,7 +228,7 @@ BaselineStatus CheckpointAccess::ModelParameters(const BaselineTaskBase& task, s
     }
 }
 BaselineStatus BaselineTaskBase::ExportModelParameters(std::string_view key, uint64_t limit,
-                                                       BaselineModelParametersV1* output) const {
+                                                       BaselineModelParameters* output) const {
     return CheckpointAccess::ModelParameters(*this, key, limit, output);
 }
 }  // namespace flowsql::baseline

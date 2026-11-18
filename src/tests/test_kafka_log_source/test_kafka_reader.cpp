@@ -19,19 +19,19 @@ StructuredConfig Config() {
     return ParseStructuredConfig(Parse(
         R"({"encoding":"json","entity":"events","max_batch_rows":1,"fields":[{"name":"value","path":"/v","type":"int64","nullable":false}]})"));
 }
-struct Fake final : IKafkaClientSessionV1, IKafkaConsumerSessionV1 {
-    KafkaBindingSnapshotV1 snapshot;
+struct Fake final : IKafkaClientSession, IKafkaConsumerSession {
+    KafkaBindingSnapshot snapshot;
     bool cancelled = false;
     int commits = 0, commit_error = 0, polls = 0;
-    const KafkaBindingSnapshotV1& Snapshot() const override { return snapshot; }
+    const KafkaBindingSnapshot& Snapshot() const override { return snapshot; }
     int Probe(uint32_t, std::string*) override { return ENOTSUP; }
     void Cancel() override { cancelled = true; }
     int QueryInterface(const Guid&, void** output) override {
-        *output = static_cast<IKafkaConsumerSessionV1*>(this);
+        *output = static_cast<IKafkaConsumerSession*>(this);
         return 0;
     }
     int StartConsumer(const char*, uint32_t) override { return 0; }
-    int PollMessage(uint32_t, KafkaMessageV1* message) override {
+    int PollMessage(uint32_t, KafkaMessage* message) override {
         if (cancelled) return ECANCELED;
         if (polls++) return EAGAIN;
         message->value = R"({"v":42})";
@@ -40,7 +40,7 @@ struct Fake final : IKafkaClientSessionV1, IKafkaConsumerSessionV1 {
         message->offset = 19;
         return 0;
     }
-    int CommitOffsets(const std::vector<KafkaOffsetV1>& offsets, uint32_t) override {
+    int CommitOffsets(const std::vector<KafkaOffset>& offsets, uint32_t) override {
         assert(offsets.size() == 1 && offsets[0].partition == 2 && offsets[0].next_offset == 20);
         ++commits;
         return commit_error;
@@ -108,7 +108,7 @@ int main() {
         auto* definition = plugin.Get("kafka", "metrics");
         assert(definition);
         assert(plugin.Get("packet", "metrics") == nullptr);
-        BlockStreamReaderConfigV1 request;
+        BlockStreamReaderConfig request;
         request.task_id = "test";
         request.source_category = "kafka";
         request.source_name = "metrics";

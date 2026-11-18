@@ -45,24 +45,22 @@ struct Gate {
 struct Trace {
     std::atomic<int> closed{0}, cancelled{0}, in_cancel{0}, channel_destroyed{0};
 };
-struct Session final : IDatabaseAtomicSessionV1 {
-    std::shared_ptr<IDatabaseAtomicSessionV1> inner;
+struct Session final : IDatabaseAtomicSession {
+    std::shared_ptr<IDatabaseAtomicSession> inner;
     std::shared_ptr<Trace> trace;
     Gate* gate;
-    Session(std::shared_ptr<IDatabaseAtomicSessionV1> s, std::shared_ptr<Trace> t, Gate* g)
+    Session(std::shared_ptr<IDatabaseAtomicSession> s, std::shared_ptr<Trace> t, Gate* g)
         : inner(std::move(s)), trace(std::move(t)), gate(g) {}
-    DatabaseAtomicStatusV1 Begin() override { return inner->Begin(); }
-    DatabaseAtomicStatusV1 ExecutePrepared(const char* s, const DatabaseParameterV1* p, size_t n,
-                                           uint64_t* rows) override {
+    DatabaseAtomicStatus Begin() override { return inner->Begin(); }
+    DatabaseAtomicStatus ExecutePrepared(const char* s, const DatabaseParameter* p, size_t n, uint64_t* rows) override {
         return inner->ExecutePrepared(s, p, n, rows);
     }
-    DatabaseAtomicStatusV1 CreateReader(const char* s, const DatabaseParameterV1* p, size_t n,
-                                        IBatchReader** r) override {
+    DatabaseAtomicStatus CreateReader(const char* s, const DatabaseParameter* p, size_t n, IBatchReader** r) override {
         return inner->CreateReader(s, p, n, r);
     }
-    DatabaseAtomicStatusV1 ReadDatabaseTime(int64_t* t) override { return inner->ReadDatabaseTime(t); }
-    DatabaseCommitResultV1 Commit() override { return inner->Commit(); }
-    DatabaseAtomicStatusV1 Rollback() override { return inner->Rollback(); }
+    DatabaseAtomicStatus ReadDatabaseTime(int64_t* t) override { return inner->ReadDatabaseTime(t); }
+    DatabaseCommitResult Commit() override { return inner->Commit(); }
+    DatabaseAtomicStatus Rollback() override { return inner->Rollback(); }
     void Cancel() override {
         ++trace->in_cancel;
         ++trace->cancelled;
@@ -76,7 +74,7 @@ struct Session final : IDatabaseAtomicSessionV1 {
         inner->Close();
     }
 };
-struct Channel final : IDatabaseChannel, IDatabaseAtomicTargetV1 {
+struct Channel final : IDatabaseChannel, IDatabaseAtomicTarget {
     std::shared_ptr<IDatabaseChannel> real;
     std::shared_ptr<Trace> trace = std::make_shared<Trace>();
     Gate* cancel_gate = nullptr;
@@ -109,10 +107,10 @@ struct Channel final : IDatabaseChannel, IDatabaseAtomicTargetV1 {
     }
     int ExecuteSql(const char* q) override { return real->ExecuteSql(q); }
     const char* GetLastError() override { return real->GetLastError(); }
-    DatabaseAtomicStatusV1 AcquireAtomicSession(const DatabaseAtomicSessionOptionsV1& options,
-                                                std::shared_ptr<IDatabaseAtomicSessionV1>* out) override {
-        std::shared_ptr<IDatabaseAtomicSessionV1> session;
-        auto status = dynamic_cast<IDatabaseAtomicTargetV1*>(real.get())->AcquireAtomicSession(options, &session);
+    DatabaseAtomicStatus AcquireAtomicSession(const DatabaseAtomicSessionOptions& options,
+                                              std::shared_ptr<IDatabaseAtomicSession>* out) override {
+        std::shared_ptr<IDatabaseAtomicSession> session;
+        auto status = dynamic_cast<IDatabaseAtomicTarget*>(real.get())->AcquireAtomicSession(options, &session);
         if (status.ok()) {
             acquired = true;
             *out = std::make_shared<Session>(std::move(session), trace, cancel_gate);
@@ -214,11 +212,11 @@ struct Execution {
     Gate process, cancel;
     std::atomic<bool> submitted{false}, completed{false};
 };
-struct Transform final : IBlockTransformOperatorV1 {
+struct Transform final : IBlockTransformOperator {
     IBaselineService* service;
     Execution* execution;
     Transform(IBaselineService* s, Execution* e) : service(s), execution(e) {}
-    struct Task final : IBlockTransformTaskV1 {
+    struct Task final : IBlockTransformTask {
         Transform* provider;
         std::shared_ptr<IBaselineValueTask> baseline;
         std::atomic<bool> processing{false};
@@ -228,19 +226,19 @@ struct Transform final : IBlockTransformOperatorV1 {
             return 0;
         }
         int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>&, int64_t,
-                         std::vector<BlockTransformOutputV1>*) override {
+                         std::vector<BlockTransformOutput>*) override {
             auto created = provider->service->CreateValueTask(task_config, BaselineSerializationFormat::kJson);
             assert(created.first == BaselineStatus::kOk);
             baseline = std::move(created.second);
-            assert(baseline->SubmitObservation({"series", 1, 100, 1}, {}).status == BaselineStatus::kOk);
+            assert(baseline->SubmitObservation({"series", 1, 100, 1}, {}).result.status == BaselineStatus::kOk);
             processing = true;
             provider->execution->process.Block();
             // The real Scheduler Stop is blocked inside Cancel, so Baseline must still be open.
-            assert(baseline->SubmitObservation({"series", 2, 101, 1}, {}).status == BaselineStatus::kOk);
+            assert(baseline->SubmitObservation({"series", 2, 101, 1}, {}).result.status == BaselineStatus::kOk);
             provider->execution->submitted = true;
             return -1;
         }
-        int Flush(std::vector<BlockTransformOutputV1>*) override { return 0; }
+        int Flush(std::vector<BlockTransformOutput>*) override { return 0; }
         void Cancel() override {
             if (processing) provider->execution->cancel.Block();
         }
@@ -256,11 +254,11 @@ struct Transform final : IBlockTransformOperatorV1 {
     std::string Category() const override { return "safety"; }
     std::string Name() const override { return "hold"; }
     std::string Description() const override { return "deterministic active Baseline task"; }
-    int CreateTask(const BlockTransformTaskConfigV1&, IBlockTransformTaskV1** task) override {
+    int CreateTask(const BlockTransformTaskConfig&, IBlockTransformTask** task) override {
         *task = new Task(this);
         return 0;
     }
-    void ReleaseTask(IBlockTransformTaskV1* task) override { delete task; }
+    void ReleaseTask(IBlockTransformTask* task) override { delete task; }
 };
 struct Source final : IBlockStreamChannel {
     std::atomic<bool> cancelled{false};
@@ -285,7 +283,7 @@ struct Source final : IBlockStreamChannel {
     void Cancel() override { cancelled = true; }
     std::shared_ptr<arrow::RecordBatch> batch;
 };
-struct Factory final : IBlockStreamFactory, IBlockStreamReaderFactoryV1 {
+struct Factory final : IBlockStreamFactory, IBlockStreamReaderFactory {
     Source source;
     IBlockStreamChannel* Get(const char* category, const char* name) override {
         return std::string(category) == "safety" && std::string(name) == "input" ? &source : nullptr;
@@ -293,7 +291,7 @@ struct Factory final : IBlockStreamFactory, IBlockStreamReaderFactoryV1 {
     void List(std::function<void(const char*, const char*, IBlockStreamChannel*)> fn) override {
         fn("safety", "input", &source);
     }
-    int CreateReader(const BlockStreamReaderConfigV1&, IBlockStreamChannel** out) override {
+    int CreateReader(const BlockStreamReaderConfig&, IBlockStreamChannel** out) override {
         auto* reader = new Source;
         reader->batch = source.batch;
         *out = reader;
@@ -303,14 +301,15 @@ struct Factory final : IBlockStreamFactory, IBlockStreamReaderFactoryV1 {
 };
 void RuntimeSafety(const std::string& root, bool scheduler_first, bool direct_unload) {
     auto* loader = PluginLoader::Single();
-    const char* libs[] = {"libflowsql_builtin.so", "libflowsql_catalog.so",
+    const char* libs[] = {"libflowsql_config_channel.so", "libflowsql_builtin.so", "libflowsql_catalog.so",
                           scheduler_first ? "libflowsql_scheduler.so" : "libflowsql_baseline.so",
                           scheduler_first ? "libflowsql_baseline.so" : "libflowsql_scheduler.so"};
     const std::string catalog = "data_dir=" + root + ";operator_db_path=" + root + "/operators.db";
     const char* scheduler = "batch_workers=1;stream_workers=1";
-    const char* options[] = {nullptr, catalog.c_str(), scheduler_first ? scheduler : nullptr,
+    const std::string semantics_option = "db_path=" + root + "/semantics.db";
+    const char* options[] = {semantics_option.c_str(), nullptr, catalog.c_str(), scheduler_first ? scheduler : nullptr,
                              scheduler_first ? nullptr : scheduler};
-    assert(loader->Load(".", libs, options, 4) == 0);
+    assert(loader->Load(".", libs, options, 5) == 0);
     auto* runtime = loader->First(IID_PLUGIN_TASK_RUNTIME);
     assert(runtime);
     auto* control = static_cast<ISchedulerControlService*>(loader->First(IID_SCHEDULER_CONTROL_SERVICE));
@@ -324,8 +323,8 @@ void RuntimeSafety(const std::string& root, bool scheduler_first, bool direct_un
     for (const auto& field : schema->fields()) arrays.push_back(arrow::MakeArrayOfNull(field->type(), 1).ValueOrDie());
     factory.source.batch = arrow::RecordBatch::Make(schema, 1, arrays);
     loader->Regist(IID_BLOCK_STREAM_FACTORY, static_cast<IBlockStreamFactory*>(&factory));
-    loader->Regist(IID_BLOCK_STREAM_READER_FACTORY_V1, static_cast<IBlockStreamReaderFactoryV1*>(&factory));
-    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR_V1, static_cast<IBlockTransformOperatorV1*>(&transform));
+    loader->Regist(IID_BLOCK_STREAM_READER_FACTORY, static_cast<IBlockStreamReaderFactory*>(&factory));
+    loader->Regist(IID_BLOCK_TRANSFORM_OPERATOR, static_cast<IBlockTransformOperator*>(&transform));
     assert(loader->StartAll() == 0);
     std::string response;
     assert(

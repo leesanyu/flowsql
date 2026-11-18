@@ -3,6 +3,6 @@
 #pragma once
 #include <framework/interfaces/idatabase_published_source.h>
 namespace flowsql::database {
-std::shared_ptr<IDatabasePublishedProgressReaderV1> MakeNpmPublishedProgressReader(IDatabaseChannel* source,
-                                                                                   DatabaseSnapshotOptionsV1 options);
+std::shared_ptr<IDatabasePublishedProgressReader> MakeNpmPublishedProgressReader(IDatabaseChannel* source,
+                                                                                 DatabaseSnapshotOptions options);
 }

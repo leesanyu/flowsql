@@ -17,8 +17,8 @@ namespace flowsql::catalog {
 
 // Catalog-private implementation; public channel and snapshot vtables remain unchanged.
 class LazyDataFrameChannel : public IAppendableDataFrameChannel,
-                             public IDataFrameSnapshotReaderV1,
-                             public IDataFrameMetadataV1 {
+                             public IDataFrameSnapshotReader,
+                             public IDataFrameMetadata {
  public:
     using Check = std::function<bool()>;
     using Loader = std::function<std::shared_ptr<IDataFrameChannel>(std::istream&, const std::string&, const Check&)>;
@@ -40,15 +40,15 @@ class LazyDataFrameChannel : public IAppendableDataFrameChannel,
     int Write(IDataFrame* frame) override;
     int Append(IDataFrame* frame) override;
     int Read(IDataFrame* frame) override;
-    int CaptureSnapshot(const DataFrameSnapshotRequestV1& request, std::shared_ptr<arrow::RecordBatch>* output,
+    int CaptureSnapshot(const DataFrameSnapshotRequest& request, std::shared_ptr<arrow::RecordBatch>* output,
                         uint64_t* retained_bytes, std::string* error) override;
     Metadata Describe();
-    DataFrameMetadataV1 DescribeMetadata() override;
+    DataFrameMetadata DescribeMetadata() override;
     void Retire();
     int RenameFile(const std::string& path, const std::string& name);
 
  private:
-    std::shared_ptr<IDataFrameChannel> EnsureLoaded(const DataFrameSnapshotRequestV1* request, std::string* error);
+    std::shared_ptr<IDataFrameChannel> EnsureLoaded(const DataFrameSnapshotRequest* request, std::string* error);
     void ClearLocked();
     std::string path_, name_, state_ = "unloaded", error_;
     Loader loader_;

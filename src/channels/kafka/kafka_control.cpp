@@ -125,10 +125,10 @@ Json Plugin::DefinitionsJson() {
         R"({"encodings":["json"],"types":["bool","int64","uint64","float64","utf8"],"offset_reset":["earliest","latest","error"],"commit_policy":["after_success","none"],"requires_async":true})");
     result.AddMember("structured_source", rapidjson::Value(source, a), a);
     auto packet_source = Parse(
-        R"({"encodings":["flowsql_packet_v1"],"max_inputs":32,"link_types":[1],"partitions":1,"offset_reset":["earliest","latest","error"],"commit_policy":["after_success","none"],"requires_async":true,"read_permission":"unverified"})");
+        R"({"encodings":["flowsql_packet"],"max_inputs":32,"link_types":[1],"partitions":1,"offset_reset":["earliest","latest","error"],"commit_policy":["after_success","none"],"requires_async":true,"read_permission":"unverified"})");
     result.AddMember("packet_source", rapidjson::Value(packet_source, a), a);
     auto packet_sink = Parse(
-        R"({"encodings":["flowsql_packet_v1"],"max_inputs":32,"link_types":[1],"partitions":1,"partition":0,"requires_async":true,"write_permission":"unverified"})");
+        R"({"encodings":["flowsql_packet"],"max_inputs":32,"link_types":[1],"partitions":1,"partition":0,"requires_async":true,"write_permission":"unverified"})");
     result.AddMember("packet_sink", rapidjson::Value(packet_sink, a), a);
     auto sink = Parse(
         R"({"encodings":["json"],"record_kinds":["event","upsert"],"envelope_version":1,"max_key_fields":8,"types":["bool","int8","int16","int32","int64","uint8","uint16","uint32","uint64","float32","float64","utf8","binary","fixed_size_binary","timestamp"],"write_permission":"unverified"})");
@@ -365,7 +365,7 @@ void Plugin::AttachVerification(Json& result, const std::string& kind) {
         row.AddMember("verification", rapidjson::Value(verification, result.GetAllocator()), result.GetAllocator());
     }
 }
-int Plugin::DescribeChannel(const char* name, KafkaChannelDescriptionV1* description) {
+int Plugin::DescribeChannel(const char* name, KafkaChannelDescription* description) {
     if (!name || !description) return EINVAL;
     *description = {};
     try {

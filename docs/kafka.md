@@ -724,7 +724,7 @@ tools/test.sh doctor --filter '^test_kafka_' --location docker
 
 ## 原始包 packet source
 
-适用于同一远端探针的原始 Ethernet 包汇聚；先在探针侧保留原始字节和 Capture V2 的同次进度，再按 `flowsql_packet_v1` 发布。不能用日志、五元组或统计指标代替包，也不接收 PCAP 文件、JSON、Base64 或 Arrow IPC。接收端以 NPI 解码原始字节，输出规范 PacketFamily Schema，不信任远端层偏移缓存。
+适用于同一远端探针的原始 Ethernet 包汇聚；先在探针侧保留原始字节和 采集轮询 的同次进度，再按 `flowsql_packet` 发布。不能用日志、五元组或统计指标代替包，也不接收 PCAP 文件、JSON、Base64 或 Arrow IPC。接收端以 NPI 解码原始字节，输出规范 PacketFamily Schema，不信任远端层偏移缓存。
 
 先预建单分区、`cleanup.policy=delete` 的 Topic；部署方负责核实保留期与删除策略，客户端会检查分区数，不查询或修改 Topic 配置。同一 stream_id/Topic 只允许一个活动发布者，全部输入队列共享此分区；完整双向会话不能按方向分散到不同实例。独立分析使用不同消费组。准备已存在的连接 `collector` 后，通过 Web「Kafka 通道 → 原始 packet」或 `channels/add` 保存：
 
@@ -733,7 +733,7 @@ tools/test.sh doctor --filter '^test_kafka_' --location docker
   "name":"remote_packets", "connection_name":"collector", "role":"source",
   "topic":"probe_a_packets", "consumer_group":"npm_probe_a", "payload_kind":"packet",
   "payload_options":{"source":{
-    "encoding":"flowsql_packet_v1", "stream_id":"probe-a", "observation_domain_id":"7",
+    "encoding":"flowsql_packet", "stream_id":"probe-a", "observation_domain_id":"7",
     "inputs":[{"source_id":0,"queue_id":0,"source_name":"probe-a/eth0"}],
     "offset_reset":"earliest", "commit_policy":"after_success",
     "max_packets_per_batch":256, "max_bytes_per_batch":1048576,
@@ -766,7 +766,7 @@ INTO mysql.npm;
 
 持续分析只支持两段数据库托管目标；协议模块 DNS/HTTP1/TLS 仍需现有 labeling 配置，见 [NPM 模块参数](npm.md#共享与模块参数)。来源能力自动选择 realtime、绑定配置中的观测域；显式冲突的 run_mode/source_domains 拒绝。WHERE 使用 PacketFamily 精确 residual 过滤，不向 Kafka 下推；过滤后的空批仍传递同次进度与确认身份。
 
-### flowsql_packet_v1 外部发布格式
+### flowsql_packet 外部发布格式
 
 Kafka key 必须是 stream_id 的原始 UTF-8 字节，不允许 null。value 所有整数为大端、逐字段编码，有符号数用二补码；不使用 C++ struct 内存布局。每消息对应一个采集 poll，允许零包但有事实，两者皆零不发送。
 
@@ -831,7 +831,7 @@ assert len(value) == 84
 
 ## 网卡原始包 packet sink
 
-适用于探针采集、本地发布、集中 NPM 分析的部署。探针 Scheduler 加载 Kafka、NetAdapter 和 NPI 插件，先按 [网卡通道说明](netadapter.md#通道与生产-sql) 创建 `netadapter.edge_capture`。首版要求完整 Capture V2、Ethernet 和 PacketFamily Schema；网卡 backend、接口、snaplen、buffer_mib 继续在网卡通道配置。采集进程须能访问接口并具有所选 backend 的权限；AF_PACKET 需要 CAP_NET_RAW，配置接口或混杂模式还需相应网络管理权限。Docker 内采集的接口必须实际位于该容器可见的网络命名空间，普通桥接容器不会自动看到宿主物理接口。
+适用于探针采集、本地发布、集中 NPM 分析的部署。探针 Scheduler 加载 Kafka、NetAdapter 和 NPI 插件，先按 [网卡通道说明](netadapter.md#通道与生产-sql) 创建 `netadapter.edge_capture`。首版要求完整 采集轮询、Ethernet 和 PacketFamily Schema；网卡 backend、接口、snaplen、buffer_mib 继续在网卡通道配置。采集进程须能访问接口并具有所选 backend 的权限；AF_PACKET 需要 CAP_NET_RAW，配置接口或混杂模式还需相应网络管理权限。Docker 内采集的接口必须实际位于该容器可见的网络命名空间，普通桥接容器不会自动看到宿主物理接口。
 
 部署者预建单分区、`cleanup.policy=delete` 的专用 Topic，并保证同一 Topic/stream_id 只有一个活动发布者。packet sink 在打开时查询 Topic 配置，身份须有元数据和 `DESCRIBE_CONFIGS` 权限；随后实际发送还需 WRITE 权限。不会创建 Topic、改配置或 ACL；ready、连接验证通过均不代表 WRITE 已验证。分区固定为0，分区数或拓扑变化使任务失败；不按 flow、方向或输入队列拆分发布。
 
@@ -842,7 +842,7 @@ assert len(value) == 84
   "name":"packet_upload", "connection_name":"delivery", "role":"sink",
   "topic":"probe_a_packets", "payload_kind":"packet",
   "payload_options":{"sink":{
-    "encoding":"flowsql_packet_v1", "stream_id":"probe-a",
+    "encoding":"flowsql_packet", "stream_id":"probe-a",
     "max_message_bytes":2097152, "queue_max_messages":64,
     "queue_max_bytes":8388608, "delivery_timeout_ms":10000
   }}

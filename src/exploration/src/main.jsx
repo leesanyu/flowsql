@@ -331,7 +331,7 @@ function Workspace() {
   }, [context])
   useEffect(() => {
     let live = true
-    Promise.all([fetch('/api/visualization/v1/capabilities').then((r) => { if (!r.ok) throw new Error('数据探索服务不可用'); return r.json() }),
+    Promise.all([fetch('/api/visualization/capabilities').then((r) => { if (!r.ok) throw new Error('数据探索服务不可用'); return r.json() }),
       fetch('/exploration/manifest.json', { cache: 'no-store' }).then((r) => r.json())])
       .then(([api, manifest]) => {
         if (!live) return

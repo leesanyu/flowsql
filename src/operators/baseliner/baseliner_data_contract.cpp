@@ -22,7 +22,7 @@ std::string PathToken(const std::string& text) {
     return escaped;
 }
 int Inputs(IQuerier* querier, const TaskConfig& config, const Value& request, Json* response,
-           DataSemanticsErrorV1* error) {
+           DataSemanticsError* error) {
     auto& a = response->GetAllocator();
     Value inputs(rapidjson::kArrayType), shapes(rapidjson::kArrayType);
     const auto dot = config.source.find('.'), next = config.source.find('.', dot + 1);
@@ -111,7 +111,7 @@ int Inputs(IQuerier* querier, const TaskConfig& config, const Value& request, Js
 }
 }  // namespace
 int ResolveContractInvocation(IQuerier* querier, const ConfigSnapshot* frozen, const char* text, std::string* result,
-                              DataSemanticsErrorV1* error) {
+                              DataSemanticsError* error) {
     using namespace dataset;
     if (result) result->clear();
     if (error) *error = {};
@@ -135,7 +135,7 @@ int ResolveContractInvocation(IQuerier* querier, const ConfigSnapshot* frozen, c
             return 0;
         }
         auto* registry =
-            querier ? static_cast<IConfigChannelRegistryV1*>(querier->First(IID_CONFIG_CHANNEL_REGISTRY_V1)) : nullptr;
+            querier ? static_cast<IConfigChannelRegistry*>(querier->First(IID_CONFIG_CHANNEL_REGISTRY)) : nullptr;
         const bool preflight =
             request["execution_context"].HasMember("preflight") && request["execution_context"]["preflight"].IsTrue();
         if (preflight && !request["inputs"].Empty()) {
@@ -166,8 +166,8 @@ int ResolveContractInvocation(IQuerier* querier, const ConfigSnapshot* frozen, c
                 Set(response["execution_context"], "source", source, a);
             }
         }
-        struct Resolution : IConfigChannelRegistryV1 {
-            IConfigChannelRegistryV1* registry = nullptr;
+        struct Resolution : IConfigChannelRegistry {
+            IConfigChannelRegistry* registry = nullptr;
             bool attempted = false;
             int rc = 0;
             int Resolve(const char* ref, ConfigChannelSnapshot* out, std::string* error) override {

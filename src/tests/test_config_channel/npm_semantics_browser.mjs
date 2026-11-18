@@ -22,6 +22,20 @@ const api = async (operation, payload) => {
   const result = await fetch(base + '/api/semantics/v1/' + operation, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
   const value = await result.json(); assert.equal(result.status, 200, JSON.stringify(value)); return value.data
 }
+async function seedCompleteDictionary(locator, before, edits, name) {
+  const document = structuredClone(before.description.document)
+  for (const field of document.fields) Object.assign(field, edits[field.name] || {})
+  const saved = await api('save', { kind: 'dictionary', name, expected_current_revision: 0, document })
+  const observed = await api('channels/describe', { locator })
+  const reference = before.basis.binding_ref?.match(/^binding\.(.+)@(\d+)$/)
+  const field_map = Object.fromEntries(document.fields.map(field => [field.field_id, field.name]))
+  await api('channels/apply', {
+    locator, name: reference?.[1] || name, expected_current_revision: reference ? Number(reference[2]) : 0,
+    dictionary_ref: saved.exact_reference, field_map,
+    source_basis: Object.fromEntries(['object_key', 'source_revision', 'schema_fingerprint'].map(key => [key, observed.source_snapshot[key]])), confirmations: before.checks.required_confirmations
+  })
+}
+
 async function checkEditors(document) {
   const groups = await ev(`(()=>{const p=document.querySelector('[data-testid=channel-description]');return [...p.querySelectorAll('.description-editor')].map(e=>{const r=e.getBoundingClientRect();return {label:e.querySelector('textarea').getAttribute('aria-label'),notes:[...e.querySelectorAll('.supplement')].map(n=>n.textContent),bordered:parseFloat(getComputedStyle(e).borderTopWidth)>0&&parseFloat(getComputedStyle(e).borderBottomWidth)>0,contained:[...e.querySelectorAll('textarea,.supplement')].every(n=>{const b=n.getBoundingClientRect();return b.x>=r.x&&b.right<=r.right+1&&b.y>=r.y&&b.bottom<=r.bottom+1})}})})()`)
   const expected = [
@@ -59,11 +73,11 @@ try {
   await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__requests=[];const f=window.fetch;window.fetch=function(u,o){window.__requests.push({url:String(u),body:o?.body});return f.apply(this,arguments)};const x=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){this.__url=u;return x.apply(this,arguments)};const s=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(body){window.__requests.push({url:this.__url,body});return s.apply(this,arguments)}` })
   await send('Page.navigate', { url: base + '/channels' })
   await text('数据库通道'); await click('数据库通道'); await text('example'); await click('浏览')
-  await text('npm_dns_transaction_ipv4_final_v1'); await click('npm_dns_transaction_ipv4_final_v1')
+  await text('npm_dns_transaction_ipv4_final'); await click('npm_dns_transaction_ipv4_final')
   await wait(() => ev('!!document.querySelector("[aria-label=对象说明]:enabled")'), 'editable NPM description')
   assert.deepEqual(await ev('[...document.querySelectorAll("[data-testid=channel-description] .fields thead th")].map(e=>(e.querySelector("span")||e).textContent.trim())'), ['字段 / 类型', '单位', '时间', '关联'])
   assert.equal(await ev('document.querySelector("[aria-label=一行表示什么]").value.includes("DNS")'), true)
-  const locator = { kind: 'database_table', type: 'sqlite', name: 'example', table: 'npm_dns_transaction_ipv4_final_v1' }
+  const locator = { kind: 'database_table', type: 'sqlite', name: 'example', table: 'npm_dns_transaction_ipv4_final' }
   let before = await api('describe', { target: { kind: 'channel', locator } })
   const fresh = structuredClone(before)
   for (const name of ['observed_at', 'query_at_ns', 'response_at_ns'])
@@ -80,19 +94,19 @@ try {
   assert.equal(reads.filter(r => /database\/preview|batch\/execute|stream\/execute/.test(r.url)).length, 0)
   assert.equal(reads.filter(r => /semantics\/v1\/(save|channels\/save-description)$/.test(r.url)).length, 0)
   await writeFile(evidence + '/browser-read.png', Buffer.from((await send('Page.captureScreenshot', { format: 'png' })).data, 'base64'))
-  // Persist an existing spelling and an unsupported imported definition through the real API.
+  // Preserve complete imported declarations through dictionary save and source-checked binding apply.
   const oldTime = structuredClone(fresh.description.document.fields.find(f => f.name === 'observed_at').time_semantics)
-  oldTime.origin = 'imported'; oldTime.value.epoch.value = 'Unix epoch'
+  oldTime.origin = 'imported'; oldTime.value.epoch.value = '1970-01-01T00:00:00Z'
   const unsupported = structuredClone(fresh.description.document.fields.find(f => f.name === 'response_at_ns').time_semantics)
   unsupported.origin = 'imported'; unsupported.value.epoch.value = 'custom epoch'
   unsupported.value.unit.origin = 'imported'
   unsupported.value.unit.value = { code: 'minute', label: '分钟' }
-  await api('channels/save-description', { locator, basis: before.basis, changes: { fields: { observed_at: { time_semantics: oldTime }, response_at_ns: { time_semantics: unsupported, unit: unsupported.value.unit } } }, confirmations: before.checks.required_confirmations || [] })
+  await seedCompleteDictionary(locator, before, { observed_at: { time_semantics: oldTime }, response_at_ns: { time_semantics: unsupported, unit: unsupported.value.unit } }, 'fixture.npm.imported')
   await mouse("document.querySelector('[data-testid=channel-description] .heading-actions button:last-child')")
   await wait(() => ev(`!!document.querySelector('[data-description-field="response_at_ns"] .field-time [role=status]')`), 'imported time reread')
   await wait(() => ev('!!document.querySelector("[aria-label=对象说明]:enabled")'), 'refreshed time definitions')
   before = await api('describe', { target: { kind: 'channel', locator } })
-  assert.equal(before.description.document.fields.find(f => f.name === 'observed_at').time_semantics.value.epoch.value, 'Unix epoch')
+  assert.equal(before.description.document.fields.find(f => f.name === 'observed_at').time_semantics.value.epoch.value, '1970-01-01T00:00:00Z')
   await checkKnownTimes(['observed_at', 'query_at_ns'])
   assert.equal(await ev(`!!document.querySelector('[aria-label="response_at_ns 时间类型"],[aria-label="response_at_ns 单位"],[aria-label="response_at_ns 时间单位"]')`), false)
   assert.equal(await ev(`document.querySelector('[data-description-field="response_at_ns"] .field-time').innerText`), '当前时间定义暂不支持编辑')
@@ -135,5 +149,5 @@ try {
   assert.equal(requests.filter(r => /semantics\/v1\/channels\/save-description$/.test(r.url)).length, 1)
   assert.deepEqual(browser.exceptions, [])
   await writeFile(evidence + '/browser-requests.json', JSON.stringify(requests, null, 2))
-  console.log('PASS: canonical and existing Unix times, compact unsupported state, deduplicated time meaning, three body edits preserve complete semantics/history, unchanged table and no data read/execute')
+  console.log('PASS: canonical Unix times, compact unsupported state, deduplicated time meaning, three body edits preserve complete semantics/history, unchanged table and no data read/execute')
 } finally { await browser.close() }

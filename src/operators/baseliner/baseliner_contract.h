@@ -133,9 +133,9 @@ struct ReadPolicy {
     uint64_t max_pending_bytes = 16 * 1024 * 1024;
 };
 struct StatePolicy {
-    BaselineStateLimitsV1 limits{1024, 1024, 2};
+    BaselineStateLimits limits{1024, 1024, 2};
     bool evict_idle = false;
-    BaselineStateReleaseScopeV1 release_scope = BaselineStateReleaseScopeV1::kRuntimeOnly;
+    BaselineStateReleaseScope release_scope = BaselineStateReleaseScope::kRuntimeOnly;
     uint64_t idle_timeout_ms = 0;
     uint32_t maintenance_max_releases = 16;
     uint64_t maintenance_max_bytes = 16 * 1024 * 1024;
@@ -183,7 +183,7 @@ ConfigStatus ParseConfig(std::string_view json, ConfigSnapshot* output);
 // Accepts full JSON unchanged or a single-dataset inline shorthand bound to SQL FROM.
 // No I/O; shorthand is serialized to owned full JSON before validation/hash generation.
 ConfigStatus NormalizeInlineConfig(std::string_view json, std::string_view sql_source, ConfigSnapshot* output);
-ConfigStatus ResolveConfig(std::string_view with_json, std::string_view sql_source, IConfigChannelRegistryV1* registry,
+ConfigStatus ResolveConfig(std::string_view with_json, std::string_view sql_source, IConfigChannelRegistry* registry,
                            ConfigSnapshot* output);
 // Serializes an already parsed production configuration, including effective
 // defaults. Does not alter the original JSON, reference, or execution hash.
@@ -211,8 +211,8 @@ struct ScalarResult {
 };
 ConfigStatus ValidateResult(const ScalarResult& result);
 
-using DatasetProgress = BlockDatasetProgressV1;
-using ProgressEnvelope = BlockInputProgressV1;
+using DatasetProgress = BlockDatasetProgress;
+using ProgressEnvelope = BlockInputProgress;
 ConfigStatus ValidateProgress(const ProgressEnvelope& progress, const std::vector<std::string>& datasets);
 
 }  // namespace flowsql::baseliner

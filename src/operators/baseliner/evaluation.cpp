@@ -42,8 +42,8 @@ Observation Identity(const Observation& input) {
     identity.bucket = input.bucket;
     return identity;
 }
-EvaluationRow Row(const Observation& input, const RollingBaselineResult& result,
-                  BaselineEvaluationReadinessV1 readiness, const std::string& basis) {
+EvaluationRow Row(const Observation& input, const RollingBaselineResult& result, BaselineEvaluationReadiness readiness,
+                  const std::string& basis) {
     EvaluationRow row;
     row.input = Identity(input);
     row.rolling = result;
@@ -53,17 +53,17 @@ EvaluationRow Row(const Observation& input, const RollingBaselineResult& result,
     row.values.observed = result.observed;
     row.values.status = result.status;
     row.values.can_alert = false;
-    if (result.status == BaselineStatus::kOk && readiness == BaselineEvaluationReadinessV1::kReady) {
+    if (result.status == BaselineStatus::kOk && readiness == BaselineEvaluationReadiness::kReady) {
         row.values.expected = result.baseline_mu;
         row.values.lower = result.baseline_lower;
         row.values.upper = result.baseline_upper;
         row.values.can_alert = result.can_alert;
-    } else if (readiness == BaselineEvaluationReadinessV1::kColdStart)
+    } else if (readiness == BaselineEvaluationReadiness::kColdStart)
         row.values.status = BaselineStatus::kNotTrained;
     return row;
 }
 EvaluationRow RelationRow(const Observation& input, const RelationRoutedSummaryResult& routed,
-                          BaselineEvaluationReadinessV1 readiness, const std::string& basis) {
+                          BaselineEvaluationReadiness readiness, const std::string& basis) {
     auto row = Row(input, routed.rolling, readiness, basis);
     row.summary_id = routed.summary;
     row.input.metric_id = routed.metric;
@@ -107,11 +107,11 @@ struct EvaluationEngine::Impl {
     struct Module {
         Metric metric;
         std::shared_ptr<IBaselineTask> task;
-        IBaselineValueEvaluationV1* value_evaluation = nullptr;
-        IBaselineRatioEvaluationV1* ratio_evaluation = nullptr;
-        IBaselineRelationEvaluationV1* relation_evaluation = nullptr;
-        std::shared_ptr<IBaselineTaskStateControlV1> control;
-        std::shared_ptr<IBaselineCheckpointV1> checkpoint;
+        IBaselineValueTask* value_task = nullptr;
+        IBaselineRatioTask* ratio_task = nullptr;
+        IBaselineRelationTask* relation_task = nullptr;
+        std::shared_ptr<IBaselineTaskStateControl> control;
+        std::shared_ptr<IBaselineCheckpoint> checkpoint;
         std::map<std::string, Series> series;
         std::set<std::string> parents;
         std::string released_epoch;
@@ -121,14 +121,14 @@ struct EvaluationEngine::Impl {
     };
     ConfigSnapshot config;
     IBaselineService* service = nullptr;
-    IBaselineStateControlServiceV1* state_service = nullptr;
-    IBaselineCheckpointServiceV1* checkpoint_service = nullptr;
+    IBaselineStateControlService* state_service = nullptr;
+    IBaselineCheckpointService* checkpoint_service = nullptr;
     std::map<std::tuple<std::string, std::string, std::string>, std::pair<std::string, int64_t>> replay;
     bool restored = false;
     int64_t monotonic_ns = 0, wall_ns = 0;
     using ActivityKey = std::tuple<int64_t, std::string, std::string, std::string>;
     std::set<ActivityKey> activity;
-    BlockInputProgressV1 progress;
+    BlockInputProgress progress;
     std::vector<MaintenanceRow> maintenance;
     int64_t Timeout() const { return int64_t(config.config.state.idle_timeout_ms) * 1000000; }
     void Touch(const std::pair<std::string, std::string>& key, const std::string& identity, Series& state) {
@@ -298,8 +298,8 @@ void EvaluationEngine::Close() {
     impl_->opened = false;
     impl_->finished = true;
 }
-int EvaluationEngine::Open(ConfigSnapshot config, IBaselineService* service, IBaselineStateControlServiceV1* control,
-                           IBaselineCheckpointServiceV1* checkpoints) {
+int EvaluationEngine::Open(ConfigSnapshot config, IBaselineService* service, IBaselineStateControlService* control,
+                           IBaselineCheckpointService* checkpoints) {
     if (impl_->opened || impl_->finished || !impl_->modules.empty() || !service || !control)
         return impl_->Fail("invalid evaluation open");
     impl_->config = std::move(config);
@@ -315,30 +315,24 @@ int EvaluationEngine::Open(ConfigSnapshot config, IBaselineService* service, IBa
                 auto created =
                     service->CreateValueTask(metric.algorithm_config_json, BaselineSerializationFormat::kJson);
                 status = created.first;
+                module->value_task = created.second.get();
                 module->task = std::move(created.second);
             } else if (metric.kind == BaselineTaskKind::kRatio) {
                 auto created =
                     service->CreateRatioTask(metric.algorithm_config_json, BaselineSerializationFormat::kJson);
                 status = created.first;
+                module->ratio_task = created.second.get();
                 module->task = std::move(created.second);
             } else {
                 auto created =
                     service->CreateRelationTask(metric.algorithm_config_json, BaselineSerializationFormat::kJson);
                 status = created.first;
+                module->relation_task = created.second.get();
                 module->task = std::move(created.second);
             }
             if (status != BaselineStatus::kOk || !module->task) {
                 Close();
                 return impl_->Fail("algorithm task creation failed");
-            }
-            module->value_evaluation = dynamic_cast<IBaselineValueEvaluationV1*>(module->task.get());
-            module->ratio_evaluation = dynamic_cast<IBaselineRatioEvaluationV1*>(module->task.get());
-            module->relation_evaluation = dynamic_cast<IBaselineRelationEvaluationV1*>(module->task.get());
-            if ((metric.kind == BaselineTaskKind::kValue && !module->value_evaluation) ||
-                (metric.kind == BaselineTaskKind::kRatio && !module->ratio_evaluation) ||
-                (metric.kind == BaselineTaskKind::kRelation && !module->relation_evaluation)) {
-                Close();
-                return impl_->Fail("algorithm task lacks baseline evaluation V1 capability");
             }
             auto bound = control->Bind(module->task, impl_->config.config.state.limits);
             if (bound.first != BaselineStatus::kOk || !bound.second) {
@@ -347,7 +341,7 @@ int EvaluationEngine::Open(ConfigSnapshot config, IBaselineService* service, IBa
             }
             module->control = std::move(bound.second);
             if (checkpoints) {
-                BaselineCheckpointBindingV1 binding;
+                BaselineCheckpointBinding binding;
                 binding.max_payload_bytes = impl_->config.config.persistence.max_checkpoint_bytes;
                 auto checkpoint = checkpoints->Bind(module->task, module->control, binding);
                 if (checkpoint.first != BaselineStatus::kOk || !checkpoint.second) {
@@ -416,10 +410,10 @@ int EvaluationEngine::Submit(const Observation& input, EvaluationOutput* output)
         observation.group_idx = input.groups;
         for (const auto& metric : input.metrics)
             observation.metrics.push_back({metric.metric, metric.total, metric.active_count, metric.values_by_group});
-        auto evaluation = module.relation_evaluation->SubmitObservationWithReadiness(observation, {});
+        auto evaluation = module.relation_task->SubmitObservation(observation, {});
         const auto& relation = evaluation.result;
         if (evaluation.routed_readiness.size() != relation.routed_results.size())
-            return impl_->Fail("algorithm relation evaluation V1 readiness length mismatch");
+            return impl_->Fail("algorithm relation evaluation readiness length mismatch");
         if (relation.status != BaselineStatus::kOk) return impl_->Fail("algorithm relation Submit failed");
         if (!impl_->FitsRows(input, basis,
                              relation.routed_results.size() * (uint64_t(impl_->config.config.horizon_buckets) + 1)))
@@ -452,14 +446,14 @@ int EvaluationEngine::Submit(const Observation& input, EvaluationOutput* output)
         *output = std::move(next);
         return 0;
     }
-    BaselineEvaluationResultV1 evaluation;
+    BaselineEvaluationResult evaluation;
     if (!impl_->FitsRows(input, basis, uint64_t(impl_->config.config.horizon_buckets) + 1))
         return impl_->Fail("scalar evaluation/forecast budget exceeded");
     if (input.kind == BaselineTaskKind::kValue)
-        evaluation = module.value_evaluation->SubmitObservationWithReadiness(
+        evaluation = module.value_task->SubmitObservation(
             {Hex(input.identity), input.bucket, *input.value, input.sample_count.value_or(1)}, {});
     else
-        evaluation = module.ratio_evaluation->SubmitObservationWithReadiness(
+        evaluation = module.ratio_task->SubmitObservation(
             {Hex(input.identity), input.bucket, *input.numerator, *input.denominator}, {});
     const auto& result = evaluation.result;
     if (result.status != BaselineStatus::kOk && result.status != BaselineStatus::kInsufficientData &&
@@ -554,7 +548,7 @@ int EvaluationEngine::ExportModelParameters(std::vector<ModelParametersRow>* out
     std::vector<ModelParametersRow> rows;
     uint64_t bytes = 0, serialized = 0;
     for (const auto& module : p.modules) {
-        auto* exporter = dynamic_cast<IBaselineModelParametersV1*>(module.second->task.get());
+        auto* exporter = dynamic_cast<IBaselineModelParameters*>(module.second->task.get());
         if (!exporter) return p.Fail("model parameter capability unavailable");
         for (const auto& item : module.second->series) {
             ModelParametersRow row;
@@ -743,12 +737,11 @@ int EvaluationEngine::RestoreCheckpoint(std::string_view checkpoint) {
         doc.Parse<rapidjson::kParseFullPrecisionFlag>(checkpoint.data(), checkpoint.size());
         require(!doc.HasParseError());
         require(doc.IsObject() && doc.HasMember("version") && doc["version"].IsUint());
-        const bool legacy = doc["version"].GetUint() == 1;
-        auto root_keys = std::set<std::string>{
-            "version", "config_hash", "compatibility_hash", "identities", "models", "history_bytes", "modules"};
-        if (!legacy) root_keys.insert("activity_wall_ns");
+        auto root_keys =
+            std::set<std::string>{"version",       "config_hash", "compatibility_hash", "identities", "models",
+                                  "history_bytes", "modules",     "activity_wall_ns"};
         exact(doc, root_keys);
-        require((legacy || doc["version"].GetUint() == 2) &&
+        require(doc["version"].GetUint() == 2 &&
                 text(doc, "compatibility_hash") == RestoreCompatibilityHash(impl_->config) && doc["modules"].IsArray());
         require(doc["identities"].IsUint64() && doc["models"].IsUint64() && doc["history_bytes"].IsUint64());
         EvaluationEngine prepared;
@@ -756,8 +749,9 @@ int EvaluationEngine::RestoreCheckpoint(std::string_view checkpoint) {
         prepared.impl_->monotonic_ns = impl_->monotonic_ns;
         prepared.impl_->wall_ns = impl_->wall_ns;
         prepared.impl_->progress = impl_->progress;
-        const bool age_valid = !legacy && doc["activity_wall_ns"].IsInt64() && doc["activity_wall_ns"].GetInt64() > 0 &&
-                               impl_->wall_ns >= doc["activity_wall_ns"].GetInt64();
+        require(doc["activity_wall_ns"].IsInt64());
+        const bool age_valid =
+            doc["activity_wall_ns"].GetInt64() > 0 && impl_->wall_ns >= doc["activity_wall_ns"].GetInt64();
         const int64_t downtime = age_valid ? impl_->wall_ns - doc["activity_wall_ns"].GetInt64() : 0;
         for (const auto& entry : impl_->modules) {
             auto module = std::make_unique<Impl::Module>();
@@ -768,33 +762,28 @@ int EvaluationEngine::RestoreCheckpoint(std::string_view checkpoint) {
         require(doc["modules"].Size() == prepared.impl_->modules.size());
         std::set<std::pair<std::string, std::string>> loaded;
         for (const auto& entry : doc["modules"].GetArray()) {
-            auto module_keys = std::set<std::string>{"dataset", "metric", "model", "series"};
-            if (!legacy) {
-                module_keys.insert("parents");
-                module_keys.insert("released_epoch");
-            }
+            const auto module_keys =
+                std::set<std::string>{"dataset", "metric", "model", "series", "parents", "released_epoch"};
             exact(entry, module_keys);
             auto key = std::make_pair(text(entry, "dataset"), text(entry, "metric"));
             auto found = prepared.impl_->modules.find(key);
             require(found != prepared.impl_->modules.end() && loaded.insert(key).second && entry["series"].IsArray());
             auto& module = *found->second;
-            if (!legacy) {
-                require(entry["parents"].IsArray());
-                for (const auto& parent : entry["parents"].GetArray()) {
-                    require(parent.IsString());
-                    auto identity = unhex({parent.GetString(), parent.GetStringLength()});
-                    require(!identity.empty() && identity.size() <= kMaxConfigBytes &&
-                            module.parents.insert(identity).second);
-                }
-                module.released_epoch = text(entry, "released_epoch");
-                require(module.released_epoch.size() <= kMaxConfigBytes);
-                prepared.impl_->models += module.parents.size();
-                require(prepared.impl_->models <= prepared.impl_->config.config.state.limits.max_model_identities);
+            require(entry["parents"].IsArray());
+            for (const auto& parent : entry["parents"].GetArray()) {
+                require(parent.IsString());
+                auto identity = unhex({parent.GetString(), parent.GetStringLength()});
+                require(!identity.empty() && identity.size() <= kMaxConfigBytes &&
+                        module.parents.insert(identity).second);
             }
+            module.released_epoch = text(entry, "released_epoch");
+            require(module.released_epoch.size() <= kMaxConfigBytes);
+            prepared.impl_->models += module.parents.size();
+            require(prepared.impl_->models <= prepared.impl_->config.config.state.limits.max_model_identities);
             for (const auto& item : entry["series"].GetArray()) {
-                auto series_keys = std::set<std::string>{"identity",     "epoch",    "last",  "initialized",
-                                                         "bootstrapped", "revision", "bytes", "history"};
-                if (!legacy) series_keys.insert("activity_age_ns");
+                auto series_keys =
+                    std::set<std::string>{"identity", "epoch", "last",    "initialized",    "bootstrapped",
+                                          "revision", "bytes", "history", "activity_age_ns"};
                 exact(item, series_keys);
                 auto identity = unhex(text(item, "identity"));
                 auto epoch = text(item, "epoch");
@@ -808,9 +797,9 @@ int EvaluationEngine::RestoreCheckpoint(std::string_view checkpoint) {
                 state.bootstrapped = item["bootstrapped"].GetBool();
                 state.revision = item["revision"].GetUint64();
                 state.bytes = item["bytes"].GetUint64();
+                require(item["activity_age_ns"].IsInt64() && item["activity_age_ns"].GetInt64() >= 0);
                 if (impl_->Timeout()) {
                     int64_t age = 0;
-                    if (!legacy) require(item["activity_age_ns"].IsInt64() && item["activity_age_ns"].GetInt64() >= 0);
                     if (age_valid) {
                         age = std::min(item["activity_age_ns"].GetInt64(), impl_->Timeout());
                         age += std::min(downtime, impl_->Timeout() - age);
@@ -864,11 +853,7 @@ int EvaluationEngine::RestoreCheckpoint(std::string_view checkpoint) {
                 prepared.impl_->history_bytes += bytes;
                 prepared.impl_->identities++;
                 if (state.bootstrapped) {
-                    if (legacy) {
-                        prepared.impl_->models++;
-                        module.parents.insert(identity);
-                    } else
-                        require(module.parents.count(identity));
+                    require(module.parents.count(identity));
                 }
                 require(prepared.impl_->history_bytes <= prepared.impl_->config.config.read.max_pending_bytes &&
                         prepared.impl_->identities <=
@@ -892,7 +877,7 @@ int EvaluationEngine::RestoreCheckpoint(std::string_view checkpoint) {
         if (runnable.Open(impl_->config, impl_->service, impl_->state_service, impl_->checkpoint_service) != 0)
             throw std::runtime_error(runnable.LastError());
         for (auto& entry : runnable.impl_->modules) {
-            BaselineCheckpointRestoreV1 restore;
+            BaselineCheckpointRestore restore;
             restore.content = payloads.at(entry.first);
             require(entry.second->checkpoint->RestoreCheckpoint(restore) == BaselineStatus::kOk);
             entry.second->series = std::move(prepared.impl_->modules.at(entry.first)->series);
@@ -931,7 +916,7 @@ void EvaluationEngine::SetTime(int64_t monotonic_ns, int64_t wall_ns) {
     impl_->monotonic_ns = std::max(impl_->monotonic_ns, monotonic_ns);
     impl_->wall_ns = wall_ns;
 }
-int EvaluationEngine::SetSourceProgress(const BlockInputProgressV1& progress) {
+int EvaluationEngine::SetSourceProgress(const BlockInputProgress& progress) {
     std::vector<std::string> ids;
     for (const auto& d : impl_->config.config.datasets) ids.push_back(d.id);
     if (!ValidateProgress(progress, ids).ok()) return impl_->Fail("invalid maintenance source progress");
@@ -943,9 +928,9 @@ std::optional<int64_t> EvaluationEngine::NextMaintenanceDeadline() const {
     if (impl_->activity.empty()) return {};
     return std::get<0>(*impl_->activity.begin()) + impl_->Timeout();
 }
-std::pair<BaselineStatus, BaselineStateUsageV1> EvaluationEngine::QueryUsage() const {
+std::pair<BaselineStatus, BaselineStateUsage> EvaluationEngine::QueryUsage() const {
     if (!impl_->opened) return {BaselineStatus::kInvalidArgument, {}};
-    BaselineStateUsageV1 usage;
+    BaselineStateUsage usage;
     usage.runtime_identities = impl_->identities;  // Includes bootstrap buffers, before native runtime exists.
     for (const auto& entry : impl_->modules) {
         auto native = entry.second->control->QueryUsage();
@@ -1009,7 +994,7 @@ int EvaluationEngine::Maintain(std::vector<MaintenanceRow>* output) {
         if (module.control->ReleaseIdentity(Hex(found->first), policy.release_scope) != BaselineStatus::kOk)
             return impl_->Fail("algorithm identity release failed");
         impl_->history_bytes -= found->second.bytes;
-        if (policy.release_scope == BaselineStateReleaseScopeV1::kAllState && module.parents.erase(found->first))
+        if (policy.release_scope == BaselineStateReleaseScope::kAllState && module.parents.erase(found->first))
             --impl_->models;
         module.released_epoch = found->second.epoch;
         impl_->replay.erase({o.dataset_id, o.metric_id, o.identity});
@@ -1021,7 +1006,7 @@ int EvaluationEngine::Maintain(std::vector<MaintenanceRow>* output) {
         auto usage = QueryUsage();
         if (usage.first != BaselineStatus::kOk) return impl_->Fail("maintenance usage query failed");
         output->push_back({std::move(o), "idle_release",
-                           policy.release_scope == BaselineStateReleaseScopeV1::kAllState ? "AllState" : "RuntimeOnly",
+                           policy.release_scope == BaselineStateReleaseScope::kAllState ? "AllState" : "RuntimeOnly",
                            usage.second});
     }
     return 0;

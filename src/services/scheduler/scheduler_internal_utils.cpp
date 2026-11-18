@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "scheduler_internal_utils.h"
 
@@ -192,65 +187,10 @@ bool IsSinkRoleAllowed(const std::string& role) {
 }
 
 int ParseOptionObject(const std::string& option, rapidjson::Document* out, std::string* err) {
-    // 逻辑链：
-    // 1) 空字符串直接返回空对象；
-    // 2) 如果是 JSON 对象文本则直接 parse；
-    // 3) 否则按 key=value;key=value 语法拆解并推断 bool/int/string 类型；
-    // 4) 输出统一的 JSON object，供 stream option 规范化复用。
-    if (!out) return EINVAL;
-    out->SetObject();
-    auto& alloc = out->GetAllocator();
-    if (option.empty()) return 0;
-
-    const std::string trimmed = [&option]() {
-        size_t begin = 0;
-        size_t end = option.size();
-        while (begin < end && std::isspace(static_cast<unsigned char>(option[begin]))) ++begin;
-        while (end > begin && std::isspace(static_cast<unsigned char>(option[end - 1]))) --end;
-        return option.substr(begin, end - begin);
-    }();
-
-    if (trimmed.empty()) return 0;
-    if (trimmed.front() == '{') {
-        out->Parse(trimmed.c_str());
-        if (out->HasParseError() || !out->IsObject()) {
-            if (err) *err = "option json parse failed";
-            return EINVAL;
-        }
-        return 0;
-    }
-
-    size_t pos = 0;
-    while (pos < trimmed.size()) {
-        const size_t eq = trimmed.find('=', pos);
-        if (eq == std::string::npos) break;
-        size_t end = trimmed.find(';', eq + 1);
-        if (end == std::string::npos) end = trimmed.size();
-
-        const std::string key = trimmed.substr(pos, eq - pos);
-        const std::string value = trimmed.substr(eq + 1, end - eq - 1);
-        if (!key.empty()) {
-            rapidjson::Value key_json(key.c_str(), alloc);
-            const std::string lower = ToLowerAscii(value);
-            bool is_int = !value.empty();
-            size_t i = 0;
-            if (is_int && (value[0] == '+' || value[0] == '-')) i = 1;
-            if (i >= value.size()) is_int = false;
-            for (; is_int && i < value.size(); ++i) {
-                if (!std::isdigit(static_cast<unsigned char>(value[i]))) {
-                    is_int = false;
-                }
-            }
-            if (lower == "true" || lower == "false") {
-                out->AddMember(key_json, rapidjson::Value(lower == "true"), alloc);
-            } else if (is_int) {
-                const int64_t num = static_cast<int64_t>(std::strtoll(value.c_str(), nullptr, 10));
-                out->AddMember(key_json, rapidjson::Value(num), alloc);
-            } else {
-                out->AddMember(key_json, rapidjson::Value(value.c_str(), alloc), alloc);
-            }
-        }
-        pos = (end < trimmed.size()) ? end + 1 : trimmed.size();
+    out->Parse(option.c_str());
+    if (out->HasParseError() || !out->IsObject()) {
+        if (err) *err = "option must be a JSON object";
+        return EINVAL;
     }
     return 0;
 }

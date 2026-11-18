@@ -110,7 +110,7 @@ std::shared_ptr<arrow::RecordBatch> MakeInput(int batch_rows, flowsql::IProtocol
     return batch;
 }
 
-uint64_t ValidateOutputs(const std::vector<flowsql::BlockTransformOutputV1>& outputs,
+uint64_t ValidateOutputs(const std::vector<flowsql::BlockTransformOutput>& outputs,
                          const std::shared_ptr<arrow::Schema>& schema, uint64_t* next_session_id, uint64_t stride) {
     uint64_t count = 0;
     for (const auto& output : outputs) {
@@ -132,9 +132,9 @@ uint64_t ValidateOutputs(const std::vector<flowsql::BlockTransformOutputV1>& out
 }
 
 struct BenchmarkCapability {
-    flowsql::IBlockTransformOperatorV1* provider = nullptr;
-    flowsql::IBlockTransformTaskV1* task = nullptr;
-    flowsql::CppOperatorPluginDestroyCapabilityV2Fn destroy_capability = nullptr;
+    flowsql::IBlockTransformOperator* provider = nullptr;
+    flowsql::IBlockTransformTask* task = nullptr;
+    flowsql::CppOperatorPluginDestroyCapabilityFn destroy_capability = nullptr;
 
     ~BenchmarkCapability() {
         if (task != nullptr) {
@@ -155,31 +155,31 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
         operator_library.Symbol(flowsql::kCppOperatorPluginAbiVersionSymbol));
     const auto count = reinterpret_cast<flowsql::CppOperatorPluginCountFn>(
         operator_library.Symbol(flowsql::kCppOperatorPluginCountSymbol));
-    const auto describe = reinterpret_cast<flowsql::CppOperatorPluginDescribeV2Fn>(
-        operator_library.Symbol(flowsql::kCppOperatorPluginDescribeV2Symbol));
-    const auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityV2Fn>(
-        operator_library.Symbol(flowsql::kCppOperatorPluginCreateCapabilityV2Symbol));
+    const auto describe = reinterpret_cast<flowsql::CppOperatorPluginDescribeFn>(
+        operator_library.Symbol(flowsql::kCppOperatorPluginDescribeSymbol));
+    const auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityFn>(
+        operator_library.Symbol(flowsql::kCppOperatorPluginCreateCapabilitySymbol));
     BenchmarkCapability capability;
-    capability.destroy_capability = reinterpret_cast<flowsql::CppOperatorPluginDestroyCapabilityV2Fn>(
-        operator_library.Symbol(flowsql::kCppOperatorPluginDestroyCapabilityV2Symbol));
+    capability.destroy_capability = reinterpret_cast<flowsql::CppOperatorPluginDestroyCapabilityFn>(
+        operator_library.Symbol(flowsql::kCppOperatorPluginDestroyCapabilitySymbol));
     auto& provider = capability.provider;
     auto& task = capability.task;
     const auto destroy_capability = capability.destroy_capability;
-    Require(version && count && describe && create && destroy_capability, "npm.basic V2 plugin symbols missing");
-    Require(version() == flowsql::kCppOperatorPluginAbiVersionV2 && count() == 2, "npm.basic plugin ABI mismatch");
-    flowsql::CppOperatorDescriptorV2 descriptor{};
-    descriptor.struct_size = flowsql::kCppOperatorDescriptorV2Size;
+    Require(version && count && describe && create && destroy_capability, "npm.basic current plugin symbols missing");
+    Require(version() == flowsql::kCppOperatorPluginAbiVersion && count() == 1, "npm.basic plugin ABI mismatch");
+    flowsql::CppOperatorDescriptor descriptor{};
+    descriptor.struct_size = flowsql::kCppOperatorDescriptorSize;
     Require(describe(0, &descriptor) == 0 && descriptor.category != nullptr && descriptor.name != nullptr &&
                 std::string_view(descriptor.category) == "npm" && std::string_view(descriptor.name) == "basic",
             "npm.basic operator descriptor mismatch");
-    provider = static_cast<flowsql::IBlockTransformOperatorV1*>(create(0, loader));
+    provider = static_cast<flowsql::IBlockTransformOperator*>(create(0, loader));
     Require(provider != nullptr, "npm.basic capability creation failed");
     const std::string entity = family == "ipv6" ? "basic_ipv6" : "basic_ipv4";
     const uint64_t stride = family == "mixed" ? 2 : 1;
     const uint64_t packets = static_cast<uint64_t>(batch_rows) * static_cast<uint64_t>(iterations);
     std::cout << "family,mode,packets,wire_bytes,batch_rows,iterations,wall_ms,packets_per_second,output_rows\n";
     const auto measure = [&](const char* mode, const std::string& with_params_json) {
-        flowsql::BlockTransformTaskConfigV1 config;
+        flowsql::BlockTransformTaskConfig config;
         config.task_id = mode;
         config.with_params_json = with_params_json.c_str();
         config.pushed_filter_plan_json = R"({"version":1,"root":null})";
@@ -192,11 +192,11 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
                         (family == "ipv6" ? arrow::Type::FIXED_SIZE_BINARY : arrow::Type::UINT32) &&
                     !schema->GetFieldByName("ip_family"),
                 "concrete Basic Schema mismatch");
-        std::vector<flowsql::BlockTransformOutputV1> outputs;
+        std::vector<flowsql::BlockTransformOutput> outputs;
         uint64_t next_session_id = 1;
         const auto process = [&]() {
             const int rc = task->ProcessBlock(input, 1000, &outputs);
-            Require(rc == static_cast<int>(flowsql::BlockTransformStatusV1::kContinue),
+            Require(rc == static_cast<int>(flowsql::BlockTransformStatus::kContinue),
                     "ProcessBlock failed: " + task->LastError());
             const uint64_t rows = ValidateOutputs(outputs, schema, &next_session_id, stride);
             Require(rows == static_cast<uint64_t>(batch_rows) / stride, "result count differs from input count");
@@ -222,8 +222,8 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
                   << static_cast<double>(packets) * 1000.0 / wall_ms << ',' << output_rows << '\n';
     };
     const std::string common =
-        "{\"input_namespace\":\"benchmark.packet\",\"source_domains\":\"0:7\",\"result_mode\":\"final\",\"observing\":"
-        "\"" +
+        std::string(
+            R"JSON({"input_namespace":"benchmark.packet","source_domains":"0:7","parameters":"{\"schema_version\":1,\"core\":{\"result_mode\":\"final\"}}","observing":")JSON") +
         entity + "\"";
     measure("basic-only", common + '}');
     measure("basic+session", common + ",\"features\":\"basic,session\"}");

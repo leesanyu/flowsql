@@ -5,6 +5,7 @@ list(FILTER DIR_SRCS EXCLUDE REGEX "test_docker_deploy_config\\.cpp$")
 list(FILTER DIR_SRCS EXCLUDE REGEX "test_native_deploy_config\\.cpp$")
 list(FILTER DIR_SRCS EXCLUDE REGEX "test_pcap_upload_contract\\.cpp$")
 list(FILTER DIR_SRCS EXCLUDE REGEX "test_plugin_loader\\.cpp$")
+list(FILTER DIR_SRCS EXCLUDE REGEX "test_stream_config_contract\\.cpp$")
 
 add_executable(${PROJECT_NAME} ${DIR_SRCS})
 
@@ -36,7 +37,8 @@ add_executable(test_pcap_upload_contract
     ${CMAKE_SOURCE_DIR}/services/web/web_plugin.cpp
     ${CMAKE_SOURCE_DIR}/services/web/web_server.cpp
 )
-target_include_directories(test_pcap_upload_contract PUBLIC ${CMAKE_SOURCE_DIR})
+target_include_directories(test_pcap_upload_contract PUBLIC ${CMAKE_SOURCE_DIR}
+    PRIVATE ${CMAKE_BINARY_DIR}/channels/config)
 add_thirddepen(test_pcap_upload_contract httplib rapidjson sqlite)
 target_compile_options(test_pcap_upload_contract PRIVATE -UNDEBUG)
 set_target_properties(test_pcap_upload_contract PROPERTIES
@@ -168,3 +170,17 @@ set_target_properties(test_docker_deploy_config PROPERTIES
 add_test(NAME test_docker_deploy_config COMMAND ${CMAKE_BINARY_DIR}/output/test_docker_deploy_config)
 add_test(NAME test_docker_build_context COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_docker_build_context.py)
+
+add_executable(test_stream_config_contract test_stream_config_contract.cpp)
+target_include_directories(test_stream_config_contract PRIVATE ${CMAKE_SOURCE_DIR})
+add_thirddepen(test_stream_config_contract arrow rapidjson sqlite)
+target_link_libraries(test_stream_config_contract flowsql_common ${CMAKE_DL_LIBS})
+target_compile_options(test_stream_config_contract PRIVATE -UNDEBUG)
+target_compile_definitions(test_stream_config_contract PRIVATE
+    STREAM_CONFIG_PLUGIN="$<TARGET_FILE:flowsql_config_channel>"
+    STREAM_BUILTIN_PLUGIN="$<TARGET_FILE:flowsql_builtin>"
+    STREAM_CATALOG_PLUGIN="$<TARGET_FILE:flowsql_catalog>"
+    STREAM_PROVIDER_PLUGIN="$<TARGET_FILE:flowsql_stream>")
+add_dependencies(test_stream_config_contract flowsql_config_channel flowsql_builtin flowsql_catalog flowsql_stream)
+set_target_properties(test_stream_config_contract PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_stream_config_contract COMMAND $<TARGET_FILE:test_stream_config_contract>)

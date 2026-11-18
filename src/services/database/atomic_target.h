@@ -14,12 +14,12 @@ class AtomicTargetConfiguration {
 };
 IBatchReader* MakeAtomicBufferedReader(std::shared_ptr<arrow::RecordBatch> batch,
                                        std::shared_ptr<std::atomic<uint32_t>> readers);
-DatabaseAtomicStatusV1 MakeServerAtomicSession(const std::string& backend,
-                                               const std::unordered_map<std::string, std::string>& parameters,
-                                               const DatabaseAtomicSessionOptionsV1& options,
-                                               std::shared_ptr<IDatabaseAtomicSessionV1>* output);
-DatabaseAtomicStatusV1 MakeAtomicSession(const std::string& backend,
-                                         const std::unordered_map<std::string, std::string>& parameters,
-                                         const DatabaseAtomicSessionOptionsV1& options,
-                                         std::shared_ptr<IDatabaseAtomicSessionV1>* output);
+DatabaseAtomicStatus MakeServerAtomicSession(const std::string& backend,
+                                             const std::unordered_map<std::string, std::string>& parameters,
+                                             const DatabaseAtomicSessionOptions& options,
+                                             std::shared_ptr<IDatabaseAtomicSession>* output);
+DatabaseAtomicStatus MakeAtomicSession(const std::string& backend,
+                                       const std::unordered_map<std::string, std::string>& parameters,
+                                       const DatabaseAtomicSessionOptions& options,
+                                       std::shared_ptr<IDatabaseAtomicSession>* output);
 }  // namespace flowsql::database

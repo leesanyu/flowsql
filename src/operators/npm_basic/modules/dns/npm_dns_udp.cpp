@@ -87,15 +87,15 @@ NpmPacketDirection Opposite(NpmPacketDirection direction) {
     return direction == NpmPacketDirection::kAToB ? NpmPacketDirection::kBToA : NpmPacketDirection::kAToB;
 }
 
-bool SameQuestion(const NpmDnsQuestionKeyV1& left, const NpmDnsQuestionKeyV1& right) {
+bool SameQuestion(const NpmDnsQuestionKey& left, const NpmDnsQuestionKey& right) {
     return left.session_id == right.session_id && left.query_direction == right.query_direction &&
            left.dns_id == right.dns_id && left.opcode == right.opcode && left.wire_qname == right.wire_qname &&
            left.qtype == right.qtype && left.qclass == right.qclass;
 }
 
-NpmDnsUdpResultV1 QueryResult(const NpmDnsTransactionV1& transaction, const std::string& display,
-                              int64_t observed_at_ns, std::string reason) {
-    NpmDnsUdpResultV1 result;
+NpmDnsUdpResult QueryResult(const NpmDnsTransaction& transaction, const std::string& display, int64_t observed_at_ns,
+                            std::string reason) {
+    NpmDnsUdpResult result;
     result.entity_instance_id = transaction.entity_instance_id;
     result.session_id = transaction.key.session_id;
     result.dns_id = transaction.key.dns_id;
@@ -113,12 +113,11 @@ NpmDnsUdpResultV1 QueryResult(const NpmDnsTransactionV1& transaction, const std:
 
 }  // namespace
 
-NpmDnsMessageStatusV1 ParseNpmDnsUdpMessageV1(Span<const uint8_t> body, bool body_complete,
-                                              NpmDnsParsedMessageV1* output) {
-    NpmDnsParsedMessageV1 parsed;
+NpmDnsMessageStatus ParseNpmDnsUdpMessage(Span<const uint8_t> body, bool body_complete, NpmDnsParsedMessage* output) {
+    NpmDnsParsedMessage parsed;
     if (!output || (body.size != 0 && !body.data) || body.size > 65535 || body.size < 12) {
         if (output) *output = std::move(parsed);
-        return NpmDnsMessageStatusV1::kMalformed;
+        return NpmDnsMessageStatus::kMalformed;
     }
     size_t offset = 0;
     uint16_t flags = 0, questions = 0, answers = 0, authority = 0, additional = 0;
@@ -134,17 +133,17 @@ NpmDnsMessageStatusV1 ParseNpmDnsUdpMessageV1(Span<const uint8_t> body, bool bod
     parsed.message.response_rcode = flags & 0x000f;
     if (questions != 1) {
         *output = std::move(parsed);
-        return NpmDnsMessageStatusV1::kMalformed;
+        return NpmDnsMessageStatus::kMalformed;
     }
     std::string wire;
     if (!ReadName(body, &offset, &wire, &parsed.qname_display)) {
         *output = std::move(parsed);
-        return NpmDnsMessageStatusV1::kMalformed;
+        return NpmDnsMessageStatus::kMalformed;
     }
     uint16_t qtype = 0, qclass = 0;
     if (!Read16(body, &offset, &qtype) || !Read16(body, &offset, &qclass)) {
         *output = std::move(parsed);
-        return NpmDnsMessageStatusV1::kMalformed;
+        return NpmDnsMessageStatus::kMalformed;
     }
     parsed.message.wire_qname = std::move(wire);
     parsed.message.qtype = qtype;
@@ -152,7 +151,7 @@ NpmDnsMessageStatusV1 ParseNpmDnsUdpMessageV1(Span<const uint8_t> body, bool bod
     parsed.key_available = true;
     if (!body_complete) {
         *output = std::move(parsed);
-        return NpmDnsMessageStatusV1::kCaptureTruncated;
+        return NpmDnsMessageStatus::kCaptureTruncated;
     }
 
     bool seen_opt = false;
@@ -162,19 +161,19 @@ NpmDnsMessageStatusV1 ParseNpmDnsUdpMessageV1(Span<const uint8_t> body, bool bod
             std::string owner;
             if (!ReadName(body, &offset, &owner, nullptr)) {
                 *output = std::move(parsed);
-                return NpmDnsMessageStatusV1::kMalformed;
+                return NpmDnsMessageStatus::kMalformed;
             }
             uint16_t type = 0, rr_class = 0, rdlength = 0;
             uint32_t ttl = 0;
             if (!Read16(body, &offset, &type) || !Read16(body, &offset, &rr_class) || !Read32(body, &offset, &ttl) ||
                 !Read16(body, &offset, &rdlength) || offset > body.size || body.size - offset < rdlength) {
                 *output = std::move(parsed);
-                return NpmDnsMessageStatusV1::kMalformed;
+                return NpmDnsMessageStatus::kMalformed;
             }
             if (type == 41) {
                 if (section != 2 || seen_opt || owner != std::string(1, '\0') || ((ttl >> 16) & 0xff) != 0) {
                     *output = std::move(parsed);
-                    return NpmDnsMessageStatusV1::kMalformed;
+                    return NpmDnsMessageStatus::kMalformed;
                 }
                 seen_opt = true;
                 size_t option = offset;
@@ -184,7 +183,7 @@ NpmDnsMessageStatusV1 ParseNpmDnsUdpMessageV1(Span<const uint8_t> body, bool bod
                     if (end - option < 4 || !Read16(body, &option, &code) || !Read16(body, &option, &length) ||
                         end - option < length) {
                         *output = std::move(parsed);
-                        return NpmDnsMessageStatusV1::kMalformed;
+                        return NpmDnsMessageStatus::kMalformed;
                     }
                     option += length;
                 }
@@ -195,11 +194,11 @@ NpmDnsMessageStatusV1 ParseNpmDnsUdpMessageV1(Span<const uint8_t> body, bool bod
     }
     if (offset != body.size) {
         *output = std::move(parsed);
-        return NpmDnsMessageStatusV1::kMalformed;
+        return NpmDnsMessageStatus::kMalformed;
     }
     const bool unsupported = parsed.message.opcode != 0 || qtype == 251 || qtype == 252;
     *output = std::move(parsed);
-    return unsupported ? NpmDnsMessageStatusV1::kUnsupported : NpmDnsMessageStatusV1::kComplete;
+    return unsupported ? NpmDnsMessageStatus::kUnsupported : NpmDnsMessageStatus::kComplete;
 }
 
 namespace {
@@ -208,51 +207,50 @@ constexpr uint64_t kPendingCharge = 4096;
 constexpr uint64_t kResultCharge = 4096;
 }  // namespace
 
-NpmDnsUdpTrackerV1::NpmDnsUdpTrackerV1(NpmDnsConfigV1 config, std::shared_ptr<INpmTaskBudget> budget)
+NpmDnsUdpTracker::NpmDnsUdpTracker(NpmDnsConfig config, std::shared_ptr<INpmTaskBudget> budget)
     : config_(std::move(config)), budget_(std::move(budget)) {}
 
-NpmDnsUdpTrackerV1::~NpmDnsUdpTrackerV1() { Abort(); }
+NpmDnsUdpTracker::~NpmDnsUdpTracker() { Abort(); }
 
-bool NpmDnsUdpTrackerV1::ChargePending() {
+bool NpmDnsUdpTracker::ChargePending() {
     return !budget_ || budget_->Reserve(NpmBudgetCategory::kModuleState, kPendingCharge) == NpmBudgetError::kNone;
 }
 
-void NpmDnsUdpTrackerV1::ReleasePending(size_t count) noexcept {
+void NpmDnsUdpTracker::ReleasePending(size_t count) noexcept {
     if (budget_ && count) budget_->Release(NpmBudgetCategory::kModuleState, count * kPendingCharge);
 }
 
-bool NpmDnsUdpTrackerV1::ChargeResult() {
+bool NpmDnsUdpTracker::ChargeResult() {
     if (!budget_) return true;
     if (budget_->Reserve(NpmBudgetCategory::kModuleState, kResultCharge) != NpmBudgetError::kNone) return false;
     result_charge_bytes_ += kResultCharge;
     return true;
 }
 
-uint64_t NpmDnsUdpTrackerV1::NextId() {
+uint64_t NpmDnsUdpTracker::NextId() {
     const uint64_t id = next_id_;
     if (id != 0) ++next_id_;
     return id;
 }
 
-int NpmDnsUdpTrackerV1::OnDatagram(uint64_t session_id, NpmPacketDirection direction, Span<const uint8_t> body,
-                                   bool body_complete, int64_t captured_at_ns,
-                                   std::vector<NpmDnsUdpResultV1>* results) {
+int NpmDnsUdpTracker::OnDatagram(uint64_t session_id, NpmPacketDirection direction, Span<const uint8_t> body,
+                                 bool body_complete, int64_t captured_at_ns, std::vector<NpmDnsUdpResult>* results) {
     return OnMessage(session_id, direction, body, body_complete, captured_at_ns, captured_at_ns, results);
 }
 
-int NpmDnsUdpTrackerV1::OnMessage(uint64_t session_id, NpmPacketDirection direction, Span<const uint8_t> body,
-                                  bool body_complete, std::optional<int64_t> complete_at_ns, int64_t observed_at_ns,
-                                  std::vector<NpmDnsUdpResultV1>* results) {
+int NpmDnsUdpTracker::OnMessage(uint64_t session_id, NpmPacketDirection direction, Span<const uint8_t> body,
+                                bool body_complete, std::optional<int64_t> complete_at_ns, int64_t observed_at_ns,
+                                std::vector<NpmDnsUdpResult>* results) {
     if (!results || session_id == 0 ||
         (direction != NpmPacketDirection::kAToB && direction != NpmPacketDirection::kBToA))
         return EINVAL;
     bool uncommitted_charge = false;
     try {
-        NpmDnsParsedMessageV1 parsed;
-        const auto status = ParseNpmDnsUdpMessageV1(body, body_complete, &parsed);
+        NpmDnsParsedMessage parsed;
+        const auto status = ParseNpmDnsUdpMessage(body, body_complete, &parsed);
         if (!parsed.key_available) return 0;
         const auto& message = parsed.message;
-        NpmDnsQuestionKeyV1 key;
+        NpmDnsQuestionKey key;
         key.session_id = session_id;
         key.query_direction = message.is_response ? Opposite(direction) : direction;
         key.dns_id = message.dns_id;
@@ -268,21 +266,21 @@ int NpmDnsUdpTrackerV1::OnMessage(uint64_t session_id, NpmPacketDirection direct
                                [&](const Pending& candidate) { return SameQuestion(candidate.transaction.key, key); })
                 : std::list<Pending>::iterator{};
         const bool matched = pending && match != pending->end();
-        if (status == NpmDnsMessageStatusV1::kMalformed || status == NpmDnsMessageStatusV1::kCaptureTruncated) {
+        if (status == NpmDnsMessageStatus::kMalformed || status == NpmDnsMessageStatus::kCaptureTruncated) {
             if (message.is_response && matched) {
                 if (!ChargeResult()) return ENOSPC;
                 results->push_back(QueryResult(
                     match->transaction, match->qname_display, observed_at_ns,
-                    status == NpmDnsMessageStatusV1::kCaptureTruncated ? "capture_truncation" : "malformed_response"));
+                    status == NpmDnsMessageStatus::kCaptureTruncated ? "capture_truncation" : "malformed_response"));
                 pending->erase(match);
                 ReleasePending();
                 if (pending->empty()) pending_.erase(found_session);
             }
             return 0;
         }
-        if (status == NpmDnsMessageStatusV1::kUnsupported) {
+        if (status == NpmDnsMessageStatus::kUnsupported) {
             if (!ChargeResult()) return ENOSPC;
-            NpmDnsUdpResultV1 result;
+            NpmDnsUdpResult result;
             result.entity_instance_id = NextId();
             if (result.entity_instance_id == 0) return EOVERFLOW;
             result.session_id = session_id;
@@ -327,7 +325,7 @@ int NpmDnsUdpTrackerV1::OnMessage(uint64_t session_id, NpmPacketDirection direct
             return 0;
         }
         if (!ChargeResult()) return ENOSPC;
-        NpmDnsUdpResultV1 result;
+        NpmDnsUdpResult result;
         result.session_id = session_id;
         result.dns_id = message.dns_id;
         result.response_direction = direction;
@@ -370,8 +368,8 @@ int NpmDnsUdpTrackerV1::OnMessage(uint64_t session_id, NpmPacketDirection direct
     }
 }
 
-int NpmDnsUdpTrackerV1::OnResponsePathGap(uint64_t session_id, NpmPacketDirection response_direction,
-                                          int64_t observed_at_ns, std::vector<NpmDnsUdpResultV1>* results) {
+int NpmDnsUdpTracker::OnResponsePathGap(uint64_t session_id, NpmPacketDirection response_direction,
+                                        int64_t observed_at_ns, std::vector<NpmDnsUdpResult>* results) {
     if (!results || session_id == 0 ||
         (response_direction != NpmPacketDirection::kAToB && response_direction != NpmPacketDirection::kBToA))
         return EINVAL;
@@ -396,7 +394,7 @@ int NpmDnsUdpTrackerV1::OnResponsePathGap(uint64_t session_id, NpmPacketDirectio
     }
 }
 
-std::optional<int64_t> NpmDnsUdpTrackerV1::NextEventDeadlineNs() const {
+std::optional<int64_t> NpmDnsUdpTracker::NextEventDeadlineNs() const {
     std::optional<int64_t> next;
     for (const auto& session : pending_) {
         for (const auto& pending : session.second) {
@@ -407,7 +405,7 @@ std::optional<int64_t> NpmDnsUdpTrackerV1::NextEventDeadlineNs() const {
     return next;
 }
 
-int NpmDnsUdpTrackerV1::OnCaptureWatermark(int64_t watermark_ns, std::vector<NpmDnsUdpResultV1>* results) {
+int NpmDnsUdpTracker::OnCaptureWatermark(int64_t watermark_ns, std::vector<NpmDnsUdpResult>* results) {
     if (!results) return EINVAL;
     if (watermark_ns_ && watermark_ns <= *watermark_ns_) return 0;
     watermark_ns_ = watermark_ns;
@@ -436,8 +434,7 @@ int NpmDnsUdpTrackerV1::OnCaptureWatermark(int64_t watermark_ns, std::vector<Npm
     }
 }
 
-int NpmDnsUdpTrackerV1::OnSessionEnd(uint64_t session_id, int64_t observed_at_ns,
-                                     std::vector<NpmDnsUdpResultV1>* results) {
+int NpmDnsUdpTracker::OnSessionEnd(uint64_t session_id, int64_t observed_at_ns, std::vector<NpmDnsUdpResult>* results) {
     if (!results || session_id == 0) return EINVAL;
     const auto found = pending_.find(session_id);
     if (found == pending_.end()) return 0;
@@ -455,21 +452,21 @@ int NpmDnsUdpTrackerV1::OnSessionEnd(uint64_t session_id, int64_t observed_at_ns
     }
 }
 
-size_t NpmDnsUdpTrackerV1::PendingCount(uint64_t session_id) const {
+size_t NpmDnsUdpTracker::PendingCount(uint64_t session_id) const {
     const auto found = pending_.find(session_id);
     return found == pending_.end() ? 0 : found->second.size();
 }
 
-void NpmDnsUdpTrackerV1::ReleaseResults(std::vector<NpmDnsUdpResultV1>* results) noexcept {
+void NpmDnsUdpTracker::ReleaseResults(std::vector<NpmDnsUdpResult>* results) noexcept {
     if (results) {
-        std::vector<NpmDnsUdpResultV1> empty;
+        std::vector<NpmDnsUdpResult> empty;
         results->swap(empty);
     }
     if (budget_ && result_charge_bytes_) budget_->Release(NpmBudgetCategory::kModuleState, result_charge_bytes_);
     result_charge_bytes_ = 0;
 }
 
-void NpmDnsUdpTrackerV1::Abort() noexcept {
+void NpmDnsUdpTracker::Abort() noexcept {
     for (const auto& session : pending_) ReleasePending(session.second.size());
     pending_.clear();
     ReleaseResults(nullptr);

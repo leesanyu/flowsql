@@ -12,12 +12,12 @@
 
 namespace flowsql::npm {
 
-enum class NpmIcmpMessageKindV1 : uint8_t { kIgnored = 0, kEchoRequest, kEchoReply, kError };
-enum class NpmIcmpParseErrorV1 : uint8_t { kNone = 0, kInvalidInput };
+enum class NpmIcmpMessageKind : uint8_t { kIgnored = 0, kEchoRequest, kEchoReply, kError };
+enum class NpmIcmpParseError : uint8_t { kNone = 0, kInvalidInput };
 
 template <typename Address>
 struct NpmIcmpFamilyParsed {
-    NpmIcmpMessageKindV1 kind = NpmIcmpMessageKindV1::kIgnored;
+    NpmIcmpMessageKind kind = NpmIcmpMessageKind::kIgnored;
     Address src_ip;
     Address dst_ip;
     uint8_t icmp_type = 0;
@@ -39,7 +39,7 @@ using NpmIcmpParsed6 = NpmIcmpFamilyParsed<network::IPv6Address>;
 
 /** Parses only captured bytes; ignored control messages and incomplete headers are not task errors. */
 template <typename Address>
-NpmIcmpParseErrorV1 ParseNpmIcmpControlV1(const NpmInputEventV1& input, NpmIcmpFamilyParsed<Address>* output);
+NpmIcmpParseError ParseNpmIcmpControl(const NpmInputEvent& input, NpmIcmpFamilyParsed<Address>* output);
 
 }  // namespace flowsql::npm
 

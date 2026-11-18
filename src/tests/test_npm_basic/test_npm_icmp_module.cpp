@@ -24,7 +24,7 @@ namespace npm = flowsql::npm;
 
 namespace {
 
-class Emitter final : public npm::INpmResultEmitterV1 {
+class Emitter final : public npm::INpmResultEmitter {
  public:
     std::vector<std::shared_ptr<arrow::RecordBatch>> rows;
     int failure = 0;
@@ -39,7 +39,7 @@ class Emitter final : public npm::INpmResultEmitterV1 {
 struct Input {
     std::vector<uint8_t> bytes;
     flowsql::testing::OwnedPacketLayer layer;
-    npm::NpmInputEventV1 event;
+    npm::NpmInputEvent event;
     Input(uint8_t type, int64_t timestamp, bool reverse = false, uint64_t domain = 7, bool ipv6 = false) {
         const size_t header = ipv6 ? 40 : 20;
         bytes.resize(header + 8);
@@ -73,7 +73,7 @@ struct Input {
             dst.bytes[3] = reverse ? 1 : 2;
             layer.SetEndpoints(src, dst);
         }
-        event.kind = npm::NpmInputKindV1::kControlPacket;
+        event.kind = npm::NpmInputKind::kControlPacket;
         event.observation_domain_id = domain;
         event.packet.meta.timestamp_ns = timestamp;
         event.packet.meta.captured_len = static_cast<uint32_t>(bytes.size());
@@ -124,7 +124,7 @@ void TestModuleAndBudget(bool ipv6) {
     const auto family = ipv6 ? flowsql::packet::AddressFamily::kIPv6 : flowsql::packet::AddressFamily::kIPv4;
     auto config = npm::DefaultNpmAnalysisConfig(npm::NpmRunMode::kOffline);
     auto budget = std::make_shared<npm::NpmTaskBudget>(config);
-    npm::NpmIcmpProtocolModuleV1 module({}, budget);
+    npm::NpmIcmpProtocolModule module({}, budget);
     Emitter emitter;
     Input request(ipv6 ? 128 : 8, 100, false, 7, ipv6), reply(ipv6 ? 129 : 0, 120, true, 7, ipv6),
         error(ipv6 ? 1 : 3, 125, false, 7, ipv6);
@@ -132,9 +132,9 @@ void TestModuleAndBudget(bool ipv6) {
     assert(module.OnInput(reply.event, emitter) == 0);
     assert(emitter.rows.size() == 1);
     const auto& row = emitter.rows.back();
-    assert(row->schema()->Equals(*npm::NpmIcmpEventEntityDescriptorV1(family).schema, true));
-    assert(npm::ValidateNpmEntityRowsV1("icmp", npm::NpmIcmpEventEntityDescriptorV1(family), *row).error ==
-           npm::NpmProtocolContractErrorV1::kNone);
+    assert(row->schema()->Equals(*npm::NpmIcmpEventEntityDescriptor(family).schema, true));
+    assert(npm::ValidateNpmEntityRows("icmp", npm::NpmIcmpEventEntityDescriptor(family), *row).error ==
+           npm::NpmProtocolContractError::kNone);
     assert(Column<arrow::StringArray>(row, "outcome")->GetString(0) == "echo_matched");
     assert(Column<arrow::Int64Array>(row, "latency_ns")->Value(0) == 20);
     assert(module.OnInput(error.event, emitter) == 0);
@@ -146,7 +146,7 @@ void TestModuleAndBudget(bool ipv6) {
     module.Abort();
     assert(budget->Usage().module_state_bytes == 0);
 
-    npm::NpmIcmpProtocolModuleV1 failed({}, budget);
+    npm::NpmIcmpProtocolModule failed({}, budget);
     Emitter rejecting;
     assert(failed.OnInput(request.event, rejecting) == 0);
     assert(budget->Usage().module_state_bytes > 0);
@@ -157,7 +157,7 @@ void TestModuleAndBudget(bool ipv6) {
 
     config.max_tracked_bytes = 1;
     auto tiny_budget = std::make_shared<npm::NpmTaskBudget>(config);
-    npm::NpmIcmpProtocolModuleV1 tiny({}, tiny_budget);
+    npm::NpmIcmpProtocolModule tiny({}, tiny_budget);
     assert(tiny.OnInput(request.event, emitter) == ENOMEM);
     assert(tiny.OnInput(error.event, emitter) == ENOSPC);
     tiny.Abort();
@@ -215,7 +215,7 @@ void TestActiveQuotedSession() {
     assert(sessions.Observe(other_binding, meta, &other_observed) == npm::NpmSessionTableError::kNone);
     assert(other_observed.active_session.session_id != session_id);
 
-    npm::NpmIcmpProtocolModuleV1 module({}, budget);
+    npm::NpmIcmpProtocolModule module({}, budget);
     module.BindSessions(&sessions, "default");
     Emitter emitter;
     Input error(ipv6 ? 1 : 3, 60, false, 7, ipv6);

@@ -32,8 +32,8 @@ int SnapshotInput::Initialize(ConfigSnapshot config, std::shared_ptr<IDatabaseCh
     opened_ = true;
     return 0;
 }
-int SnapshotInput::InitializeDataFrame(ConfigSnapshot config, const BlockDataFrameInputBindingV1& binding) {
-    if (opened_ || reader_ || dataframe_reader_ || cancelled_ || !ValidBlockDataFrameInputBindingV1(binding)) {
+int SnapshotInput::InitializeDataFrame(ConfigSnapshot config, const BlockDataFrameInputBinding& binding) {
+    if (opened_ || reader_ || dataframe_reader_ || cancelled_ || !ValidBlockDataFrameInputBinding(binding)) {
         error_ = "invalid DataFrame input initialization";
         return -1;
     }
@@ -158,9 +158,9 @@ int SnapshotInput::ReleaseBlock(const std::shared_ptr<arrow::RecordBatch>& block
     if (boundary_emitted_ && !cancelled_) progress_readable_ = true;
     return 0;
 }
-int SnapshotInput::ReadInputProgress(BlockInputProgressV1* output) const {
+int SnapshotInput::ReadInputProgress(BlockInputProgress* output) const {
     if (!output || outstanding_ || cancelled_) return -1;
-    *output = progress_readable_ ? dataframe_progress_ : BlockInputProgressV1{};
+    *output = progress_readable_ ? dataframe_progress_ : BlockInputProgress{};
     return 0;
 }
 void SnapshotInput::Cancel() {

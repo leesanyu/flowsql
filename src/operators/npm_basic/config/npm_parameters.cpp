@@ -18,7 +18,7 @@
 namespace flowsql::npm {
 namespace {
 
-NpmParameterStatusV1 Fail(NpmParameterErrorV1 error, std::string path = {}) { return {error, std::move(path)}; }
+NpmParameterStatus Fail(NpmParameterError error, std::string path = {}) { return {error, std::move(path)}; }
 
 std::string EscapeJsonPointerToken(std::string_view token) {
     std::string escaped;
@@ -39,17 +39,17 @@ std::string ChildPath(const std::string& path, std::string_view token) {
     return path + "/" + EscapeJsonPointerToken(token);
 }
 
-void KeepLexicographicallyFirst(NpmParameterStatusV1 candidate, NpmParameterStatusV1* best) {
-    if (!best || candidate.error == NpmParameterErrorV1::kNone) return;
-    if (best->error == NpmParameterErrorV1::kNone || candidate.path < best->path) {
+void KeepLexicographicallyFirst(NpmParameterStatus candidate, NpmParameterStatus* best) {
+    if (!best || candidate.error == NpmParameterError::kNone) return;
+    if (best->error == NpmParameterError::kNone || candidate.path < best->path) {
         *best = std::move(candidate);
     }
 }
 
 void ValidateJsonTree(const rapidjson::Value& value, const std::string& path, std::size_t depth,
-                      NpmParameterStatusV1* best) {
-    if (depth > kNpmParametersMaxDepthV1) {
-        KeepLexicographicallyFirst(Fail(NpmParameterErrorV1::kNestingTooDeep, path), best);
+                      NpmParameterStatus* best) {
+    if (depth > kNpmParametersMaxDepth) {
+        KeepLexicographicallyFirst(Fail(NpmParameterError::kNestingTooDeep, path), best);
         return;
     }
     if (value.IsObject()) {
@@ -57,7 +57,7 @@ void ValidateJsonTree(const rapidjson::Value& value, const std::string& path, st
             const std::string_view name(member->name.GetString(), member->name.GetStringLength());
             for (auto previous = value.MemberBegin(); previous != member; ++previous) {
                 if (name == std::string_view(previous->name.GetString(), previous->name.GetStringLength())) {
-                    KeepLexicographicallyFirst(Fail(NpmParameterErrorV1::kDuplicateField, ChildPath(path, name)), best);
+                    KeepLexicographicallyFirst(Fail(NpmParameterError::kDuplicateField, ChildPath(path, name)), best);
                     break;
                 }
             }
@@ -79,8 +79,8 @@ bool IsAllowedField(std::string_view name, const char* const* fields, std::size_
     return false;
 }
 
-NpmParameterStatusV1 RejectUnknownFields(const rapidjson::Value& object, const std::string& path,
-                                         const char* const* fields, std::size_t field_count) {
+NpmParameterStatus RejectUnknownFields(const rapidjson::Value& object, const std::string& path,
+                                       const char* const* fields, std::size_t field_count) {
     bool has_unknown = false;
     std::string first_unknown;
     for (auto member = object.MemberBegin(); member != object.MemberEnd(); ++member) {
@@ -91,7 +91,7 @@ NpmParameterStatusV1 RejectUnknownFields(const rapidjson::Value& object, const s
         }
     }
     if (has_unknown) {
-        return Fail(NpmParameterErrorV1::kUnknownConsumedField, ChildPath(path, first_unknown));
+        return Fail(NpmParameterError::kUnknownConsumedField, ChildPath(path, first_unknown));
     }
     return {};
 }
@@ -101,48 +101,48 @@ const rapidjson::Value* Find(const rapidjson::Value& object, const char* name) {
     return member == object.MemberEnd() ? nullptr : &member->value;
 }
 
-NpmParameterStatusV1 ReadString(const rapidjson::Value& object, const char* name, const std::string& path,
-                                const rapidjson::Value** output) {
+NpmParameterStatus ReadString(const rapidjson::Value& object, const char* name, const std::string& path,
+                              const rapidjson::Value** output) {
     const rapidjson::Value* value = Find(object, name);
     if (output) *output = value;
     if (!value) return {};
     if (!value->IsString()) {
-        return Fail(NpmParameterErrorV1::kInvalidType, ChildPath(path, name));
+        return Fail(NpmParameterError::kInvalidType, ChildPath(path, name));
     }
     return {};
 }
 
-NpmParameterStatusV1 ReadInt64(const rapidjson::Value& object, const char* name, const std::string& path,
-                               int64_t* output) {
+NpmParameterStatus ReadInt64(const rapidjson::Value& object, const char* name, const std::string& path,
+                             int64_t* output) {
     const rapidjson::Value* value = Find(object, name);
     if (!value) return {};
     if (!value->IsInt64()) {
-        return Fail(NpmParameterErrorV1::kInvalidType, ChildPath(path, name));
+        return Fail(NpmParameterError::kInvalidType, ChildPath(path, name));
     }
     *output = value->GetInt64();
     return {};
 }
 
-NpmParameterStatusV1 ReadUint64(const rapidjson::Value& object, const char* name, const std::string& path,
-                                uint64_t* output) {
+NpmParameterStatus ReadUint64(const rapidjson::Value& object, const char* name, const std::string& path,
+                              uint64_t* output) {
     const rapidjson::Value* value = Find(object, name);
     if (!value) return {};
     if (!value->IsUint64()) {
-        return Fail(NpmParameterErrorV1::kInvalidType, ChildPath(path, name));
+        return Fail(NpmParameterError::kInvalidType, ChildPath(path, name));
     }
     *output = value->GetUint64();
     return {};
 }
 
-NpmParameterStatusV1 ReadUint32(const rapidjson::Value& object, const char* name, const std::string& path,
-                                uint32_t* output) {
+NpmParameterStatus ReadUint32(const rapidjson::Value& object, const char* name, const std::string& path,
+                              uint32_t* output) {
     const rapidjson::Value* value = Find(object, name);
     if (!value) return {};
     if (!value->IsUint64()) {
-        return Fail(NpmParameterErrorV1::kInvalidType, ChildPath(path, name));
+        return Fail(NpmParameterError::kInvalidType, ChildPath(path, name));
     }
     if (value->GetUint64() > std::numeric_limits<uint32_t>::max()) {
-        return Fail(NpmParameterErrorV1::kInvalidRange, ChildPath(path, name));
+        return Fail(NpmParameterError::kInvalidRange, ChildPath(path, name));
     }
     *output = static_cast<uint32_t>(value->GetUint64());
     return {};
@@ -183,49 +183,49 @@ bool IsValidLabelingMemoryMiB(uint32_t value) {
     return value >= kNpmMinLabelingMemoryMiB && value <= kNpmMaxLabelingMemoryMiB;
 }
 
-NpmParameterStatusV1 ValidateAnalysisRange(const NpmAnalysisConfig& config) {
+NpmParameterStatus ValidateAnalysisRange(const NpmAnalysisConfig& config) {
     switch (ValidateNpmAnalysisConfig(config)) {
         case NpmAnalysisConfigError::kNone:
             return {};
         case NpmAnalysisConfigError::kInvalidRunMode:
-            return Fail(NpmParameterErrorV1::kInvalidValue, "/core/run_mode");
+            return Fail(NpmParameterError::kInvalidValue, "/core/run_mode");
         case NpmAnalysisConfigError::kInvalidResultMode:
-            return Fail(NpmParameterErrorV1::kInvalidValue, "/core/result_mode");
+            return Fail(NpmParameterError::kInvalidValue, "/core/result_mode");
         case NpmAnalysisConfigError::kOutputIntervalOutOfRange:
-            return Fail(NpmParameterErrorV1::kInvalidRange, "/core/output_interval_ns");
+            return Fail(NpmParameterError::kInvalidRange, "/core/output_interval_ns");
         case NpmAnalysisConfigError::kPayloadSamplePacketsOutOfRange:
-            return Fail(NpmParameterErrorV1::kInvalidRange, "/core/payload_sample_packets");
+            return Fail(NpmParameterError::kInvalidRange, "/core/payload_sample_packets");
         case NpmAnalysisConfigError::kTcpIdleTimeoutOutOfRange:
-            return Fail(NpmParameterErrorV1::kInvalidRange, "/core/tcp_idle_timeout_ns");
+            return Fail(NpmParameterError::kInvalidRange, "/core/tcp_idle_timeout_ns");
         case NpmAnalysisConfigError::kUdpIdleTimeoutOutOfRange:
-            return Fail(NpmParameterErrorV1::kInvalidRange, "/core/udp_idle_timeout_ns");
+            return Fail(NpmParameterError::kInvalidRange, "/core/udp_idle_timeout_ns");
         case NpmAnalysisConfigError::kOutOfOrderToleranceOutOfRange:
-            return Fail(NpmParameterErrorV1::kInvalidRange, "/core/out_of_order_tolerance_ns");
+            return Fail(NpmParameterError::kInvalidRange, "/core/out_of_order_tolerance_ns");
         case NpmAnalysisConfigError::kActiveSessionsOutOfRange:
-            return Fail(NpmParameterErrorV1::kInvalidRange, "/core/max_active_sessions");
+            return Fail(NpmParameterError::kInvalidRange, "/core/max_active_sessions");
         case NpmAnalysisConfigError::kTrackedBytesOutOfRange:
-            return Fail(NpmParameterErrorV1::kInvalidRange, "/core/max_tracked_bytes");
+            return Fail(NpmParameterError::kInvalidRange, "/core/max_tracked_bytes");
         case NpmAnalysisConfigError::kPendingOutputBytesOutOfRange:
-            return Fail(NpmParameterErrorV1::kInvalidRange, "/core/max_pending_output_bytes");
+            return Fail(NpmParameterError::kInvalidRange, "/core/max_pending_output_bytes");
         case NpmAnalysisConfigError::kUnsupportedOverloadPolicy:
-            return Fail(NpmParameterErrorV1::kInvalidValue, "/core/overload_policy");
+            return Fail(NpmParameterError::kInvalidValue, "/core/overload_policy");
     }
-    return Fail(NpmParameterErrorV1::kInvalidValue, "/core");
+    return Fail(NpmParameterError::kInvalidValue, "/core");
 }
 
-NpmParameterStatusV1 ParseCore(const rapidjson::Value* value, const NpmParameterConsumersV1& consumers,
-                               NpmCoreParametersV1* output) {
+NpmParameterStatus ParseCore(const rapidjson::Value* value, const NpmParameterConsumers& consumers,
+                             NpmCoreParameters* output) {
     output->analysis = DefaultNpmAnalysisConfig(NpmRunMode::kOffline);
     output->labeling_reference.reset();
     output->labeling_memory_mib.reset();
     output->result_retention_days.reset();
-    output->tcp_stream = NpmTcpStreamConfigV1{};
+    output->tcp_stream = NpmTcpStreamConfig{};
     if (consumers.labeling_enabled && consumers.labeling_available) {
         output->labeling_memory_mib = kNpmDefaultLabelingMemoryMiB;
     }
     if (!value) return {};
     if (!value->IsObject()) {
-        return Fail(NpmParameterErrorV1::kInvalidType, "/core");
+        return Fail(NpmParameterError::kInvalidType, "/core");
     }
 
     static constexpr const char* kFields[] = {
@@ -246,11 +246,11 @@ NpmParameterStatusV1 ParseCore(const rapidjson::Value* value, const NpmParameter
         "tcp_stream",
     };
     auto status = RejectUnknownFields(*value, "/core", kFields, std::size(kFields));
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
 
     const rapidjson::Value* text = nullptr;
     status = ReadString(*value, "run_mode", "/core", &text);
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
     if (text) {
         output->run_mode_explicit = true;
         const std::string_view mode(text->GetString(), text->GetStringLength());
@@ -259,12 +259,12 @@ NpmParameterStatusV1 ParseCore(const rapidjson::Value* value, const NpmParameter
         } else if (mode == "realtime") {
             output->analysis = DefaultNpmAnalysisConfig(NpmRunMode::kRealtime);
         } else {
-            return Fail(NpmParameterErrorV1::kInvalidValue, "/core/run_mode");
+            return Fail(NpmParameterError::kInvalidValue, "/core/run_mode");
         }
     }
 
     status = ReadString(*value, "result_mode", "/core", &text);
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
     if (text) {
         const std::string_view mode(text->GetString(), text->GetStringLength());
         if (mode == "final") {
@@ -272,93 +272,93 @@ NpmParameterStatusV1 ParseCore(const rapidjson::Value* value, const NpmParameter
         } else if (mode == "periodic_snapshot") {
             output->analysis.result_mode = NpmResultMode::kPeriodicSnapshot;
         } else {
-            return Fail(NpmParameterErrorV1::kInvalidValue, "/core/result_mode");
+            return Fail(NpmParameterError::kInvalidValue, "/core/result_mode");
         }
     }
 
     status = ReadString(*value, "overload_policy", "/core", &text);
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
     if (text) {
         const std::string_view policy(text->GetString(), text->GetStringLength());
         if (policy != "fail") {
-            return Fail(NpmParameterErrorV1::kInvalidValue, "/core/overload_policy");
+            return Fail(NpmParameterError::kInvalidValue, "/core/overload_policy");
         }
         output->analysis.overload_policy = NpmOverloadPolicy::kFail;
     }
 
     status = ReadInt64(*value, "output_interval_ns", "/core", &output->analysis.output_interval_ns);
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
     status = ReadUint32(*value, "payload_sample_packets", "/core", &output->analysis.payload_sample_packets);
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
     status = ReadInt64(*value, "tcp_idle_timeout_ns", "/core", &output->analysis.tcp_idle_timeout_ns);
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
     status = ReadInt64(*value, "udp_idle_timeout_ns", "/core", &output->analysis.udp_idle_timeout_ns);
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
     status = ReadInt64(*value, "out_of_order_tolerance_ns", "/core", &output->analysis.out_of_order_tolerance_ns);
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
     status = ReadUint64(*value, "max_active_sessions", "/core", &output->analysis.max_active_sessions);
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
     status = ReadUint64(*value, "max_tracked_bytes", "/core", &output->analysis.max_tracked_bytes);
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
     status = ReadUint64(*value, "max_pending_output_bytes", "/core", &output->analysis.max_pending_output_bytes);
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
 
     status = ValidateAnalysisRange(output->analysis);
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
 
     if (consumers.labeling_enabled && consumers.labeling_available) {
         status = ReadString(*value, "labeling", "/core", &text);
-        if (status.error != NpmParameterErrorV1::kNone) return status;
+        if (status.error != NpmParameterError::kNone) return status;
         if (text) {
             const std::string_view reference(text->GetString(), text->GetStringLength());
             if (!IsValidExactConfigReference(reference)) {
-                return Fail(NpmParameterErrorV1::kInvalidExactReference, "/core/labeling");
+                return Fail(NpmParameterError::kInvalidExactReference, "/core/labeling");
             }
             output->labeling_reference.emplace(reference);
         }
         uint32_t labeling_memory_mib = *output->labeling_memory_mib;
         status = ReadUint32(*value, "labeling_memory_mib", "/core", &labeling_memory_mib);
-        if (status.error != NpmParameterErrorV1::kNone) return status;
+        if (status.error != NpmParameterError::kNone) return status;
         if (!IsValidLabelingMemoryMiB(labeling_memory_mib) ||
             output->analysis.max_tracked_bytes < static_cast<uint64_t>(labeling_memory_mib) * 2 * kNpmMebibyte) {
-            return Fail(NpmParameterErrorV1::kInvalidRange, "/core/labeling_memory_mib");
+            return Fail(NpmParameterError::kInvalidRange, "/core/labeling_memory_mib");
         }
         output->labeling_memory_mib = labeling_memory_mib;
     }
     if (const rapidjson::Value* result = Find(*value, "result")) {
-        if (!result->IsObject()) return Fail(NpmParameterErrorV1::kInvalidType, "/core/result");
+        if (!result->IsObject()) return Fail(NpmParameterError::kInvalidType, "/core/result");
         static constexpr const char* kResultFields[] = {"retention_days"};
         status = RejectUnknownFields(*result, "/core/result", kResultFields, std::size(kResultFields));
-        if (status.error != NpmParameterErrorV1::kNone) return status;
+        if (status.error != NpmParameterError::kNone) return status;
         if (Find(*result, "retention_days")) {
             uint32_t days = 0;
             status = ReadUint32(*result, "retention_days", "/core/result", &days);
-            if (status.error != NpmParameterErrorV1::kNone) return status;
+            if (status.error != NpmParameterError::kNone) return status;
             if (days < 1 || days > 3650) {
-                return Fail(NpmParameterErrorV1::kInvalidRange, "/core/result/retention_days");
+                return Fail(NpmParameterError::kInvalidRange, "/core/result/retention_days");
             }
             output->result_retention_days = days;
         }
     }
     if (const rapidjson::Value* stream = Find(*value, "tcp_stream")) {
-        if (!stream->IsObject()) return Fail(NpmParameterErrorV1::kInvalidType, "/core/tcp_stream");
+        if (!stream->IsObject()) return Fail(NpmParameterError::kInvalidType, "/core/tcp_stream");
         static constexpr const char* kStreamFields[] = {"max_buffered_bytes_per_direction", "gap_timeout_ns"};
         status = RejectUnknownFields(*stream, "/core/tcp_stream", kStreamFields, std::size(kStreamFields));
-        if (status.error != NpmParameterErrorV1::kNone) return status;
+        if (status.error != NpmParameterError::kNone) return status;
 
         uint64_t max_buffered = output->tcp_stream.max_buffered_bytes_per_direction;
         status = ReadUint64(*stream, "max_buffered_bytes_per_direction", "/core/tcp_stream", &max_buffered);
-        if (status.error != NpmParameterErrorV1::kNone) return status;
+        if (status.error != NpmParameterError::kNone) return status;
         if (max_buffered < kNpmMinTcpStreamBufferedBytesPerDirection ||
             max_buffered > kNpmMaxTcpStreamBufferedBytesPerDirection) {
-            return Fail(NpmParameterErrorV1::kInvalidRange, "/core/tcp_stream/max_buffered_bytes_per_direction");
+            return Fail(NpmParameterError::kInvalidRange, "/core/tcp_stream/max_buffered_bytes_per_direction");
         }
 
         int64_t gap_timeout = output->tcp_stream.gap_timeout_ns;
         status = ReadInt64(*stream, "gap_timeout_ns", "/core/tcp_stream", &gap_timeout);
-        if (status.error != NpmParameterErrorV1::kNone) return status;
+        if (status.error != NpmParameterError::kNone) return status;
         if (gap_timeout < kNpmMinTcpStreamGapTimeoutNs || gap_timeout > kNpmMaxTcpStreamGapTimeoutNs) {
-            return Fail(NpmParameterErrorV1::kInvalidRange, "/core/tcp_stream/gap_timeout_ns");
+            return Fail(NpmParameterError::kInvalidRange, "/core/tcp_stream/gap_timeout_ns");
         }
         output->tcp_stream.max_buffered_bytes_per_direction = max_buffered;
         output->tcp_stream.gap_timeout_ns = gap_timeout;
@@ -366,120 +366,119 @@ NpmParameterStatusV1 ParseCore(const rapidjson::Value* value, const NpmParameter
     return {};
 }
 
-NpmParameterStatusV1 ValidateModuleNodes(const rapidjson::Value& root) {
+NpmParameterStatus ValidateModuleNodes(const rapidjson::Value& root) {
     bool has_invalid = false;
     std::string first_invalid;
     for (auto member = root.MemberBegin(); member != root.MemberEnd(); ++member) {
         const std::string_view name(member->name.GetString(), member->name.GetStringLength());
         if (name == "schema_version" || name == "core") continue;
         if (name == "framework") {
-            return Fail(NpmParameterErrorV1::kUnknownConsumedField, "/framework");
+            return Fail(NpmParameterError::kUnknownConsumedField, "/framework");
         }
         if (!member->value.IsObject() && (!has_invalid || name < first_invalid)) {
             has_invalid = true;
             first_invalid.assign(name.data(), name.size());
         }
     }
-    return has_invalid ? Fail(NpmParameterErrorV1::kInvalidType, ChildPath("", first_invalid)) : NpmParameterStatusV1{};
+    return has_invalid ? Fail(NpmParameterError::kInvalidType, ChildPath("", first_invalid)) : NpmParameterStatus{};
 }
 
-NpmParameterStatusV1 ParseBasic(const rapidjson::Value* value, NpmBasicModuleParametersV1* output) {
+NpmParameterStatus ParseBasic(const rapidjson::Value* value, NpmBasicModuleParameters* output) {
     if (!value) {
         *output = {};
         return {};
     }
     const auto status = RejectUnknownFields(*value, "/basic", nullptr, 0);
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
     *output = {};
     return {};
 }
 
-NpmParameterStatusV1 ParseSession(const rapidjson::Value* value, NpmSessionModuleParametersV1* output) {
+NpmParameterStatus ParseSession(const rapidjson::Value* value, NpmSessionModuleParameters* output) {
     *output = {};
     if (!value) return {};
     static constexpr const char* kFields[] = {"max_tcp_ranges_per_direction"};
     auto status = RejectUnknownFields(*value, "/session", kFields, std::size(kFields));
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
     status = ReadUint32(*value, "max_tcp_ranges_per_direction", "/session", &output->max_tcp_ranges_per_direction);
-    if (status.error != NpmParameterErrorV1::kNone) return status;
+    if (status.error != NpmParameterError::kNone) return status;
     if (output->max_tcp_ranges_per_direction < kNpmMinSessionTcpRangesPerDirection ||
         output->max_tcp_ranges_per_direction > kNpmMaxSessionTcpRangesPerDirection) {
-        return Fail(NpmParameterErrorV1::kInvalidRange, "/session/max_tcp_ranges_per_direction");
+        return Fail(NpmParameterError::kInvalidRange, "/session/max_tcp_ranges_per_direction");
     }
     return {};
 }
 
 }  // namespace
 
-NpmParameterStatusV1 ParseNpmParametersV1(const char* parameters_json, const NpmParameterConsumersV1& consumers,
-                                          NpmTaskParametersV1* output) {
-    if (!parameters_json) return Fail(NpmParameterErrorV1::kNullInput);
-    if (parameters_json[0] == '\0') return Fail(NpmParameterErrorV1::kEmptyInput);
-    if (!output) return Fail(NpmParameterErrorV1::kNullOutput);
+NpmParameterStatus ParseNpmParameters(const char* parameters_json, const NpmParameterConsumers& consumers,
+                                      NpmTaskParameters* output) {
+    if (!parameters_json) return Fail(NpmParameterError::kNullInput);
+    if (parameters_json[0] == '\0') return Fail(NpmParameterError::kEmptyInput);
+    if (!output) return Fail(NpmParameterError::kNullOutput);
     std::size_t json_size = 0;
-    while (json_size <= kNpmParametersMaxJsonBytesV1 && parameters_json[json_size] != '\0') {
+    while (json_size <= kNpmParametersMaxJsonBytes && parameters_json[json_size] != '\0') {
         ++json_size;
     }
-    if (json_size > kNpmParametersMaxJsonBytesV1) {
-        return Fail(NpmParameterErrorV1::kJsonTooLarge);
+    if (json_size > kNpmParametersMaxJsonBytes) {
+        return Fail(NpmParameterError::kJsonTooLarge);
     }
 
     try {
         rapidjson::Document document;
         document.Parse<rapidjson::kParseValidateEncodingFlag | rapidjson::kParseIterativeFlag>(parameters_json);
-        if (document.HasParseError()) return Fail(NpmParameterErrorV1::kInvalidJson);
-        if (!document.IsObject()) return Fail(NpmParameterErrorV1::kInvalidEnvelope);
+        if (document.HasParseError()) return Fail(NpmParameterError::kInvalidJson);
+        if (!document.IsObject()) return Fail(NpmParameterError::kInvalidEnvelope);
 
-        NpmParameterStatusV1 structural_status;
+        NpmParameterStatus structural_status;
         ValidateJsonTree(document, "", 0, &structural_status);
-        if (structural_status.error != NpmParameterErrorV1::kNone) return structural_status;
+        if (structural_status.error != NpmParameterError::kNone) return structural_status;
 
         const rapidjson::Value* schema_version = Find(document, "schema_version");
         if (!schema_version) {
-            return Fail(NpmParameterErrorV1::kMissingSchemaVersion, "/schema_version");
+            return Fail(NpmParameterError::kMissingSchemaVersion, "/schema_version");
         }
         if (!schema_version->IsUint()) {
-            return Fail(NpmParameterErrorV1::kInvalidType, "/schema_version");
+            return Fail(NpmParameterError::kInvalidType, "/schema_version");
         }
         if (schema_version->GetUint() != 1) {
-            return Fail(NpmParameterErrorV1::kUnsupportedVersion, "/schema_version");
+            return Fail(NpmParameterError::kUnsupportedVersion, "/schema_version");
         }
 
         auto status = ValidateModuleNodes(document);
-        if (status.error != NpmParameterErrorV1::kNone) return status;
+        if (status.error != NpmParameterError::kNone) return status;
         if (consumers.basic_enabled && !consumers.basic_available) {
-            return Fail(NpmParameterErrorV1::kUnavailableFeature, "/basic");
+            return Fail(NpmParameterError::kUnavailableFeature, "/basic");
         }
         if (consumers.labeling_enabled && !consumers.labeling_available) {
-            return Fail(NpmParameterErrorV1::kUnavailableFeature, "/labeling");
+            return Fail(NpmParameterError::kUnavailableFeature, "/labeling");
         }
         if (consumers.session_enabled && !consumers.session_available) {
-            return Fail(NpmParameterErrorV1::kUnavailableFeature, "/session");
+            return Fail(NpmParameterError::kUnavailableFeature, "/session");
         }
 
-        NpmTaskParametersV1 next;
+        NpmTaskParameters next;
         next.schema_version = 1;
-        next.source = NpmParameterSourceV1::kParametersV1;
         status = ParseCore(Find(document, "core"), consumers, &next.core);
-        if (status.error != NpmParameterErrorV1::kNone) return status;
+        if (status.error != NpmParameterError::kNone) return status;
 
         if (consumers.basic_enabled) {
-            NpmBasicModuleParametersV1 basic;
+            NpmBasicModuleParameters basic;
             status = ParseBasic(Find(document, "basic"), &basic);
-            if (status.error != NpmParameterErrorV1::kNone) return status;
+            if (status.error != NpmParameterError::kNone) return status;
             next.basic = std::move(basic);
         }
         if (consumers.session_enabled) {
-            NpmSessionModuleParametersV1 session;
+            NpmSessionModuleParameters session;
             status = ParseSession(Find(document, "session"), &session);
-            if (status.error != NpmParameterErrorV1::kNone) return status;
+            if (status.error != NpmParameterError::kNone) return status;
             next.session = std::move(session);
         }
 
         *output = std::move(next);
         return {};
     } catch (const std::bad_alloc&) {
-        return Fail(NpmParameterErrorV1::kAllocationFailed);
+        return Fail(NpmParameterError::kAllocationFailed);
     }
 }
 

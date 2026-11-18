@@ -33,20 +33,20 @@ services:
         option: "db_path=./meta/flowsql_meta.db"
       - name: libflowsql_netadapter.so
         option: '{"db_path":"./meta/netadapter.db"}'
-      - libflowsql_capture_af_packet.so
-      - libflowsql_capture_pfring.so
-      - libflowsql_capture_af_xdp.so
+      - name: libflowsql_capture_af_packet.so
+      - name: libflowsql_capture_pfring.so
+      - name: libflowsql_capture_af_xdp.so
       - name: libflowsql_config_channel.so
         option: "db_path=./meta/flowsql_meta.db"
       - name: libflowsql_flow_labeling.so
         option: "eal_memory_mib=512"
-      - libflowsql_baseline.so
+      - name: libflowsql_baseline.so
       # Uses the same persistent config/key as single-process startup (docs/kafka.md).
       - name: libflowsql_kafka.so
         option: '{}'
-      - libflowsql_scheduler.so
-      - libflowsql_bridge.so
-      - libflowsql_builtin.so
+      - name: libflowsql_scheduler.so
+      - name: libflowsql_bridge.so
+      - name: libflowsql_builtin.so
       - name: libflowsql_catalog.so
         option: "data_dir=./dataframes;operator_db_path=./meta/flowsql_meta.db"
       - name: libflowsql_binaddon.so

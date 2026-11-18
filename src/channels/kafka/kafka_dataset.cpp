@@ -3,8 +3,7 @@
 #include <common/channel_dataset.hpp>
 #include "kafka_plugin.h"
 namespace flowsql::channels::kafka {
-int Plugin::Describe(const ChannelDatasetRequestV1& request, ChannelDatasetSnapshotV1* out,
-                     DataSemanticsErrorV1* error) {
+int Plugin::Describe(const ChannelDatasetRequest& request, ChannelDatasetSnapshot* out, DataSemanticsError* error) {
     if (!out) return dataset::Fail(error, "INVALID_REQUEST", "output is required");
     *out = {};
     if (error) *error = {};

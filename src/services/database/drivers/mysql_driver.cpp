@@ -281,7 +281,7 @@ int MysqlSession::ExecuteSql(const char* sql) {
 
 namespace {
 
-int BindMysqlParameters(MYSQL_STMT* statement, const DatabaseParameterV1* parameters, size_t parameter_count,
+int BindMysqlParameters(MYSQL_STMT* statement, const DatabaseParameter* parameters, size_t parameter_count,
                         std::string* error) {
     if (mysql_stmt_param_count(statement) != parameter_count ||
         parameter_count > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
@@ -298,28 +298,28 @@ int BindMysqlParameters(MYSQL_STMT* statement, const DatabaseParameterV1* parame
         binding.is_null = &nulls[index];
         const auto& parameter = parameters[index];
         switch (parameter.kind) {
-            case DatabaseParameterKindV1::kNull:
+            case DatabaseParameterKind::kNull:
                 binding.buffer_type = MYSQL_TYPE_NULL;
                 nulls[index] = 1;
                 break;
-            case DatabaseParameterKindV1::kInt64:
+            case DatabaseParameterKind::kInt64:
                 binding.buffer_type = MYSQL_TYPE_LONGLONG;
                 binding.buffer = const_cast<int64_t*>(&parameter.int64_value);
                 binding.buffer_length = sizeof(parameter.int64_value);
                 break;
-            case DatabaseParameterKindV1::kUInt64:
+            case DatabaseParameterKind::kUInt64:
                 binding.buffer_type = MYSQL_TYPE_LONGLONG;
                 binding.buffer = const_cast<uint64_t*>(&parameter.uint64_value);
                 binding.buffer_length = sizeof(parameter.uint64_value);
                 binding.is_unsigned = 1;
                 break;
-            case DatabaseParameterKindV1::kDouble:
+            case DatabaseParameterKind::kDouble:
                 binding.buffer_type = MYSQL_TYPE_DOUBLE;
                 binding.buffer = const_cast<double*>(&parameter.double_value);
                 binding.buffer_length = sizeof(parameter.double_value);
                 break;
-            case DatabaseParameterKindV1::kString:
-            case DatabaseParameterKindV1::kBlob:
+            case DatabaseParameterKind::kString:
+            case DatabaseParameterKind::kBlob:
                 if ((!parameter.data && parameter.size != 0) ||
                     parameter.size > static_cast<size_t>(std::numeric_limits<unsigned long>::max())) {
                     *error = "prepared command value exceeds MySQL limit";
@@ -327,7 +327,7 @@ int BindMysqlParameters(MYSQL_STMT* statement, const DatabaseParameterV1* parame
                 }
                 lengths[index] = static_cast<unsigned long>(parameter.size);
                 binding.buffer_type =
-                    parameter.kind == DatabaseParameterKindV1::kString ? MYSQL_TYPE_STRING : MYSQL_TYPE_BLOB;
+                    parameter.kind == DatabaseParameterKind::kString ? MYSQL_TYPE_STRING : MYSQL_TYPE_BLOB;
                 binding.buffer = const_cast<void*>(parameter.data);
                 binding.buffer_length = lengths[index];
                 binding.length = &lengths[index];
@@ -349,7 +349,7 @@ int BindMysqlParameters(MYSQL_STMT* statement, const DatabaseParameterV1* parame
 
 }  // namespace
 
-int MysqlSession::ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) {
+int MysqlSession::ExecutePrepared(const char* sql, const DatabaseParameter* parameters, size_t parameter_count) {
     last_error_.clear();
     if (!sql || (parameter_count != 0 && !parameters)) {
         last_error_ = "invalid prepared command";
@@ -362,7 +362,7 @@ int MysqlSession::ExecutePrepared(const char* sql, const DatabaseParameterV1* pa
     return result;
 }
 
-int MysqlSession::ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters,
+int MysqlSession::ExecutePreparedBatch(const char* sql, const DatabaseParameter* parameters,
                                        size_t parameters_per_execution, size_t execution_count) {
     last_error_.clear();
     if (!sql || (execution_count != 0 && (!parameters || parameters_per_execution == 0)) ||
@@ -667,7 +667,7 @@ void MysqlDriver::ReturnToPool(MYSQL* conn) {
 void MysqlDriver::DiscardSnapshot(MYSQL* conn) {
     if (pool_) pool_->Discard(conn);
 }
-int MysqlSession::BeginSnapshot(const DatabaseSnapshotOptionsV1& options) {
+int MysqlSession::BeginSnapshot(const DatabaseSnapshotOptions& options) {
     snapshot_timeout_ms_ = options.operation_timeout_ms;
     snapshot_socket_ = conn_->net.fd;
     timeval timeout{static_cast<long>(snapshot_timeout_ms_ / 1000),
@@ -684,7 +684,7 @@ void MysqlSession::CancelSnapshot() {
     const int socket = snapshot_socket_.load();
     if (socket >= 0) shutdown(socket, SHUT_RDWR);
 }
-int MysqlSession::SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+int MysqlSession::SnapshotPage(const char* sql, const DatabaseParameter* parameters, size_t count,
                                std::shared_ptr<arrow::Schema> expected, uint32_t max_rows, uint64_t max_bytes,
                                std::shared_ptr<arrow::RecordBatch>* output) {
     output->reset();
@@ -812,8 +812,8 @@ void MysqlSession::Cancel() {
     const int socket = snapshot_socket_.load();
     if (socket >= 0) shutdown(socket, SHUT_RDWR);
 }
-int MysqlSession::Query(const char* sql, const DatabaseParameterV1* parameters, size_t count, uint32_t max_rows,
-                        uint64_t max_bytes, ExplorationResultV1* output) {
+int MysqlSession::Query(const char* sql, const DatabaseParameter* parameters, size_t count, uint32_t max_rows,
+                        uint64_t max_bytes, ExplorationResult* output) {
     const auto started = std::chrono::steady_clock::now();
     auto failure = [&](unsigned code) {
         const bool timeout =
@@ -851,7 +851,7 @@ int MysqlSession::Query(const char* sql, const DatabaseParameterV1* parameters, 
     }
     const auto n = mysql_num_fields(metadata.get());
     const auto* fields = mysql_fetch_fields(metadata.get());
-    ExplorationResultV1 result;
+    ExplorationResult result;
     std::vector<std::string> types;
     for (unsigned i = 0; i < n; ++i) {
         std::string type = "text";
@@ -910,7 +910,7 @@ int MysqlSession::Query(const char* sql, const DatabaseParameterV1* parameters, 
             last_error_ = snapshot_cancelled_ ? "CANCELLED" : "RESULT_LIMIT";
             return -1;
         }
-        std::vector<ExplorationValueV1> row;
+        std::vector<ExplorationValue> row;
         for (unsigned i = 0; i < n; ++i) {
             bytes += 16 + (nulls[i] ? 0 : lengths[i]);
             if (bytes > max_bytes) {

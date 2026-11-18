@@ -49,9 +49,9 @@ std::optional<uint8_t> DirectionValue(std::optional<NpmPacketDirection> directio
 }  // namespace
 
 template <typename Address>
-int EmitNpmDnsTransactionV1(const NpmDnsFamilyResult<Address>& family_result,
-                            const std::shared_ptr<INpmTaskBudget>& budget, INpmResultEmitterV1& emitter,
-                            arrow::MemoryPool* pool) {
+int EmitNpmDnsTransaction(const NpmDnsFamilyResult<Address>& family_result,
+                          const std::shared_ptr<INpmTaskBudget>& budget, INpmResultEmitter& emitter,
+                          arrow::MemoryPool* pool) {
     const auto& result = family_result.transaction;
     const auto& session = family_result;
     if (!budget || result.entity_instance_id == 0 || result.session_id == 0 ||
@@ -122,18 +122,18 @@ int EmitNpmDnsTransactionV1(const NpmDnsFamilyResult<Address>& family_result,
             if (!status.ok()) return status.IsOutOfMemory() ? ENOMEM : EIO;
             columns.push_back(std::move(column));
         }
-        const auto schema = NpmDnsTransactionEntityDescriptorV1(NpmAddressArrowBuilder<Address>::family).schema;
+        const auto schema = NpmDnsTransactionEntityDescriptor(NpmAddressArrowBuilder<Address>::family).schema;
         auto batch = arrow::RecordBatch::Make(schema, 1, std::move(columns));
-        return emitter.Emit(NpmDnsTransactionEntityDescriptorV1(NpmAddressArrowBuilder<Address>::family).entity_id,
+        return emitter.Emit(NpmDnsTransactionEntityDescriptor(NpmAddressArrowBuilder<Address>::family).entity_id,
                             *batch);
     } catch (const std::bad_alloc&) {
         return ENOMEM;
     }
 }
 
-template int EmitNpmDnsTransactionV1(const NpmDnsResult4&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitterV1&,
-                                     arrow::MemoryPool*);
-template int EmitNpmDnsTransactionV1(const NpmDnsResult6&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitterV1&,
-                                     arrow::MemoryPool*);
+template int EmitNpmDnsTransaction(const NpmDnsResult4&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitter&,
+                                   arrow::MemoryPool*);
+template int EmitNpmDnsTransaction(const NpmDnsResult6&, const std::shared_ptr<INpmTaskBudget>&, INpmResultEmitter&,
+                                   arrow::MemoryPool*);
 
 }  // namespace flowsql::npm

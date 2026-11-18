@@ -23,7 +23,7 @@ std::string Text(const rapidjson::Value& object, const char* key, const std::str
 void String(rapidjson::Value& object, const char* key, const std::string& value, Json::AllocatorType& allocator);
 
 struct Binding {
-    KafkaBindingSnapshotV1 snapshot;
+    KafkaBindingSnapshot snapshot;
     std::string source_options_json, sink_options_json;
     Json connection;
     std::map<std::string, std::string> secrets;
@@ -40,7 +40,7 @@ class Store {
                size_t limit = 100);
     Json DescribeDataset(const rapidjson::Value& locator);
     Binding Acquire(const std::string& name, const std::string& usage);
-    void Release(const KafkaBindingSnapshotV1& snapshot);
+    void Release(const KafkaBindingSnapshot& snapshot);
     Binding Draft(Json connection);
     Binding AcquireConnection(const std::string& name);
     static void ValidateConnection(const rapidjson::Value& connection);

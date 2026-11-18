@@ -12,7 +12,7 @@
 
 namespace flowsql::npm {
 
-enum class NpmTlsFramerErrorV1 : uint8_t {
+enum class NpmTlsFramerError : uint8_t {
     kNone,
     kNotTls,
     kMidstream,
@@ -27,7 +27,7 @@ enum class NpmTlsFramerErrorV1 : uint8_t {
     kAllocationFailed,
 };
 
-enum class NpmTlsFramedKindV1 : uint8_t {
+enum class NpmTlsFramedKind : uint8_t {
     kClientHello,
     kServerHello,
     kOtherHandshake,
@@ -36,24 +36,24 @@ enum class NpmTlsFramedKindV1 : uint8_t {
     kAlert,
 };
 
-struct NpmTlsFramedEventV1 {
-    NpmTlsFramedKindV1 kind = NpmTlsFramedKindV1::kOtherHandshake;
+struct NpmTlsFramedEvent {
+    NpmTlsFramedKind kind = NpmTlsFramedKind::kOtherHandshake;
     NpmPacketDirection direction = NpmPacketDirection::kAToB;
     uint8_t message_type = 0;
     uint16_t record_length = 0;
     std::array<uint8_t, 2> control_bytes{};
     std::optional<int64_t> first_byte_at_ns;
     std::optional<int64_t> complete_at_ns;
-    std::optional<NpmTlsHelloFactsV1> hello;
+    std::optional<NpmTlsHelloFacts> hello;
 };
 
 /** One base session. Borrows Data spans only during Consume; retained body is bounded to one Hello per direction. */
-class NpmTlsFramerV1 final {
+class NpmTlsFramer final {
  public:
-    explicit NpmTlsFramerV1(uint32_t max_hello_bytes);
+    explicit NpmTlsFramer(uint32_t max_hello_bytes);
 
-    NpmTlsFramerErrorV1 Consume(const NpmTcpStreamContextV1& context, const NpmTcpStreamEventV1& event,
-                                std::vector<NpmTlsFramedEventV1>* output);
+    NpmTlsFramerError Consume(const NpmTcpStreamContext& context, const NpmTcpStreamEvent& event,
+                              std::vector<NpmTlsFramedEvent>* output);
     bool HasCandidate() const noexcept { return candidate_; }
     bool Closed() const noexcept { return closed_; }
     NpmPacketDirection ClientDirection() const noexcept { return client_direction_; }
@@ -62,7 +62,7 @@ class NpmTlsFramerV1 final {
 
  private:
     struct Direction {
-        NpmTlsDirectionStateV1 framing;
+        NpmTlsDirectionState framing;
         uint64_t next_offset = 0;
         uint8_t record_type = 0;
         uint16_t record_length = 0;
@@ -78,14 +78,14 @@ class NpmTlsFramerV1 final {
         uint8_t control_bytes_seen = 0;
     };
 
-    NpmTlsFramerErrorV1 Fail(NpmTlsFramerErrorV1 error) noexcept;
-    NpmTlsFramerErrorV1 NoCandidate(Direction* direction, NpmTlsFramerErrorV1 error) noexcept;
-    NpmTlsFramerErrorV1 FinishMessage(Direction* direction, NpmPacketDirection packet_direction,
-                                      std::vector<NpmTlsFramedEventV1>* output);
-    NpmTlsFramerErrorV1 FinishRecord(Direction* direction, NpmPacketDirection packet_direction,
-                                     std::vector<NpmTlsFramedEventV1>* output);
-    NpmTlsFramerErrorV1 ConsumeData(Direction* direction, NpmPacketDirection packet_direction,
-                                    const NpmTcpStreamEventV1& event, std::vector<NpmTlsFramedEventV1>* output);
+    NpmTlsFramerError Fail(NpmTlsFramerError error) noexcept;
+    NpmTlsFramerError NoCandidate(Direction* direction, NpmTlsFramerError error) noexcept;
+    NpmTlsFramerError FinishMessage(Direction* direction, NpmPacketDirection packet_direction,
+                                    std::vector<NpmTlsFramedEvent>* output);
+    NpmTlsFramerError FinishRecord(Direction* direction, NpmPacketDirection packet_direction,
+                                   std::vector<NpmTlsFramedEvent>* output);
+    NpmTlsFramerError ConsumeData(Direction* direction, NpmPacketDirection packet_direction,
+                                  const NpmTcpStreamEvent& event, std::vector<NpmTlsFramedEvent>* output);
 
     uint32_t max_hello_bytes_;
     std::array<Direction, 2> directions_{};

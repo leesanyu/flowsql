@@ -23,8 +23,15 @@
 
 ## 待办 Feature
 
+下一阶段围绕“在具体通道/算子上维护说明，并为未来大模型调用提供可理解接口”推进，目标不再是独立标准数据字典产品。
+`data-semantics-dictionary` Epic 的 F1～F3 已交付，作为版本、来源和执行契约基础保留；新入口及未实施范围见 [Epic 调整](specs/epic-data-semantics-dictionary.md)。
+优先顺序为 `metadata-description-query` → `npm-data-semantics` 的 DNS 及必要上下文交付 → `llm-skill-diagnosis`；
+模型诊断不等待全部 NPM 实体说明、SQL DESC 或查询/图表语义增强。后续领域说明仍由 F4 完成，F5 降为 P2 独立增强，其余规划保持原业务边界。
+长期任务恢复、探索成果保存与原始报文调查已移至长远规划，不作为首期模型诊断的前置条件。
+
 | 状态 | Feature | 优先级 | 目标 | 规格 |
 | --- | --- | --- | --- | --- |
+| [x] | 当前实现统一与兼容冗余清理 (`current-implementation-cleanup`) | P1 | 面向产品尚未上线阶段的开发与维护者，消除旧接口、旧格式兼容分支及自有版本命名造成的重复维护，让实现、调用方、测试和文档统一使用当前契约；保留产品版本与构建发布身份，既有数据经备份和一次性整理后继续可查询、可恢复。 | [规格](archive/feat-current-implementation-cleanup.md) |
 | [x] | SQL 统一采集、分析与输出指引 (`sql-workflow-guidance`) | P1 | 让使用 SQL 构建采集、分析和输出流程的用户，能够依据与当前实现一致的能力说明发现可用通道与算子、选择执行入口并编写可运行语句；以现有 SELECT … USING … THEN … INTO … 语法更新愿景，补齐能力发现、示例与执行边界说明，避免旧语法和实际行为不一致造成误用。 | [归档](archive/feat-sql-workflow-guidance.md) |
 | [x] | 标准与字典管理 (`data-semantics-registry`) | P1 | 让数据维护者和程序调用方集中创建、查询、补充与复用数据标准和字典，获得持久化、精确版本、历史及引用关系可追溯的统一定义；交付统一管理页面和符合 JSON Schema / OpenAPI 的 HTTP 契约，使人工编辑与程序读取使用同一份内容。 | [规格](archive/feat-data-semantics-registry.md)；[拆分边界](specs/epic-data-semantics-dictionary.md#data-semantics-registry) |
 | [x] | 通道数据字典生成与绑定 (`channel-data-dictionary`) | P1 | 让接入 Kafka 结构化数据、CSV/DataFrame 和已有数据库表的用户，从实际字段配置或结构自动获得默认字典，并能补充语义、引用标准及按数据集绑定版本；结构变化时保留人工说明并显式核验差异，减少重复填写和错误沿用。 | [规格](archive/feat-channel-data-dictionary.md)；[拆分边界](specs/epic-data-semantics-dictionary.md#channel-data-dictionary) |
@@ -34,6 +41,8 @@
 | [x] | 通道说明默认初始化 (`channel-description-default-initialization`) | P1 | 让配置通道字段关联的用户直接选择已知结构目标，系统建立默认说明并提供精确目标字段；已有关联优先展示管理列表，字段设置和辅助说明分别对齐，减少页面切换及误操作。 | [规格](archive/feat-channel-description-default-initialization.md) |
 | [x] | 算子契约说明重构与精简 (`operator-description-refinement`) | P1 | 让 Python、内置及 C++ 算子的使用者和未来模型依据与真实实现核对后的契约，通过同一精简接口理解用途、输入、参数、输出、限制与示例，并在简洁页面直接维护说明；纠正有证据的声明错误，完整机器契约与本地文字分别保存，复杂规则按需读取、未知保持明确，Python 源码在前、契约入口在后，本次重构不要求向后兼容。 | [规格](archive/feat-operator-description-refinement.md) |
 | [x] | NPM 数据与算子说明 (`npm-data-semantics`) | P1 | 让查询 NPM 结果的用户及未来诊断程序，从具体结果对象取得经生产实现核对的字段、时间、方向、NULL/有效性、修订及必要关联说明，减少误判和重复累计；优先复用已交付模型和机制，提供十二个实体的默认领域内容及有限 PCAP/PCAPNG→SQLite/MySQL/PostgreSQL/ClickHouse 托管结果关联，说明机制通过通用结构接口支持后端扩展；初始构建阶段不承担与当前代码的兼容，不扩展公共语义系统、协议指标或实时/容器矩阵。 | [归档](archive/feat-npm-data-semantics.md)；[拆分边界](specs/epic-data-semantics-dictionary.md#npm-data-semantics) |
+| [ ] | 大模型与 Skills 交互式异常诊断 (`llm-skill-diagnosis`) | P1 | 让网络分析用户针对选定问题、时间窗和数据范围，借助大模型与可复用诊断 skills 获得有证据支持的分析及后续验证建议；首期使用已有 NPM DNS 结果，依赖 SQL 指引、通道/算子描述接口及已验收的 DNS 必要说明，组织发现→描述→按需预检→受控查询→解释，输出事实、候选原因和证据不足；模型工具适配归本 Feature，不等待完整语义 Epic、DESC/图表集成、探索持久化、长期任务恢复或包回溯，不包含自动修复或无证据根因承诺。 | 待创建 |
+| [ ] | 工作台与探索中的说明增强 (`data-semantics-consumption`) | P2 | 让频繁编写 SQL、查询及绘图的用户在使用数据时就地查阅说明，减少页面切换；复用对象描述接口提供同步 DESC 快捷查询、结果/探索字段说明及可追溯的已支持来源关系，未知表达式保持未知；作为独立体验增强，不作为普通程序或模型调用的前置条件。 | 待创建；[拆分边界](specs/epic-data-semantics-dictionary.md#data-semantics-consumption) |
 
 ---
 
@@ -142,10 +151,14 @@
 
 ## 长远规划
 
-以下五项 Feature 短期内不规划实施，统一降为 P3；保留待办状态及已有规格，后续按实际需求重新评估。
+以下八项 Feature 暂不纳入近期主线，保留待办状态及已有规格，后续按实际需求重新评估。
+前三项为后续应用与可靠性能力，维持 P2；其余五项保持 P3。表格次序表示长远规划中的相对顺序，不代表近期实施安排。
 
 | 状态 | Feature | 优先级 | 目标 | 规格 |
 | --- | --- | --- | --- | --- |
+| [ ] | 长期任务生命周期与恢复 (`durable-task-lifecycle`) | P2 | 让持续采集与分析的部署者能够管理长期任务，并在主动暂停或故障中断后明确判断可恢复范围与数据连续性；区分任务定义、一次运行和可恢复状态，按来源与算子的实际能力提供生命周期控制、恢复策略和可观察的执行状态，明确续跑、重放、重新运行及不可补回的数据边界。 | 待创建 |
+| [ ] | 探索成果保存与复用 (`exploration-workspace-persistence`) | P2 | 让已经完成查询与绘图的分析用户，能够在刷新、重启或再次分析时恢复并复用成果，减少重复配置；交付可保存、恢复和复用的分析方案，包含来源、查询、参数、图表及相关版本引用，并明确来源或结构变化对复用的影响；保持轻量探索和独立访问、升级边界。 | 待创建 |
+| [ ] | 原始报文保存与调查 (`packet-evidence-investigation`) | P2 | 让网络调查用户能够从分析结果定位相关原始报文，复核会话与协议事实并取得调查所需证据；首期围绕已有 PCAP 与分析结果建立来源关联、按条件检索、证据回溯及导出路径，明确原始数据未保留、缺失或过期时的可用边界；实时滚动留包与存储策略后续作为独立能力规划。 | 待创建 |
 | [ ] | NPM 快速网卡采集通道 (`npm-af-xdp-native-zerocopy`) | P3 | 让具备 native XDP 与网卡零拷贝支持的 Linux 部署获得独立的快速直接采集入口，复用公共 packet、身份、生命周期与安全进度契约，并可验证驱动/队列能力、UMEM 回收和真实收包性能；通道名称待定（候选 netdirect），不以名称承诺固定速度。 | 待创建 |
 | [ ] | NPM DPDK 运行环境与设备管理 (`npm-dpdk-runtime`) | P3 | 提供 DPDK EAL、hugepage、PCI/VFIO、NUMA、核心绑定、设备发现、能力探测和启动诊断；不包含 NPM 分析和跨进程数据面。 | 待创建 |
 | [ ] | NPM 用户态高吞吐采集通道 (`npm-dpdk-capture`) | P3 | 让已配置 DPDK 运行环境的采集部署通过独立通道取得单进程持续收包能力，复用公共采集契约并可验证端口/队列范围、缓冲回收、时间戳及背压/丢包统计；通道名称待定（候选 netengine），不强制以 Linux 网卡名选择设备，不包含 Primary/Secondary。 | 待创建 |

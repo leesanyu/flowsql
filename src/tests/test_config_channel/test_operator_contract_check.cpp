@@ -16,11 +16,11 @@ int main() {
     assert(fd >= 0);
     close(fd);
     DataSemanticsRegistry registry;
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     assert(registry.Open(path, &error) == 0);
     OperatorContractService service(registry);
     Json contract;
-    contract.Parse(R"({"schema_id":"flowsql.operator-data-contract.v1","title":"checked",
+    contract.Parse(R"({"schema_id":"flowsql.operator-data-contract","title":"checked",
       "operator":{"category":"fixture","name":"checked","version":"1"},
       "configuration":{"invocation_schema":{"type":"object","properties":{"column":{"type":"string","default":"latency"}},"additionalProperties":true},"affects":{}},
       "inputs":[{"port_id":"input","min_count":1,"max_count":2,"shape":"dataframe","roles":[
@@ -119,7 +119,7 @@ int main() {
     SemanticsSaveResult dictionary;
     assert(registry.Save(dictionary_request, &dictionary, &error) == 0);
     Json binding;
-    binding.Parse(R"({"schema_id":"flowsql.data-binding.v2","object_label":"requests","declared_schema":null})");
+    binding.Parse(R"({"schema_id":"flowsql.data-binding","object_label":"requests","declared_schema":null})");
     auto& ba = binding.GetAllocator();
     Set(binding, "dictionary_ref", dictionary.snapshot.exact_reference, ba);
     binding.AddMember("object_key", Copy(source["object_key"], ba), ba)

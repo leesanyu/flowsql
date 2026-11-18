@@ -7,10 +7,9 @@
 #include "config_channel_provider.h"
 
 namespace flowsql::channels::config {
-class MetadataDescriptionService : public IMetadataDescriptionV1 {
+class MetadataDescriptionService : public IMetadataDescription {
  public:
-    using Lookup =
-        std::function<int(const std::string&, uint32_t, OperatorComponentContractV1*, DataSemanticsErrorV1*)>;
+    using Lookup = std::function<int(const std::string&, uint32_t, OperatorComponentContract*, DataSemanticsError*)>;
     MetadataDescriptionService(DataSemanticsRegistry& registry, ConfigChannelProvider& configs,
                                ChannelDictionaryService::Describe describe, Lookup lookup)
         : registry_(registry), configs_(configs), describe_(std::move(describe)), lookup_(std::move(lookup)) {}

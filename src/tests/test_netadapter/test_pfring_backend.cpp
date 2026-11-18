@@ -41,9 +41,9 @@ int main(int argc, char** argv) {
         --argc;
         ++argv;
     }
-    CaptureBackendConfigV1 config;
+    CaptureBackendConfig config;
     config.backend = "pfring_classic";
-    std::shared_ptr<ICaptureBackendSessionV1> session;
+    std::shared_ptr<ICaptureBackendSession> session;
     std::string error;
     if (argc == 1) {
         config.interfaces = {"absent-test"};
@@ -119,7 +119,7 @@ int main(int argc, char** argv) {
     while (std::chrono::steady_clock::now() < deadline) {
         for (size_t i = 0; i < seen.size(); ++i) {
             for (int work = 0; work < 64; ++work) {
-                CapturePacketViewV1 view;
+                CapturePacketView view;
                 const int read = session->TryRead(i, &view);
                 if (read == EAGAIN) break;
                 assert(read == 0);
@@ -128,7 +128,7 @@ int main(int argc, char** argv) {
                     assert(view.captured_len == 48 && view.wire_len == 64 && view.timestamp_ns > 0);
                     seen[i] = true;
                 }
-                CapturePacketViewV1 overlapping;
+                CapturePacketView overlapping;
                 assert(session->TryRead(i, &overlapping) == EBUSY);
                 session->ReleasePacket(i);
             }
@@ -138,7 +138,7 @@ int main(int argc, char** argv) {
     }
     for (size_t i = 0; i < seen.size(); ++i) {
         assert(seen[i]);
-        CaptureCountersV1 counters;
+        CaptureCounters counters;
         assert(session->ReadCounters(i, &counters) == 0);
         assert(counters.available_mask & kCaptureReceivedPacketsAvailable);
         assert(counters.available_mask & kCaptureSourceDroppedPacketsAvailable);
@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
     }
     session->Cancel();
     for (size_t i = 0; i < seen.size(); ++i) {
-        CapturePacketViewV1 view;
+        CapturePacketView view;
         assert(session->TryRead(i, &view) == ECANCELED);
     }
     session.reset();

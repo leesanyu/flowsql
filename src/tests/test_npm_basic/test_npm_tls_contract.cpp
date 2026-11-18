@@ -18,38 +18,38 @@ namespace npm = flowsql::npm;
 
 namespace {
 
-static_assert(std::is_same_v<decltype(std::declval<npm::NpmTlsDirectionStateV1>().hello_bytes), std::string>);
-static_assert(std::is_same_v<decltype(std::declval<npm::NpmTlsHandshakeV1>().first_client_hello),
-                             std::optional<npm::NpmTlsHelloFactsV1>>);
+static_assert(std::is_same_v<decltype(std::declval<npm::NpmTlsDirectionState>().hello_bytes), std::string>);
+static_assert(std::is_same_v<decltype(std::declval<npm::NpmTlsHandshake>().first_client_hello),
+                             std::optional<npm::NpmTlsHelloFacts>>);
 
 void TestOwnedInternalState() {
-    npm::NpmTlsDirectionStateV1 direction;
-    assert(direction.origin == npm::NpmTcpStreamOriginV1::kUnknown);
+    npm::NpmTlsDirectionState direction;
+    assert(direction.origin == npm::NpmTcpStreamOrigin::kUnknown);
     assert(direction.record_header_bytes == 0 && direction.handshake_header_bytes == 0);
     assert(direction.record_remaining == 0 && direction.handshake_remaining == 0);
     assert(!direction.first_record_checked && !direction.gap_seen && !direction.ended && !direction.encrypted_boundary);
     std::string borrowed = "hello";
     direction.hello_bytes = borrowed;
-    npm::NpmTlsHelloFactsV1 hello;
+    npm::NpmTlsHelloFacts hello;
     hello.sni = borrowed;
     hello.offered_alpn.push_back(borrowed);
     borrowed.clear();
     assert(direction.hello_bytes == "hello" && hello.sni == "hello" && hello.offered_alpn[0] == "hello");
-    npm::NpmTlsHandshakeV1 candidate;
+    npm::NpmTlsHandshake candidate;
     candidate.first_client_hello = hello;
-    assert(candidate.phase == npm::NpmTlsHandshakePhaseV1::kCandidate && candidate.hello_retry_count == 0);
+    assert(candidate.phase == npm::NpmTlsHandshakePhase::kCandidate && candidate.hello_retry_count == 0);
     assert(candidate.first_client_hello->sni == "hello" && !candidate.retry_client_hello);
 }
 
 void TestConfigAndPlan() {
-    using Error = npm::NpmTlsConfigErrorV1;
-    npm::NpmTlsConfigV1 config;
+    using Error = npm::NpmTlsConfigError;
+    npm::NpmTlsConfig config;
     config.primary_label_ids = {77};
     const auto reject = [&](std::string_view json, Error error, std::string_view path) {
-        const auto status = npm::ParseNpmTlsConfigV1(json, &config);
+        const auto status = npm::ParseNpmTlsConfig(json, &config);
         assert(status.error == error && status.path == path);
         assert(config.primary_label_ids == std::vector<uint32_t>{77});
-        assert(config.handshake_timeout_ns == npm::kNpmTlsDefaultHandshakeTimeoutNsV1);
+        assert(config.handshake_timeout_ns == npm::kNpmTlsDefaultHandshakeTimeoutNs);
     };
     reject("", Error::kMissing, "/tls");
     reject("null", Error::kInvalidType, "/tls");
@@ -73,7 +73,7 @@ void TestConfigAndPlan() {
     reject(R"({"primary_label_ids":[1],"max_hello_bytes":"4096"})", Error::kInvalidType, "/tls/max_hello_bytes");
     reject(R"({"primary_label_ids":[1],"max_hello_bytes":4096,"max_hello_bytes":8192})", Error::kDuplicateField,
            "/tls/max_hello_bytes");
-    assert(npm::ParseNpmTlsConfigV1("{}", nullptr).error == Error::kInvalidType);
+    assert(npm::ParseNpmTlsConfig("{}", nullptr).error == Error::kInvalidType);
 
     std::string labels_json = R"({"primary_label_ids":[)";
     for (uint32_t id = 1; id <= 257; ++id) {
@@ -83,41 +83,41 @@ void TestConfigAndPlan() {
     labels_json += "]}";
     reject(labels_json, Error::kInvalidRange, "/tls/primary_label_ids");
     labels_json.erase(labels_json.rfind(",257"), 4);
-    npm::NpmTlsConfigV1 boundary;
-    assert(npm::ParseNpmTlsConfigV1(labels_json, &boundary).error == Error::kNone);
+    npm::NpmTlsConfig boundary;
+    assert(npm::ParseNpmTlsConfig(labels_json, &boundary).error == Error::kNone);
     assert(boundary.primary_label_ids.size() == 256);
 
     std::string json = R"({"primary_label_ids":[1001],"handshake_timeout_ns":1000000,"max_hello_bytes":1048576})";
-    assert(npm::ParseNpmTlsConfigV1(json, &config).error == Error::kNone);
+    assert(npm::ParseNpmTlsConfig(json, &config).error == Error::kNone);
     json.assign(json.size(), 'x');
     assert(config.primary_label_ids == std::vector<uint32_t>{1001});
     assert(config.handshake_timeout_ns == 1'000'000 && config.max_hello_bytes == 1'048'576);
-    assert(npm::ParseNpmTlsConfigV1(R"({"primary_label_ids":[1001]})", &boundary).error == Error::kNone);
+    assert(npm::ParseNpmTlsConfig(R"({"primary_label_ids":[1001]})", &boundary).error == Error::kNone);
     assert(boundary.handshake_timeout_ns == 5'000'000'000 && boundary.max_hello_bytes == 65'536);
-    assert(npm::ParseNpmTlsConfigV1(
+    assert(npm::ParseNpmTlsConfig(
                R"({"primary_label_ids":[1001],"handshake_timeout_ns":300000000000,"max_hello_bytes":4096})", &boundary)
                .error == Error::kNone);
 
-    const auto plan = npm::NpmTlsModulePlanV1(config);
-    assert(plan.module_id == "tls" && plan.input_mask == static_cast<uint8_t>(npm::NpmInputKindV1::kTcpPacket));
+    const auto plan = npm::NpmTlsModulePlan(config);
+    assert(plan.module_id == "tls" && plan.input_mask == static_cast<uint8_t>(npm::NpmInputKind::kTcpPacket));
     assert(plan.requires_labeling && plan.requires_tcp_stream && plan.primary_label_ids == config.primary_label_ids);
-    npm::NpmModuleCapabilitiesV1 capabilities;
+    npm::NpmModuleCapabilities capabilities;
     capabilities.available_label_ids = {1001};
-    using ContractError = npm::NpmProtocolContractErrorV1;
-    assert(npm::ValidateNpmModulePlanV1(plan, capabilities).error == ContractError::kUnavailableCapability);
+    using ContractError = npm::NpmProtocolContractError;
+    assert(npm::ValidateNpmModulePlan(plan, capabilities).error == ContractError::kUnavailableCapability);
     capabilities.labeling_enabled = true;
-    assert(npm::ValidateNpmModulePlanV1(plan, capabilities).error == ContractError::kUnavailableCapability);
+    assert(npm::ValidateNpmModulePlan(plan, capabilities).error == ContractError::kUnavailableCapability);
     capabilities.labeling_available = true;
-    assert(npm::ValidateNpmModulePlanV1(plan, capabilities).error == ContractError::kUnavailableCapability);
+    assert(npm::ValidateNpmModulePlan(plan, capabilities).error == ContractError::kUnavailableCapability);
     capabilities.tcp_stream_available = true;
-    assert(npm::ValidateNpmModulePlanV1(plan, capabilities).error == ContractError::kNone);
+    assert(npm::ValidateNpmModulePlan(plan, capabilities).error == ContractError::kNone);
     capabilities.available_label_ids.clear();
-    assert(npm::ValidateNpmModulePlanV1(plan, capabilities).error == ContractError::kInvalidLabelSelection);
+    assert(npm::ValidateNpmModulePlan(plan, capabilities).error == ContractError::kInvalidLabelSelection);
     capabilities.available_label_ids = {1001};
     for (const auto& labels : std::vector<std::vector<uint32_t>>{{}, {0}, {1001, 1001}, {999}}) {
         auto invalid = plan;
         invalid.primary_label_ids = labels;
-        assert(npm::ValidateNpmModulePlanV1(invalid, capabilities).error == ContractError::kInvalidLabelSelection);
+        assert(npm::ValidateNpmModulePlan(invalid, capabilities).error == ContractError::kInvalidLabelSelection);
     }
 }
 
@@ -131,11 +131,11 @@ std::shared_ptr<arrow::Array> Values(std::initializer_list<std::optional<Value>>
 }
 
 void TestSchemaAndRows() {
-    const auto entity = npm::NpmTlsHandshakeEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4);
-    using Error = npm::NpmProtocolContractErrorV1;
-    assert(npm::ValidateNpmEntityDescriptorV1(entity).error == Error::kNone);
+    const auto entity = npm::NpmTlsHandshakeEntityDescriptor(flowsql::packet::AddressFamily::kIPv4);
+    using Error = npm::NpmProtocolContractError;
+    assert(npm::ValidateNpmEntityDescriptor(entity).error == Error::kNone);
     assert(entity.entity_id == "tls_handshake_ipv4" && entity.module_id == "tls");
-    assert(entity.schema_version == 1 && entity.revision_semantics == npm::NpmRevisionSemanticsV1::kEvent);
+    assert(entity.schema_version == 1 && entity.revision_semantics == npm::NpmRevisionSemantics::kEvent);
     for (const auto& [key, value] : std::vector<std::pair<const char*, const char*>>{
              {"flowsql.entity", "tls_handshake_ipv4"},
              {"flowsql.schema_version", "1"},
@@ -195,17 +195,17 @@ void TestSchemaAndRows() {
         }
     }
     auto rows = arrow::RecordBatch::Make(entity.schema, 1, columns);
-    assert(npm::ValidateNpmEntityRowsV1("tls", entity, *rows).error == Error::kNone);
+    assert(npm::ValidateNpmEntityRows("tls", entity, *rows).error == Error::kNone);
     columns[0] = Values<arrow::UInt64Builder, uint64_t>({0});
-    assert(npm::ValidateNpmEntityRowsV1("tls", entity, *arrow::RecordBatch::Make(entity.schema, 1, columns)).error ==
+    assert(npm::ValidateNpmEntityRows("tls", entity, *arrow::RecordBatch::Make(entity.schema, 1, columns)).error ==
            Error::kInvalidRows);
     columns[0] = Values<arrow::UInt64Builder, uint64_t>({1});
     columns[1] = Values<arrow::UInt64Builder, uint64_t>({2});
-    assert(npm::ValidateNpmEntityRowsV1("tls", entity, *arrow::RecordBatch::Make(entity.schema, 1, columns)).error ==
+    assert(npm::ValidateNpmEntityRows("tls", entity, *arrow::RecordBatch::Make(entity.schema, 1, columns)).error ==
            Error::kInvalidRows);
     columns[1] = Values<arrow::UInt64Builder, uint64_t>({1});
     columns[3] = Values<arrow::BooleanBuilder, bool>({false});
-    assert(npm::ValidateNpmEntityRowsV1("tls", entity, *arrow::RecordBatch::Make(entity.schema, 1, columns)).error ==
+    assert(npm::ValidateNpmEntityRows("tls", entity, *arrow::RecordBatch::Make(entity.schema, 1, columns)).error ==
            Error::kInvalidRows);
 }
 

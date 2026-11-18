@@ -1,18 +1,13 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "stream_plugin.h"
 
 #include <common/log.h>
 
 #include <algorithm>
-#include <cerrno>
 #include <cctype>
+#include <cerrno>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -43,71 +38,33 @@ static const char* kStreamStoreSchemaSql =
     ");";
 
 std::string ToLowerAscii(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return s;
 }
 
-bool IsIntegerLiteral(const std::string& s) {
-    if (s.empty()) return false;
-    size_t i = 0;
-    if (s[0] == '+' || s[0] == '-') i = 1;
-    if (i >= s.size()) return false;
-    for (; i < s.size(); ++i) {
-        if (!std::isdigit(static_cast<unsigned char>(s[i]))) return false;
-    }
-    return true;
-}
-
-int ParseOptionObject(const std::string& option, rapidjson::Document* out, std::string* err) {
-    if (!out) return EINVAL;
-    out->SetObject();
-    auto& alloc = out->GetAllocator();
-    if (option.empty()) return 0;
-
-    const std::string trimmed = [&option]() {
-        size_t begin = 0;
-        size_t end = option.size();
-        while (begin < end && std::isspace(static_cast<unsigned char>(option[begin]))) ++begin;
-        while (end > begin && std::isspace(static_cast<unsigned char>(option[end - 1]))) --end;
-        return option.substr(begin, end - begin);
-    }();
-
-    if (trimmed.empty()) return 0;
-    if (trimmed.front() == '{') {
-        out->Parse(trimmed.c_str());
-        if (out->HasParseError() || !out->IsObject()) {
-            if (err) *err = "option json parse failed";
-            return EINVAL;
+rapidjson::Value YamlValue(const YAML::Node& node, rapidjson::Document::AllocatorType& allocator) {
+    rapidjson::Value value;
+    if (node.IsNull()) return value;
+    if (node.IsMap()) {
+        value.SetObject();
+        for (const auto& item : node) {
+            const auto key = item.first.as<std::string>();
+            value.AddMember(rapidjson::Value(key.c_str(), allocator), YamlValue(item.second, allocator), allocator);
         }
-        return 0;
-    }
-
-    size_t pos = 0;
-    while (pos < trimmed.size()) {
-        const size_t eq = trimmed.find('=', pos);
-        if (eq == std::string::npos) break;
-        size_t end = trimmed.find(';', eq + 1);
-        if (end == std::string::npos) end = trimmed.size();
-
-        const std::string key = trimmed.substr(pos, eq - pos);
-        const std::string value = trimmed.substr(eq + 1, end - eq - 1);
-        if (!key.empty()) {
-            rapidjson::Value key_json(key.c_str(), alloc);
-            const std::string lower = ToLowerAscii(value);
-            if (lower == "true" || lower == "false") {
-                out->AddMember(key_json, rapidjson::Value(lower == "true"), alloc);
-            } else if (IsIntegerLiteral(value)) {
-                const int64_t num = std::strtoll(value.c_str(), nullptr, 10);
-                out->AddMember(key_json, rapidjson::Value(num), alloc);
-            } else {
-                out->AddMember(key_json, rapidjson::Value(value.c_str(), alloc), alloc);
-            }
+    } else if (node.IsSequence()) {
+        value.SetArray();
+        for (const auto& item : node) value.PushBack(YamlValue(item, allocator), allocator);
+    } else {
+        const auto text = node.as<std::string>();
+        rapidjson::Document scalar;
+        scalar.Parse(text.c_str());
+        if (node.Tag() != "!" && node.Tag() != "tag:yaml.org,2002:str" && !scalar.HasParseError()) {
+            value.CopyFrom(scalar, allocator);
+        } else {
+            value.SetString(text.c_str(), text.size(), allocator);
         }
-        pos = (end < trimmed.size()) ? end + 1 : trimmed.size();
     }
-    return 0;
+    return value;
 }
 
 }  // namespace
@@ -189,9 +146,7 @@ int StreamPlugin::Unload() {
     return 0;
 }
 
-int StreamPlugin::Start() {
-    return 0;
-}
+int StreamPlugin::Start() { return 0; }
 
 int StreamPlugin::Stop() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -237,39 +192,67 @@ int StreamPlugin::LoadFromYamlLocked() {
     YAML::Node root;
     try {
         root = YAML::LoadFile(config_file_);
-    } catch (const std::exception& e) {
+        const YAML::Node channels = root["channels"];
+        if (!channels || !channels["stream_channels"]) {
+            return 0;
+        }
+
+        const YAML::Node stream_channels = channels["stream_channels"];
+        if (!stream_channels.IsSequence()) {
+            last_error_ = "channels.stream_channels must be sequence";
+            return -1;
+        }
+
+        for (const auto& node : stream_channels) {
+            if (!node.IsMap() || !node["type"] || !node["name"]) {
+                last_error_ = "stream definition requires type/name/role/options object";
+                return EINVAL;
+            }
+            for (const auto& item : node) {
+                const auto key = item.first.as<std::string>();
+                if (key != "type" && key != "name" && key != "role" && key != "options") {
+                    last_error_ = "unknown stream definition field: " + key;
+                    return EINVAL;
+                }
+            }
+            if (node["options"] && !node["options"].IsMap()) {
+                last_error_ = "stream options must be an object";
+                return EINVAL;
+            }
+            StreamChannelConfig cfg;
+            cfg.type = ToLowerAscii(node["type"].as<std::string>());
+            cfg.name = node["name"].as<std::string>();
+            rapidjson::Document options(rapidjson::kObjectType);
+            if (node["options"])
+                options.CopyFrom(YamlValue(node["options"], options.GetAllocator()), options.GetAllocator());
+            const auto role = node["role"] ? ToLowerAscii(node["role"].as<std::string>()) : "both";
+            if (role != "source" && role != "sink" && role != "both") {
+                last_error_ = "invalid stream role";
+                return EINVAL;
+            }
+            if (options.HasMember("role")) {
+                last_error_ = "stream role must be a top-level field";
+                return EINVAL;
+            }
+            options.AddMember("role", rapidjson::Value(role.c_str(), options.GetAllocator()), options.GetAllocator());
+            rapidjson::StringBuffer buffer;
+            rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+            options.Accept(writer);
+            cfg.option = buffer.GetString();
+
+            if (cfg.type.empty() || cfg.name.empty()) {
+                last_error_ = "stream type and name must not be empty";
+                return EINVAL;
+            }
+            configs_[MakeKey(cfg.type, cfg.name)] = std::move(cfg);
+        }
+
+        return BuildChannelsLocked();
+    } catch (const YAML::Exception& e) {
         last_error_ = std::string("load stream config failed: ") + e.what();
         LOG_ERROR("StreamPlugin::LoadFromYamlLocked: %s", last_error_.c_str());
         return -1;
     }
-
-    const YAML::Node channels = root["channels"];
-    if (!channels || !channels["stream_channels"]) {
-        return 0;
-    }
-
-    const YAML::Node stream_channels = channels["stream_channels"];
-    if (!stream_channels.IsSequence()) {
-        last_error_ = "channels.stream_channels must be sequence";
-        return -1;
-    }
-
-    for (const auto& node : stream_channels) {
-        if (!node.IsMap()) continue;
-        if (!node["type"] || !node["name"]) continue;
-
-        StreamChannelConfig cfg;
-        cfg.type = ToLowerAscii(node["type"].as<std::string>());
-        cfg.name = node["name"].as<std::string>();
-        if (node["option"]) {
-            cfg.option = node["option"].as<std::string>();
-        }
-
-        if (cfg.type.empty() || cfg.name.empty()) continue;
-        configs_[MakeKey(cfg.type, cfg.name)] = std::move(cfg);
-    }
-
-    return BuildChannelsLocked();
 }
 
 int StreamPlugin::BuildChannelsLocked() {
@@ -288,8 +271,7 @@ int StreamPlugin::BuildChannelsLocked() {
     return 0;
 }
 
-int StreamPlugin::BuildOneChannelLocked(const StreamChannelConfig& cfg,
-                                        std::shared_ptr<IStreamChannel>* out) {
+int StreamPlugin::BuildOneChannelLocked(const StreamChannelConfig& cfg, std::shared_ptr<IStreamChannel>* out) {
     if (!out) return EINVAL;
     out->reset();
     if (!builtin_registry_) {
@@ -300,35 +282,30 @@ int StreamPlugin::BuildOneChannelLocked(const StreamChannelConfig& cfg,
     StreamChannelTypeDescriptor desc;
     if (builtin_registry_->FindStreamChannelType(cfg.type, &desc) != 0) {
         last_error_ = "unsupported stream channel type: " + cfg.type;
-        LOG_WARN("StreamPlugin::BuildOneChannelLocked: unsupported stream type=%s name=%s",
-                 cfg.type.c_str(), cfg.name.c_str());
+        LOG_WARN("StreamPlugin::BuildOneChannelLocked: unsupported stream type=%s name=%s", cfg.type.c_str(),
+                 cfg.name.c_str());
         return ENOTSUP;
     }
 
     rapidjson::Document option_doc;
-    std::string parse_err;
-    const int parse_rc = ParseOptionObject(cfg.option, &option_doc, &parse_err);
-    if (parse_rc != 0) {
-        last_error_ = "invalid option for stream channel: " + cfg.type + "." + cfg.name +
-                      ", err=" + parse_err;
-        return parse_rc;
+    option_doc.Parse(cfg.option.c_str());
+    if (option_doc.HasParseError() || !option_doc.IsObject()) {
+        last_error_ = "stream option must be a JSON object: " + cfg.type + "." + cfg.name;
+        return EINVAL;
     }
 
     std::string normalized_json;
     std::string validate_err;
-    const int validate_rc =
-        desc.validate_and_normalize(option_doc, &normalized_json, &validate_err);
+    const int validate_rc = desc.validate_and_normalize(option_doc, &normalized_json, &validate_err);
     if (validate_rc != 0) {
-        last_error_ = "validate stream option failed: " + cfg.type + "." + cfg.name +
-                      ", err=" + validate_err;
+        last_error_ = "validate stream option failed: " + cfg.type + "." + cfg.name + ", err=" + validate_err;
         return validate_rc;
     }
 
     std::string build_err;
     const int build_rc = desc.build(cfg.type, cfg.name, normalized_json, out, &build_err);
     if (build_rc != 0) {
-        last_error_ = "build stream channel failed: " + cfg.type + "." + cfg.name +
-                      ", err=" + build_err;
+        last_error_ = "build stream channel failed: " + cfg.type + "." + cfg.name + ", err=" + build_err;
         return build_rc;
     }
     return 0;
@@ -398,8 +375,7 @@ int StreamPlugin::LoadFromStoreLocked() {
     if (!db_) return -1;
 
     sqlite3_stmt* stmt = nullptr;
-    const char* sql =
-        "SELECT type, name, option FROM stream_channel_store ORDER BY type ASC, name ASC;";
+    const char* sql = "SELECT type, name, option FROM stream_channel_store ORDER BY type ASC, name ASC;";
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return -1;
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -448,9 +424,7 @@ int StreamPlugin::PersistAllIfStoreEmptyLocked() {
     return -1;
 }
 
-int StreamPlugin::AddChannel(const std::string& type,
-                             const std::string& name,
-                             const std::string& option) {
+int StreamPlugin::AddChannel(const std::string& type, const std::string& name, const std::string& option) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!StoreEnabled()) {
         last_error_ = "stream manager requires db_path";
@@ -476,9 +450,7 @@ int StreamPlugin::AddChannel(const std::string& type,
     return 0;
 }
 
-int StreamPlugin::ModifyChannel(const std::string& type,
-                                const std::string& name,
-                                const std::string& option) {
+int StreamPlugin::ModifyChannel(const std::string& type, const std::string& name, const std::string& option) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!StoreEnabled()) {
         last_error_ = "stream manager requires db_path";
@@ -511,8 +483,7 @@ int StreamPlugin::ModifyChannel(const std::string& type,
     return 0;
 }
 
-int StreamPlugin::RemoveChannel(const std::string& type,
-                                const std::string& name) {
+int StreamPlugin::RemoveChannel(const std::string& type, const std::string& name) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!StoreEnabled()) {
         last_error_ = "stream manager requires db_path";
@@ -537,10 +508,9 @@ int StreamPlugin::RemoveChannel(const std::string& type,
     return 0;
 }
 
-void StreamPlugin::QueryChannels(std::function<void(const std::string& type,
-                                                    const std::string& name,
-                                                    const std::string& option,
-                                                    const std::string& status)> callback) {
+void StreamPlugin::QueryChannels(std::function<void(const std::string& type, const std::string& name,
+                                                    const std::string& option, const std::string& status)>
+                                     callback) {
     if (!callback) return;
 
     std::vector<std::tuple<std::string, std::string, std::string, std::string>> items;

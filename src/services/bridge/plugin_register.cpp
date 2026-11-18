@@ -10,5 +10,5 @@
 BEGIN_PLUGIN_REGIST(flowsql::bridge::BridgePlugin)
 ____INTERFACE(flowsql::IID_PLUGIN, flowsql::IPlugin)
 ____INTERFACE(flowsql::IID_BRIDGE, flowsql::IBridge)
-____INTERFACE(flowsql::IID_PYTHON_OPERATOR_PUBLISHER_V1, flowsql::IPythonOperatorPublisherV1)
+____INTERFACE(flowsql::IID_PYTHON_OPERATOR_PUBLISHER, flowsql::IPythonOperatorPublisher)
 END_PLUGIN_REGIST()

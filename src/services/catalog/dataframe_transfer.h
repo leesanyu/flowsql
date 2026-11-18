@@ -14,7 +14,7 @@
 
 namespace flowsql::catalog {
 
-struct DataFrameTransferInfoV1 {
+struct DataFrameTransferInfo {
     std::string source_id;
     std::string transfer_id;
     std::string snapshot_id;
@@ -32,8 +32,8 @@ class DataFrameTransferStore {
     ~DataFrameTransferStore();
 
     int Init(const std::string& directory, std::chrono::seconds lease = std::chrono::seconds(60));
-    int Acquire(IDataFrameSnapshotProviderV1& provider, const std::string& request_id,
-                const DataFrameSnapshotRequestV1& request, DataFrameTransferInfoV1* output, std::string* error);
+    int Acquire(IDataFrameSnapshotProvider& provider, const std::string& request_id,
+                const DataFrameSnapshotRequest& request, DataFrameTransferInfo* output, std::string* error);
     bool Cancel(const std::string& request_id);
     bool Release(const std::string& transfer_id);
     void Stop();
@@ -41,7 +41,7 @@ class DataFrameTransferStore {
  private:
     struct Transfer {
         std::string request_id;
-        DataFrameSnapshotV1 snapshot;
+        DataFrameSnapshot snapshot;
         std::string path;
         uint64_t ipc_bytes = 0;
         std::chrono::steady_clock::time_point expires_at;

@@ -68,20 +68,20 @@ class ClickHouseSession : public IDbSession,
                           public IArrowReadable,
                           public IArrowWritable,
                           public IDbSnapshotSession,
-                          public IDatabaseArrowWriteV1,
-                          public IDatabaseExplorationSessionV1 {
+                          public IDatabaseArrowWrite,
+                          public IDatabaseExplorationSession {
  public:
     ClickHouseSession(const std::string& host, int port, const std::string& user, const std::string& password,
                       const std::string& database, std::shared_ptr<ClickHouseWriteTransport> write_transport = nullptr);
     ~ClickHouseSession() override = default;
 
-    int BeginSnapshot(const DatabaseSnapshotOptionsV1& options) override;
-    int SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+    int BeginSnapshot(const DatabaseSnapshotOptions& options) override;
+    int SnapshotPage(const char* sql, const DatabaseParameter* parameters, size_t count,
                      std::shared_ptr<arrow::Schema> expected, uint32_t rows, uint64_t bytes,
                      std::shared_ptr<arrow::RecordBatch>* output) override;
     void CancelSnapshot() override;
-    int Query(const char* sql, const DatabaseParameterV1* parameters, size_t count, uint32_t rows, uint64_t bytes,
-              ExplorationResultV1* output) override;
+    int Query(const char* sql, const DatabaseParameter* parameters, size_t count, uint32_t rows, uint64_t bytes,
+              ExplorationResult* output) override;
     void Cancel() override;
     std::string QueryError() const override { return last_error_; }
     // ==================== 列式接口（核心实现）====================
@@ -98,8 +98,8 @@ class ClickHouseSession : public IDbSession,
 
     // 执行 SQL（DDL/DML），走普通 HTTP 文本响应
     int ExecuteSql(const char* sql) override;
-    int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) override;
-    int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t parameters_per_execution,
+    int ExecutePrepared(const char* sql, const DatabaseParameter* parameters, size_t parameter_count) override;
+    int ExecutePreparedBatch(const char* sql, const DatabaseParameter* parameters, size_t parameters_per_execution,
                              size_t execution_count) override;
 
     // 健康检查：GET /?query=SELECT+1
@@ -130,7 +130,7 @@ class ClickHouseSession : public IDbSession,
     int SerializeArrowStream(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches, arrow::MemoryPool* pool,
                              std::shared_ptr<arrow::Buffer>* body);
 
-    int ExecuteParameterizedHttp(const std::string& sql, const DatabaseParameterV1* parameters, size_t parameter_count);
+    int ExecuteParameterizedHttp(const std::string& sql, const DatabaseParameter* parameters, size_t parameter_count);
 
     std::string exploration_query_id_;
     void KillExplorationQuery();

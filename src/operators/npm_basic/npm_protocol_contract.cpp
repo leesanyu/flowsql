@@ -13,9 +13,9 @@
 namespace flowsql::npm {
 namespace {
 
-using Error = NpmProtocolContractErrorV1;
+using Error = NpmProtocolContractError;
 
-NpmProtocolContractStatusV1 Fail(Error error, std::string field, int64_t row = -1) {
+NpmProtocolContractStatus Fail(Error error, std::string field, int64_t row = -1) {
     return {error, std::move(field), row};
 }
 
@@ -29,28 +29,28 @@ bool Contains(Span<const uint8_t> bytes, Span<const uint8_t> view) {
 
 bool SameSpan(Span<const uint8_t> a, Span<const uint8_t> b) { return a.data == b.data && a.size == b.size; }
 
-std::array<std::string_view, 4> RequiredColumns(const NpmEntityDescriptorV1& entity) {
+std::array<std::string_view, 4> RequiredColumns(const NpmEntityDescriptor& entity) {
     return {entity.identity_column, entity.revision_column, entity.observed_at_column, entity.is_final_column};
 }
 
 }  // namespace
 
-NpmProtocolContractStatusV1 ValidateNpmInputEventV1(const NpmInputEventV1& event) {
+NpmProtocolContractStatus ValidateNpmInputEvent(const NpmInputEvent& event) {
     if (event.layer == nullptr) return Fail(Error::kInvalidInput, "layer");
     if ((event.packet.bytes.size != 0 && event.packet.bytes.data == nullptr) ||
         event.packet.meta.captured_len != event.packet.bytes.size) {
         return Fail(Error::kInvalidInput, "packet");
     }
     if (!Contains(event.packet.bytes, event.body)) return Fail(Error::kInvalidInput, "body");
-    if (event.kind == NpmInputKindV1::kControlPacket) {
+    if (event.kind == NpmInputKind::kControlPacket) {
         if (event.transport != nullptr || event.session != nullptr) return Fail(Error::kInvalidInput, "session");
         if (event.layer->transport_protocol != 1 && event.layer->transport_protocol != 58) {
             return Fail(Error::kInvalidInput, "kind");
         }
         return {};
     }
-    const bool tcp = event.kind == NpmInputKindV1::kTcpPacket;
-    if (!tcp && event.kind != NpmInputKindV1::kUdpDatagram) return Fail(Error::kInvalidInput, "kind");
+    const bool tcp = event.kind == NpmInputKind::kTcpPacket;
+    if (!tcp && event.kind != NpmInputKind::kUdpDatagram) return Fail(Error::kInvalidInput, "kind");
     if (event.transport == nullptr || event.session == nullptr || !event.session->key ||
         event.session->session_id == 0) {
         return Fail(Error::kInvalidInput, "session");
@@ -84,12 +84,12 @@ NpmProtocolContractStatusV1 ValidateNpmInputEventV1(const NpmInputEventV1& event
     return {};
 }
 
-NpmProtocolContractStatusV1 ValidateNpmEntityDescriptorV1(const NpmEntityDescriptorV1& entity) {
+NpmProtocolContractStatus ValidateNpmEntityDescriptor(const NpmEntityDescriptor& entity) {
     if (entity.entity_id.empty()) return Fail(Error::kInvalidEntity, "entity_id");
     if (entity.module_id.empty()) return Fail(Error::kInvalidEntity, "module_id");
     if (entity.schema_version == 0) return Fail(Error::kInvalidEntity, "schema_version");
-    if (entity.revision_semantics != NpmRevisionSemanticsV1::kCumulative &&
-        entity.revision_semantics != NpmRevisionSemanticsV1::kEvent) {
+    if (entity.revision_semantics != NpmRevisionSemantics::kCumulative &&
+        entity.revision_semantics != NpmRevisionSemantics::kEvent) {
         return Fail(Error::kInvalidEntity, "revision_semantics");
     }
     if (!entity.schema) return Fail(Error::kInvalidSchema, "schema");
@@ -110,18 +110,17 @@ NpmProtocolContractStatusV1 ValidateNpmEntityDescriptorV1(const NpmEntityDescrip
     return {};
 }
 
-NpmProtocolContractStatusV1 ValidateNpmModulePlanV1(const NpmModulePlanV1& plan,
-                                                    const NpmModuleCapabilitiesV1& capabilities) {
+NpmProtocolContractStatus ValidateNpmModulePlan(const NpmModulePlan& plan, const NpmModuleCapabilities& capabilities) {
     if (plan.module_id.empty()) return Fail(Error::kInvalidPlan, "module_id");
-    if (plan.input_mask == 0 || (plan.input_mask & ~kNpmInputMaskV1) != 0) {
+    if (plan.input_mask == 0 || (plan.input_mask & ~kNpmInputMask) != 0) {
         return Fail(Error::kInvalidPlan, "input_mask");
     }
     if (plan.primary_label_ids && !plan.requires_labeling) return Fail(Error::kInvalidPlan, "requires_labeling");
-    if ((plan.input_mask & static_cast<uint8_t>(NpmInputKindV1::kControlPacket)) &&
+    if ((plan.input_mask & static_cast<uint8_t>(NpmInputKind::kControlPacket)) &&
         (plan.requires_labeling || plan.primary_label_ids)) {
         return Fail(Error::kInvalidPlan, "input_mask");
     }
-    if (plan.requires_tcp_stream && (!(plan.input_mask & static_cast<uint8_t>(NpmInputKindV1::kTcpPacket)) ||
+    if (plan.requires_tcp_stream && (!(plan.input_mask & static_cast<uint8_t>(NpmInputKind::kTcpPacket)) ||
                                      !plan.requires_labeling || !plan.primary_label_ids)) {
         return Fail(Error::kInvalidPlan, "requires_tcp_stream");
     }
@@ -149,7 +148,7 @@ NpmProtocolContractStatusV1 ValidateNpmModulePlanV1(const NpmModulePlanV1& plan,
     }
     std::vector<std::string_view> entity_ids;
     for (const auto& entity : plan.entities) {
-        const auto status = ValidateNpmEntityDescriptorV1(entity);
+        const auto status = ValidateNpmEntityDescriptor(entity);
         if (status.error != Error::kNone) return status;
         if (entity.module_id != plan.module_id) return Fail(Error::kWrongModule, entity.entity_id);
         entity_ids.push_back(entity.entity_id);
@@ -161,10 +160,9 @@ NpmProtocolContractStatusV1 ValidateNpmModulePlanV1(const NpmModulePlanV1& plan,
     return {};
 }
 
-NpmProtocolContractStatusV1 ValidateNpmEntityRowsV1(std::string_view emitting_module,
-                                                    const NpmEntityDescriptorV1& entity,
-                                                    const arrow::RecordBatch& rows) {
-    const auto status = ValidateNpmEntityDescriptorV1(entity);
+NpmProtocolContractStatus ValidateNpmEntityRows(std::string_view emitting_module, const NpmEntityDescriptor& entity,
+                                                const arrow::RecordBatch& rows) {
+    const auto status = ValidateNpmEntityDescriptor(entity);
     if (status.error != Error::kNone) return status;
     if (emitting_module != entity.module_id) return Fail(Error::kWrongModule, "module_id");
     if (!rows.schema() || !rows.schema()->Equals(*entity.schema, true)) return Fail(Error::kInvalidSchema, "schema");
@@ -181,10 +179,10 @@ NpmProtocolContractStatusV1 ValidateNpmEntityRowsV1(std::string_view emitting_mo
     for (int64_t row = 0; row < rows.num_rows(); ++row) {
         if (ids.Value(row) == 0) return Fail(Error::kInvalidRows, entity.identity_column, row);
         if (revisions.Value(row) == 0 ||
-            (entity.revision_semantics == NpmRevisionSemanticsV1::kEvent && revisions.Value(row) != 1)) {
+            (entity.revision_semantics == NpmRevisionSemantics::kEvent && revisions.Value(row) != 1)) {
             return Fail(Error::kInvalidRows, entity.revision_column, row);
         }
-        if (entity.revision_semantics == NpmRevisionSemanticsV1::kEvent && !finals.Value(row)) {
+        if (entity.revision_semantics == NpmRevisionSemantics::kEvent && !finals.Value(row)) {
             return Fail(Error::kInvalidRows, entity.is_final_column, row);
         }
     }
@@ -192,17 +190,17 @@ NpmProtocolContractStatusV1 ValidateNpmEntityRowsV1(std::string_view emitting_mo
 }
 
 std::shared_ptr<arrow::Schema> NpmBasicResultSchema(packet::AddressFamily family) {
-    return NpmBasicEntityDescriptorV1(family).schema;
+    return NpmBasicEntityDescriptor(family).schema;
 }
 std::shared_ptr<arrow::Schema> NpmSessionResultSchema(packet::AddressFamily family) {
-    return NpmSessionEntityDescriptorV1(family).schema;
+    return NpmSessionEntityDescriptor(family).schema;
 }
-NpmEntityDescriptorV1 NpmBasicEntityDescriptorV1(packet::AddressFamily family) {
+NpmEntityDescriptor NpmBasicEntityDescriptor(packet::AddressFamily family) {
     static const auto v4 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kBasic, packet::AddressFamily::kIPv4);
     static const auto v6 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kBasic, packet::AddressFamily::kIPv6);
     return family == packet::AddressFamily::kIPv4 ? v4 : v6;
 }
-NpmEntityDescriptorV1 NpmSessionEntityDescriptorV1(packet::AddressFamily family) {
+NpmEntityDescriptor NpmSessionEntityDescriptor(packet::AddressFamily family) {
     static const auto v4 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kSession, packet::AddressFamily::kIPv4);
     static const auto v6 = NpmFamilyEntityDescriptor(NpmFamilyEntityKind::kSession, packet::AddressFamily::kIPv6);
     return family == packet::AddressFamily::kIPv4 ? v4 : v6;

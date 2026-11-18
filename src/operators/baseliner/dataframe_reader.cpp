@@ -89,7 +89,7 @@ class Hash {
         unsigned length = 0;
         if (EVP_DigestFinal_ex(context_.get(), bytes, &length) != 1 || length != 32)
             throw std::runtime_error("snapshot hash finalization failed");
-        std::string output = "dataframe_snapshot_v1:";
+        std::string output = "dataframe_snapshot:";
         for (unsigned i = 0; i < length; ++i) {
             output += "0123456789abcdef"[bytes[i] >> 4];
             output += "0123456789abcdef"[bytes[i] & 15];
@@ -263,7 +263,7 @@ struct DataFrameReader::Impl {
     }
     std::string Fingerprint(const arrow::RecordBatch& batch) const {
         Hash hash;
-        hash.Text("flowsql.dataframe_snapshot_v1");
+        hash.Text("flowsql.dataframe_snapshot");
         {
             auto schema = Value(arrow::ipc::SerializeSchema(*batch.schema(), pool.get()));
             hash.Number(schema->size());
@@ -338,14 +338,14 @@ struct DataFrameReader::Impl {
 };
 DataFrameReader::DataFrameReader() : impl_(std::make_unique<Impl>()) {}
 DataFrameReader::~DataFrameReader() = default;
-int DataFrameReader::Open(TaskConfig config, const BlockDataFrameInputBindingV1& binding,
+int DataFrameReader::Open(TaskConfig config, const BlockDataFrameInputBinding& binding,
                           std::shared_ptr<arrow::RecordBatch> snapshot) {
     auto& p = *impl_;
     try {
         p.CheckCancelled();
         if (p.attempted) throw std::runtime_error("DataFrame reader already initialized");
         p.attempted = true;
-        if (!ValidBlockDataFrameInputBindingV1(binding) || !config.dataframe_source || config.database_source ||
+        if (!ValidBlockDataFrameInputBinding(binding) || !config.dataframe_source || config.database_source ||
             config.mode != Mode::kSnapshot || config.datasets.size() != 1 || config.source != binding.exact_source ||
             std::string(binding.source->Category()) != "dataframe" ||
             config.source != std::string(binding.source->Category()) + "." + binding.source->Name() ||

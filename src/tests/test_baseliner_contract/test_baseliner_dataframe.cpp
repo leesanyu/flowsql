@@ -83,13 +83,13 @@ std::shared_ptr<arrow::RecordBatch> Batch(const std::vector<Row>& rows, bool wid
     }
     return df.ToArrow();
 }
-BlockDataFrameInputBindingV1 Binding(const std::shared_ptr<arrow::RecordBatch>& batch) {
+BlockDataFrameInputBinding Binding(const std::shared_ptr<arrow::RecordBatch>& batch) {
     auto source = std::make_shared<DataFrameChannel>("dataframe", "samples");
     Check(source->Open() == 0, "channel Open");
     DataFrame df;
     df.FromArrow(batch);
     Check(source->Write(&df) == 0, "channel Write");
-    BlockDataFrameInputBindingV1 binding;
+    BlockDataFrameInputBinding binding;
     binding.source = source;
     binding.exact_source = "dataframe.samples";
     return binding;
@@ -138,7 +138,7 @@ void OrderedEquivalence() {
     Check(reader.Stats().selected_rows == 5 && reader.Stats().peak_buffer_bytes <= c.read.max_pending_bytes,
           "reader budget");
     auto hash = reader.SourceFingerprint();
-    Check(hash.size() == std::string("dataframe_snapshot_v1:").size() + 64, "versioned fingerprint");
+    Check(hash.size() == std::string("dataframe_snapshot:").size() + 64, "versioned fingerprint");
     c.read.page_rows = 99;
     DataFrameReader many;
     Check(many.Open(c, binding, raw) == 0 && many.SourceFingerprint() == hash, many.LastError());
@@ -244,7 +244,7 @@ void Conflict(const std::shared_ptr<arrow::RecordBatch>& raw, bool latest) {
     }
     Check(rejected, "conflicting duplicates accepted");
 }
-void Reject(TaskConfig c, BlockDataFrameInputBindingV1 binding, const std::shared_ptr<arrow::RecordBatch>& raw,
+void Reject(TaskConfig c, BlockDataFrameInputBinding binding, const std::shared_ptr<arrow::RecordBatch>& raw,
             const std::string& fragment) {
     DataFrameReader reader;
     Check(reader.Open(std::move(c), binding, raw) != 0, "invalid snapshot accepted: " + fragment);
@@ -411,7 +411,7 @@ void AdapterCompletion() {
     std::weak_ptr<IDataFrameChannel> lease = binding.source;
     binding.source.reset();
     Check(!lease.expired(), "adapter dropped source lease");
-    BlockInputProgressV1 progress;
+    BlockInputProgress progress;
     int observations = 0, boundaries = 0;
     for (;;) {
         auto event = input.PollBlock();

@@ -125,7 +125,7 @@ struct TapQueues {
         fds.clear();
     }
 };
-void CheckQueues(const std::shared_ptr<ICaptureBackendSessionV1>& session, const CaptureBackendConfigV1& config,
+void CheckQueues(const std::shared_ptr<ICaptureBackendSession>& session, const CaptureBackendConfig& config,
                  const TapQueues& taps) {
     const auto& inputs = session->Inputs();
     assert(inputs.size() == 4);
@@ -173,7 +173,7 @@ void CheckQueues(const std::shared_ptr<ICaptureBackendSessionV1>& session, const
         while (std::chrono::steady_clock::now() < deadline) {
             for (uint32_t source = 0; source < inputs.size(); ++source) {
                 for (int work = 0; work < 64; ++work) {
-                    CapturePacketViewV1 view;
+                    CapturePacketView view;
                     const int read = session->TryRead(source, &view);
                     if (read == EAGAIN) break;
                     assert(read == 0);
@@ -193,7 +193,7 @@ void CheckQueues(const std::shared_ptr<ICaptureBackendSessionV1>& session, const
                         seen[source] = true;
                         ++counts[source];
                     }
-                    CapturePacketViewV1 overlapping;
+                    CapturePacketView overlapping;
                     assert(session->TryRead(source, &overlapping) == EBUSY);
                     session->ReleasePacket(source);
                 }
@@ -210,7 +210,7 @@ void CheckQueues(const std::shared_ptr<ICaptureBackendSessionV1>& session, const
         }
     }
     for (size_t source = 0; source < inputs.size(); ++source) {
-        CaptureCountersV1 counters;
+        CaptureCounters counters;
         assert(session->ReadCounters(source, &counters) == 0);
         assert(!(counters.available_mask & kCaptureReceivedPacketsAvailable));
         assert(counters.available_mask & kCaptureSourceDroppedPacketsAvailable);
@@ -225,9 +225,9 @@ void CheckQueues(const std::shared_ptr<ICaptureBackendSessionV1>& session, const
 #endif
 }  // namespace
 int main(int argc, char** argv) {
-    CaptureBackendConfigV1 config;
+    CaptureBackendConfig config;
     config.backend = "af_xdp_copy_skb";
-    std::shared_ptr<ICaptureBackendSessionV1> session;
+    std::shared_ptr<ICaptureBackendSession> session;
     std::string error;
 #ifdef FLOWSQL_HAVE_AF_XDP
     assert(OpenAfXdpCopySkb(config, &session, &error) == EINVAL && !session);
@@ -287,7 +287,7 @@ int main(int argc, char** argv) {
     CheckQueues(session, config, taps);
     session->Cancel();
     for (uint32_t i = 0; i < session->Inputs().size(); ++i) {
-        CapturePacketViewV1 view;
+        CapturePacketView view;
         assert(session->TryRead(i, &view) == ECANCELED);
     }
     session.reset();

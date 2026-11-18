@@ -92,7 +92,7 @@ void test_runtime_initialization_preserves_saved_channels() {
     RemoveFile(destination);
     const std::string initial =
         "channels:\n  database_channels:\n"
-        "    - type: sqlite\n      name: seed\n      path: ':memory:'\n"
+        "    - type: sqlite\n      name: seed\n      dataset_instance_id: seed-identity\n      path: ':memory:'\n"
         "other_section:\n  key: preserved_value\n";
     {
         std::ofstream file(source);
@@ -683,6 +683,52 @@ void test_password_restart_decrypt_clickhouse() {
     printf("[PASS] TQ-B4b: ClickHouse password channel restart decrypt\n");
 }
 
+void test_persisted_identity_required_without_rewrite() {
+    const auto path = TmpYaml("identity_contract");
+    const auto read = [&] {
+        std::ifstream file(path);
+        return std::string((std::istreambuf_iterator<char>(file)), {});
+    };
+    for (const auto& identity : {std::string{}, std::string("      dataset_instance_id: ''\n")}) {
+        const auto content = "channels:\n  database_channels:\n    - type: sqlite\n      name: saved\n" + identity +
+                             "      path: ':memory:'\n";
+        {
+            std::ofstream file(path);
+            file << content;
+        }
+        DatabasePlugin plugin;
+        assert(plugin.Option(("config_file=" + path).c_str()) == 0);
+        assert(plugin.Load(nullptr) == 0);
+        assert(plugin.Start() != 0);
+        assert(std::string(plugin.LastError()).find("dataset_instance_id") != std::string::npos);
+        assert(plugin.Start() != 0);
+        assert(read() == content);
+    }
+    // A fixture owner restores its already known identity outside the product.
+    const std::string current =
+        "channels:\n  database_channels:\n    - type: sqlite\n      name: saved\n"
+        "      dataset_instance_id: known-persisted-identity\n      path: ':memory:'\n";
+    {
+        std::ofstream file(path);
+        file << current;
+    }
+    for (int restart = 0; restart < 2; ++restart) {
+        DatabasePlugin plugin;
+        assert(plugin.Option(("config_file=" + path).c_str()) == 0);
+        assert(plugin.Load(nullptr) == 0 && plugin.Start() == 0);
+        int count = 0;
+        plugin.List([&](const char*, const char*, const char* config) {
+            assert(std::string(config).find("known-persisted-identity") != std::string::npos);
+            ++count;
+        });
+        assert(count == 1);
+        AssertSingleRow(plugin.Get("sqlite", "saved"), "SELECT 7", {"7"});
+        assert(read() == current);
+    }
+    RemoveFile(path);
+    ++g_passed;
+}
+
 // ============================================================
 // main
 // ============================================================
@@ -1042,6 +1088,7 @@ int main(int argc, char** argv) {
     }
     printf("=== DatabasePlugin Manager Tests ===\n\n");
 
+    test_persisted_identity_required_without_rewrite();
     test_add_channel_no_config_file();
     test_add_channel_persists();
     test_add_channel_duplicate();
@@ -1067,6 +1114,6 @@ int main(int argc, char** argv) {
     test_add_channel_then_get();
     test_channel_lease_protects_lifecycle();
 
-    printf("\n=== Results: %d/%d passed ===\n", g_passed, unit_only ? 20 : 22);
-    return (g_passed == (unit_only ? 20 : 22)) ? 0 : 1;
+    printf("\n=== Results: %d/%d passed ===\n", g_passed, unit_only ? 21 : 23);
+    return (g_passed == (unit_only ? 21 : 23)) ? 0 : 1;
 }

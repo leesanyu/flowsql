@@ -64,6 +64,17 @@
 namespace flowsql {
 namespace scheduler {
 
+static bool ValidateStreamDefinition(const rapidjson::Value& doc) {
+    for (auto member = doc.MemberBegin(); member != doc.MemberEnd(); ++member) {
+        const std::string key = member->name.GetString();
+        if (key != "type" && key != "name" && key != "role" && key != "options") return false;
+    }
+    return doc.HasMember("type") && doc["type"].IsString() && doc["type"].GetStringLength() != 0 &&
+           doc.HasMember("name") && doc["name"].IsString() && doc["name"].GetStringLength() != 0 &&
+           (!doc.HasMember("role") || doc["role"].IsString()) &&
+           (!doc.HasMember("options") || (doc["options"].IsObject() && !doc["options"].HasMember("role")));
+}
+
 static int ContractExecutionError(const std::string& text, const std::string& checks, std::string* response) {
     using namespace dataset;
     const auto colon = text.find(": ");
@@ -96,13 +107,13 @@ static std::shared_ptr<IChannel> MakeNonOwningChannelHolder(IChannel* ch) {
     return std::shared_ptr<IChannel>(ch, [](IChannel*) {});
 }
 
-static std::shared_ptr<IBlockStreamChannel> HoldExclusiveBlockReader(IBlockStreamReaderFactoryV1* provider,
+static std::shared_ptr<IBlockStreamChannel> HoldExclusiveBlockReader(IBlockStreamReaderFactory* provider,
                                                                      IBlockStreamChannel* reader) {
     return std::shared_ptr<IBlockStreamChannel>(reader, [provider](IBlockStreamChannel* value) {
         try {
             provider->ReleaseReader(value);
         } catch (...) {
-            LOG_ERROR("IBlockStreamReaderFactoryV1::ReleaseReader threw");
+            LOG_ERROR("IBlockStreamReaderFactory::ReleaseReader threw");
         }
     });
 }
@@ -118,7 +129,7 @@ int CreateExclusiveBlockReader(IQuerier* querier, const std::string& task_id, IB
 
     const std::string source_category = legacy_source->Category() ? legacy_source->Category() : "";
     const std::string source_name = legacy_source->Name() ? legacy_source->Name() : "";
-    BlockStreamReaderConfigV1 config;
+    BlockStreamReaderConfig config;
     config.task_id = task_id.c_str();
     config.source_category = source_category.c_str();
     config.source_name = source_name.c_str();
@@ -127,8 +138,8 @@ int CreateExclusiveBlockReader(IQuerier* querier, const std::string& task_id, IB
     std::vector<std::shared_ptr<IBlockStreamChannel>> matches;
     int route_error = 0;
     try {
-        const int traverse_rc = querier->Traverse(IID_BLOCK_STREAM_READER_FACTORY_V1, [&](void* value) -> int {
-            auto* provider = static_cast<IBlockStreamReaderFactoryV1*>(value);
+        const int traverse_rc = querier->Traverse(IID_BLOCK_STREAM_READER_FACTORY, [&](void* value) -> int {
+            auto* provider = static_cast<IBlockStreamReaderFactory*>(value);
             if (!provider) return 0;
 
             IBlockStreamChannel* reader = nullptr;
@@ -267,9 +278,8 @@ static std::shared_ptr<IStreamChannel> MakeStreamOwner(IStreamChannel* stream_ch
 }
 
 void SchedulerPlugin::EnumRoutes(std::function<void(const RouteItem&)> cb) {
-    cb({"POST", "/semantics/v1/operators/check", [this](const auto& u, const auto& req, auto& rsp) {
-        return HandleOperatorContractCheck(u, req, rsp);
-    }});
+    cb({"POST", "/semantics/operators/check",
+        [this](const auto& u, const auto& req, auto& rsp) { return HandleOperatorContractCheck(u, req, rsp); }});
     // 任务执行
     cb({"POST", "/scheduler/batch/execute",
         [this](const std::string& u, const std::string& req, std::string& rsp) { return HandleExecute(u, req, rsp); }});
@@ -615,9 +625,6 @@ int32_t SchedulerPlugin::HandleStreamExecuteSingle(const rapidjson::Document& do
         rsp = BuildExecutionErrorJson(stmt.error, ErrorCodeId::kStreamGroupSqlTextInvalid, ErrorStageId::kParse);
         return error::BAD_REQUEST;
     }
-    if (stmt.sources.empty() && !stmt.source.empty()) {
-        stmt.sources.push_back(stmt.source);
-    }
     if (stmt.sources.empty()) {
         rsp = BuildExecutionErrorJson("source channel not found", ErrorCodeId::kStreamGroupSqlTextInvalid,
                                       ErrorStageId::kParse);
@@ -913,9 +920,6 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         return error::BAD_REQUEST;
     }
 
-    if (stmt.sources.empty() && !stmt.source.empty()) {
-        stmt.sources.push_back(stmt.source);
-    }
     if (stmt.sources.empty()) {
         rsp = BuildErrorJson("source channel not found");
         return error::BAD_REQUEST;
@@ -958,9 +962,6 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
     std::vector<std::shared_ptr<IOperator>> op_holders;
     std::vector<IOperator*> op_chain;
     std::vector<OperatorRef> parsed_ops = stmt.operators;
-    if (parsed_ops.empty() && !stmt.op_category.empty() && !stmt.op_name.empty()) {
-        parsed_ops.push_back({stmt.op_category, stmt.op_name});
-    }
     std::unique_ptr<void, std::function<void(void*)>> block_lease_guard(nullptr, [](void*) {});
     std::shared_ptr<IBlockStreamChannel> exclusive_block_reader;
     std::shared_ptr<const BoundFilterExpr> block_source_residual;
@@ -1023,7 +1024,8 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
     const bool database_block_candidate =
         source_resolved.channels.size() == 1 &&
         dynamic_cast<IDatabaseChannel*>(source_resolved.channels.front()) != nullptr &&
-        ParseDatabaseDestination(stmt.source, &input_database_category, &input_database_name, &input_database_relation);
+        ParseDatabaseDestination(stmt.sources.front(), &input_database_category, &input_database_name,
+                                 &input_database_relation);
 
     const bool dataframe_block_candidate =
         source_resolved.channels.size() == 1 &&
@@ -1031,14 +1033,14 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
     if ((source_resolved.has_block_source || database_block_candidate || dataframe_block_candidate) &&
         !parsed_ops.empty()) {
         std::vector<BlockTransformProviderRef> transform_providers;
-        std::vector<CppOperatorCapabilityLeaseV1> transform_provider_leases;
+        std::vector<CppOperatorCapabilityLease> transform_provider_leases;
         transform_providers.reserve(parsed_ops.size());
         transform_provider_leases.reserve(parsed_ops.size());
         size_t transform_matches = 0;
         for (const auto& op_ref : parsed_ops) {
             bool transform_ambiguous = false;
             int transform_traverse_error = 0;
-            CppOperatorCapabilityLeaseV1 dynamic_lease;
+            CppOperatorCapabilityLease dynamic_lease;
             BlockTransformProviderRef transform_provider = FindBlockTransformOperator(
                 op_ref.category, op_ref.name, &dynamic_lease, &transform_ambiguous, &transform_traverse_error);
             if (transform_traverse_error != 0) {
@@ -1052,15 +1054,15 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                                      op_ref.name);
                 return error::CONFLICT;
             }
-            if (database_block_candidate && transform_provider.v1) transform_provider = {};
             if (database_block_candidate && !input_database_relation.empty() &&
-                (!transform_provider.v2 ||
-                 !dynamic_cast<IBlockTransformSourceConfigProviderV1*>(transform_provider.v2)))
+                (!transform_provider.capability ||
+                 !dynamic_cast<IBlockTransformSourceConfigProvider*>(transform_provider.capability)))
                 transform_provider = {};
             if (dataframe_block_candidate) {
-                auto* capability = transform_provider.v2
-                                       ? dynamic_cast<IBlockTransformDataFrameInputProviderV1*>(transform_provider.v2)
-                                       : nullptr;
+                auto* capability =
+                    transform_provider.capability
+                        ? dynamic_cast<IBlockTransformDataFrameInputProvider*>(transform_provider.capability)
+                        : nullptr;
                 if (!capability || !capability->SupportsDataFrameInput()) transform_provider = {};
             }
             transform_providers.push_back(transform_provider);
@@ -1079,9 +1081,10 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         if (transform_matches == parsed_ops.size()) {
             std::shared_ptr<IDataFrameChannel> dataframe_input_source;
             if (dataframe_block_candidate) {
-                if (parsed_ops.size() != 1 || !transform_providers.front().v2 || !stmt.columns.empty() ||
+                if (parsed_ops.size() != 1 || !transform_providers.front().capability || !stmt.columns.empty() ||
                     !stmt.stage_filters.empty()) {
-                    rsp = BuildErrorJson("DataFrame block input requires one V2 operator, SELECT *, and no WHERE");
+                    rsp = BuildErrorJson(
+                        "DataFrame block input requires one BlockTransform operator, SELECT *, and no WHERE");
                     return error::BAD_REQUEST;
                 }
                 for (const auto& holder : source_resolved.channel_holders)
@@ -1095,14 +1098,15 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             std::shared_ptr<IDatabaseChannel> database_input_source;
             if (database_block_candidate) {
                 std::string category, name, relation;
-                if (parsed_ops.size() != 1 || !transform_providers.front().v2 || !stmt.columns.empty() ||
+                if (parsed_ops.size() != 1 || !transform_providers.front().capability || !stmt.columns.empty() ||
                     !stmt.stage_filters.empty() ||
-                    !ParseDatabaseDestination(stmt.source, &category, &name, &relation)) {
-                    rsp = BuildErrorJson("database block input requires one V2 operator, SELECT *, and no WHERE");
+                    !ParseDatabaseDestination(stmt.sources.front(), &category, &name, &relation)) {
+                    rsp = BuildErrorJson(
+                        "database block input requires one BlockTransform operator, SELECT *, and no WHERE");
                     return error::BAD_REQUEST;
                 }
-                auto* leases = querier_ ? static_cast<IDatabaseChannelLeaseProviderV1*>(
-                                              querier_->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1))
+                auto* leases = querier_ ? static_cast<IDatabaseChannelLeaseProvider*>(
+                                              querier_->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER))
                                         : nullptr;
                 database_input_source = leases ? leases->AcquireChannel(category.c_str(), name.c_str()) : nullptr;
                 if (!database_input_source || !database_input_source->IsOpened() ||
@@ -1113,13 +1117,13 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             }
 
             auto* result_provider =
-                transform_providers.size() == 1 && transform_providers.front().v2
-                    ? dynamic_cast<IBlockTransformResultOutputProviderV1*>(transform_providers.front().v2)
+                transform_providers.size() == 1 && transform_providers.front().capability
+                    ? dynamic_cast<IBlockTransformResultOutputProvider*>(transform_providers.front().capability)
                     : nullptr;
             const bool result_output = result_provider && result_provider->SupportsResultOutput();
             const bool managed_result = !stmt.dest.empty() && !IsDataframeRefName(stmt.dest);
             std::shared_ptr<IChannel> managed_channel;
-            BlockTransformManagedSinkBindingV1 managed_binding;
+            BlockTransformManagedSinkBinding managed_binding;
             std::string db_category;
             std::string db_name;
             std::string db_relation;
@@ -1131,8 +1135,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                     rsp = BuildErrorJson("managed block transform requires a two-part database destination");
                     return error::BAD_REQUEST;
                 }
-                const auto& parameters =
-                    stmt.operator_with_params.empty() ? stmt.with_params : stmt.operator_with_params[0];
+                const auto& parameters = stmt.operator_with_params[0];
                 const auto observing = parameters.find("observing");
                 const bool family_foreground = stmt.operators.size() == 1 && stmt.operators[0].category == "npm" &&
                                                stmt.operators[0].name == "basic" && observing != parameters.end() &&
@@ -1146,8 +1149,8 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                         "managed block transform requires one operator, SELECT *, and no operator-stage WHERE");
                     return error::BAD_REQUEST;
                 }
-                auto* lease_provider = querier_ ? static_cast<IDatabaseChannelLeaseProviderV1*>(
-                                                      querier_->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1))
+                auto* lease_provider = querier_ ? static_cast<IDatabaseChannelLeaseProvider*>(
+                                                      querier_->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER))
                                                 : nullptr;
                 if (!lease_provider) {
                     rsp = BuildErrorJson("database channel lease provider unavailable");
@@ -1255,7 +1258,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             }
 
             if (named_result) {
-                DataSemanticsErrorV1 issue;
+                DataSemanticsError issue;
                 if (contracts::BindNamedOutput(querier_, dataframe_name, &contract_checks, &issue)) {
                     return ContractExecutionError(issue.code + ": " + issue.message, contract_checks, &rsp);
                 }
@@ -1323,8 +1326,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                 return error::NOT_FOUND;
             }
             try {
-                const auto& params =
-                    !stmt.operator_with_params.empty() ? stmt.operator_with_params[0] : stmt.with_params;
+                const auto& params = stmt.operator_with_params[0];
                 for (const auto& kv : params) {
                     if (block_op->Configure(kv.first.c_str(), kv.second.c_str()) != 0) {
                         rsp = BuildErrorJson("block stream operator configuration failed");
@@ -1403,9 +1405,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
     try {
         if (!op_chain.empty()) {
             for (size_t i = 0; i < op_chain.size(); ++i) {
-                const auto& params = (i < stmt.operator_with_params.size())
-                                         ? stmt.operator_with_params[i]
-                                         : (i == 0 ? stmt.with_params : std::unordered_map<std::string, std::string>{});
+                const auto& params = stmt.operator_with_params[i];
                 for (const auto& kv : params) {
                     if (op_chain[i]->Configure(kv.first.c_str(), kv.second.c_str())) {
                         rsp = BuildErrorJson("operator configuration failed");
@@ -1508,7 +1508,7 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
                 rsp = BuildErrorJson("failed to register dataframe channel: " + df_name);
                 return error::INTERNAL_ERROR;
             }
-            DataSemanticsErrorV1 issue;
+            DataSemanticsError issue;
             if (contracts::BindNamedOutput(querier_, df_name, &contract_checks, &issue)) {
                 return ContractExecutionError(issue.code + ": " + issue.message, contract_checks, &rsp);
             }
@@ -1716,7 +1716,7 @@ int32_t SchedulerPlugin::HandleQueryStreamChannelDefinitions(const std::string&,
     w.StartArray();
 
     const auto write_definition = [&w](const StreamChannelTypeDescriptor& def,
-                                       const BlockStreamChannelTypeDescriptorV1* block = nullptr) {
+                                       const BlockStreamChannelTypeDescriptor* block = nullptr) {
         w.StartObject();
         w.Key("channel_type");
         w.String(def.type.c_str());
@@ -1770,8 +1770,8 @@ int32_t SchedulerPlugin::HandleQueryStreamChannelDefinitions(const std::string&,
         w.EndObject();
     };
     builtin_registry->ListStreamChannelTypes([&](const auto& def) { write_definition(def); });
-    querier_->Traverse(IID_BLOCK_STREAM_CHANNEL_DESCRIPTOR_V1, [&](void* value) {
-        static_cast<IBlockStreamChannelDescriptorV1*>(value)->DescribeChannelTypes([&](const auto& block) {
+    querier_->Traverse(IID_BLOCK_STREAM_CHANNEL_DESCRIPTOR, [&](void* value) {
+        static_cast<IBlockStreamChannelDescriptor*>(value)->DescribeChannelTypes([&](const auto& block) {
             StreamChannelTypeDescriptor def;
             def.type = block.channel_type;
             def.display_name = block.display_name;
@@ -1893,10 +1893,10 @@ int32_t SchedulerPlugin::HandleQueryStreamChannels(const std::string&, const std
         });
     }
 
-    std::map<std::string, BlockStreamChannelTypeDescriptorV1> block_types;
+    std::map<std::string, BlockStreamChannelTypeDescriptor> block_types;
     if (querier_)
-        querier_->Traverse(IID_BLOCK_STREAM_CHANNEL_DESCRIPTOR_V1, [&](void* value) {
-            static_cast<IBlockStreamChannelDescriptorV1*>(value)->DescribeChannelTypes(
+        querier_->Traverse(IID_BLOCK_STREAM_CHANNEL_DESCRIPTOR, [&](void* value) {
+            static_cast<IBlockStreamChannelDescriptor*>(value)->DescribeChannelTypes(
                 [&](const auto& def) { block_types.emplace(def.channel_type, def); });
             return 0;
         });
@@ -1954,58 +1954,24 @@ int32_t SchedulerPlugin::HandleAddStreamChannel(const std::string&, const std::s
         return error::BAD_REQUEST;
     }
 
-    std::string type;
-    std::string name;
-    std::string role_raw;
-    std::string option_legacy;
-    const rapidjson::Value* options_obj = nullptr;
-    const rapidjson::Value* cfg = (doc.HasMember("config") && doc["config"].IsObject()) ? &doc["config"] : nullptr;
-    auto read_string = [&](const char* key, std::string* out) {
-        if (!out) return;
-        out->clear();
-        if (doc.HasMember(key) && doc[key].IsString()) {
-            *out = doc[key].GetString();
-            return;
-        }
-        if (cfg && cfg->HasMember(key) && (*cfg)[key].IsString()) {
-            *out = (*cfg)[key].GetString();
-        }
-    };
-    read_string("type", &type);
-    read_string("name", &name);
-    read_string("role", &role_raw);
-    read_string("option", &option_legacy);
-    if (doc.HasMember("options") && doc["options"].IsObject()) {
-        options_obj = &doc["options"];
-    } else if (cfg && cfg->HasMember("options") && (*cfg)["options"].IsObject()) {
-        options_obj = &(*cfg)["options"];
-    }
-    if (type.empty() || name.empty()) {
-        rsp = BuildErrorJson(
-            "invalid request, expected {\"type\":\"...\",\"name\":\"...\",\"role\":\"...\",\"options\":{...}}");
+    if (!ValidateStreamDefinition(doc)) {
+        rsp = BuildErrorJson("invalid stream definition, expected top-level type/name/role/options object");
         return error::BAD_REQUEST;
     }
+    const std::string type = doc["type"].GetString();
+    const std::string name = doc["name"].GetString();
+    const std::string role_raw = doc.HasMember("role") ? doc["role"].GetString() : "";
+    const rapidjson::Value* options_obj = doc.HasMember("options") ? &doc["options"] : nullptr;
     std::string role = role_raw.empty() ? "both" : NormalizeStreamRole(role_raw);
     if (role.empty()) {
         rsp = BuildErrorJson("invalid role, expected source|sink|both");
         return error::BAD_REQUEST;
-    }
-    if (!option_legacy.empty() && role_raw.empty()) {
-        role = ReadRoleFromOption(option_legacy);
     }
 
     if (role == "source") {
         std::string option;
         if (options_obj) {
             option = OptionObjectToJson(*options_obj);
-        } else if (!option_legacy.empty()) {
-            rapidjson::Document option_doc;
-            std::string parse_err;
-            if (ParseOptionObject(option_legacy, &option_doc, &parse_err) != 0 || !option_doc.IsObject()) {
-                rsp = BuildErrorJson("invalid option: " + parse_err);
-                return error::BAD_REQUEST;
-            }
-            option = OptionObjectToJson(option_doc);
         } else {
             option = "{}";
         }
@@ -2055,14 +2021,6 @@ int32_t SchedulerPlugin::HandleAddStreamChannel(const std::string&, const std::s
     std::string option;
     if (options_obj) {
         option = BuildOptionWithRoleJson(options_obj, role);
-    } else if (!option_legacy.empty()) {
-        rapidjson::Document option_doc;
-        std::string parse_err;
-        if (ParseOptionObject(option_legacy, &option_doc, &parse_err) != 0 || !option_doc.IsObject()) {
-            rsp = BuildErrorJson("invalid option: " + parse_err);
-            return error::BAD_REQUEST;
-        }
-        option = BuildOptionWithRoleJson(&option_doc, role);
     } else {
         option = BuildOptionWithRoleJson(nullptr, role);
     }
@@ -2090,58 +2048,24 @@ int32_t SchedulerPlugin::HandleModifyStreamChannel(const std::string&, const std
         return error::BAD_REQUEST;
     }
 
-    std::string type;
-    std::string name;
-    std::string role_raw;
-    std::string option_legacy;
-    const rapidjson::Value* options_obj = nullptr;
-    const rapidjson::Value* cfg = (doc.HasMember("config") && doc["config"].IsObject()) ? &doc["config"] : nullptr;
-    auto read_string = [&](const char* key, std::string* out) {
-        if (!out) return;
-        out->clear();
-        if (doc.HasMember(key) && doc[key].IsString()) {
-            *out = doc[key].GetString();
-            return;
-        }
-        if (cfg && cfg->HasMember(key) && (*cfg)[key].IsString()) {
-            *out = (*cfg)[key].GetString();
-        }
-    };
-    read_string("type", &type);
-    read_string("name", &name);
-    read_string("role", &role_raw);
-    read_string("option", &option_legacy);
-    if (doc.HasMember("options") && doc["options"].IsObject()) {
-        options_obj = &doc["options"];
-    } else if (cfg && cfg->HasMember("options") && (*cfg)["options"].IsObject()) {
-        options_obj = &(*cfg)["options"];
-    }
-    if (type.empty() || name.empty()) {
-        rsp = BuildErrorJson(
-            "invalid request, expected {\"type\":\"...\",\"name\":\"...\",\"role\":\"...\",\"options\":{...}}");
+    if (!ValidateStreamDefinition(doc)) {
+        rsp = BuildErrorJson("invalid stream definition, expected top-level type/name/role/options object");
         return error::BAD_REQUEST;
     }
+    const std::string type = doc["type"].GetString();
+    const std::string name = doc["name"].GetString();
+    const std::string role_raw = doc.HasMember("role") ? doc["role"].GetString() : "";
+    const rapidjson::Value* options_obj = doc.HasMember("options") ? &doc["options"] : nullptr;
     std::string role = role_raw.empty() ? "both" : NormalizeStreamRole(role_raw);
     if (role.empty()) {
         rsp = BuildErrorJson("invalid role, expected source|sink|both");
         return error::BAD_REQUEST;
-    }
-    if (!option_legacy.empty() && role_raw.empty()) {
-        role = ReadRoleFromOption(option_legacy);
     }
 
     {
         std::string option;
         if (options_obj) {
             option = OptionObjectToJson(*options_obj);
-        } else if (!option_legacy.empty()) {
-            rapidjson::Document option_doc;
-            std::string parse_err;
-            if (ParseOptionObject(option_legacy, &option_doc, &parse_err) != 0 || !option_doc.IsObject()) {
-                rsp = BuildErrorJson("invalid option: " + parse_err);
-                return error::BAD_REQUEST;
-            }
-            option = OptionObjectToJson(option_doc);
         } else {
             option = "{}";
         }
@@ -2228,14 +2152,6 @@ int32_t SchedulerPlugin::HandleModifyStreamChannel(const std::string&, const std
     std::string option;
     if (options_obj) {
         option = BuildOptionWithRoleJson(options_obj, role);
-    } else if (!option_legacy.empty()) {
-        rapidjson::Document option_doc;
-        std::string parse_err;
-        if (ParseOptionObject(option_legacy, &option_doc, &parse_err) != 0 || !option_doc.IsObject()) {
-            rsp = BuildErrorJson("invalid option: " + parse_err);
-            return error::BAD_REQUEST;
-        }
-        option = BuildOptionWithRoleJson(&option_doc, role);
     } else {
         option = BuildOptionWithRoleJson(nullptr, role);
     }

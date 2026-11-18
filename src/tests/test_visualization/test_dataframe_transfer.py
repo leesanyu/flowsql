@@ -102,13 +102,14 @@ def main():
 
     with (root / 'source.log').open('w+') as source_log, (root / 'visualization.log').open('w+') as visualization_log:
         source = subprocess.Popen([str(output / 'flowsql'), '--role', 'catalog', '--plugins',
+                                   f'{output}/libflowsql_config_channel.so:db_path={root}/semantics.db,'
                                    f'{output}/libflowsql_builtin.so,{output}/libflowsql_catalog.so:{source_option},'
                                    f'{output}/libflowsql_router.so:host=127.0.0.1;port={source_base.rsplit(":", 1)[1]}'],
                                   cwd=root, env=env, stdout=source_log, stderr=source_log)
         try:
             wait_ready(source_base, source, source_log, 'source',
-                       '/channels/dataframe/exploration/v1/sources')
-            status, listing = call(source_base, '/channels/dataframe/exploration/v1/sources')
+                       '/channels/dataframe/exploration/sources')
+            status, listing = call(source_base, '/channels/dataframe/exploration/sources')
             assert status == 200 and [item['label'] for item in listing['sources']] == ['dataframe.sales'], listing
             passed('source lists named DataFrame without data')
 
@@ -117,8 +118,8 @@ def main():
                                              cwd=root, env=env, stdout=visualization_log, stderr=visualization_log)
             try:
                 wait_ready(visualization_base, visualization, visualization_log, 'visualization',
-                           '/api/visualization/v1/capabilities')
-                status, merged = call(visualization_base, '/api/visualization/v1/sources')
+                           '/api/visualization/capabilities')
+                status, merged = call(visualization_base, '/api/visualization/sources')
                 assert status == 200, merged
                 frames = [item for item in merged['sources'] if item.get('kind') == 'dataframe']
                 assert len(frames) == 1 and frames[0]['label'] == 'dataframe.sales', merged
@@ -126,14 +127,14 @@ def main():
                 source_id = frames[0]['source_id']
                 assert len(source_id) == 64, source_id
 
-                status, detail = call(visualization_base, f'/api/visualization/v1/sources/{source_id}')
+                status, detail = call(visualization_base, f'/api/visualization/sources/{source_id}')
                 assert status == 200 and detail['kind'] == 'dataframe' and detail['status'] == 'available', detail
                 assert [field['label'] for field in detail['fields']] == [], detail
                 assert not list(shared.glob('*.arrow')), 'describing a source must not create a snapshot'
                 passed('source detail is identity only and creates no snapshot')
 
                 request_id = str(uuid.uuid4())
-                status, snapshot = call(visualization_base, '/api/visualization/v1/snapshots/acquire',
+                status, snapshot = call(visualization_base, '/api/visualization/snapshots/acquire',
                                         dict(request_id=request_id, source_id=source_id))
                 assert status == 200, snapshot
                 assert snapshot['source_id'] == source_id and snapshot['row_count'] == 3, snapshot
@@ -147,10 +148,10 @@ def main():
                 assert not list(shared.glob('.*.partial')), list(shared.glob('.*.partial'))
                 passed('acquire returns metadata only and retires the transfer after mapping')
 
-                status, repeated = call(visualization_base, '/api/visualization/v1/snapshots/acquire',
+                status, repeated = call(visualization_base, '/api/visualization/snapshots/acquire',
                                         dict(request_id=request_id, source_id=source_id))
                 assert status == 200 and repeated['snapshot_id'] != snapshot['snapshot_id'], repeated
-                status, invalid = call(visualization_base, '/api/visualization/v1/snapshots/acquire',
+                status, invalid = call(visualization_base, '/api/visualization/snapshots/acquire',
                                        dict(request_id='not-a-uuid', source_id=source_id))
                 assert status == 400 and invalid['code'] == 'INVALID_WORKFLOW', invalid
                 passed('repeated request identity reuses one transfer and invalid request is rejected')
@@ -163,53 +164,53 @@ def main():
                                snapshot_id=snapshot['snapshot_id'], schema_revision=snapshot['schema_revision'],
                                workflow_version='graphic-walker-0.5.3', workflow=workflow,
                                detail_mode='complete')
-                status, result = call(visualization_base, '/api/visualization/v1/compute', compute)
+                status, result = call(visualization_base, '/api/visualization/compute', compute)
                 assert status == 200 and result['execution'] == 'dataframe', result
                 assert result['snapshot_id'] == snapshot['snapshot_id'] and result['returned_rows'] == 1, result
                 assert result['rows'][0]['rows'] == 3, result
                 mismatch = dict(compute, request_id=str(uuid.uuid4()), schema_revision='0' * 64)
-                status, rejected = call(visualization_base, '/api/visualization/v1/compute', mismatch)
+                status, rejected = call(visualization_base, '/api/visualization/compute', mismatch)
                 assert status == 409 and rejected['code'] == 'SNAPSHOT_MISMATCH', rejected
                 expired_request = dict(compute, request_id=str(uuid.uuid4()), snapshot_id='0' * 64)
-                status, expired_compute = call(visualization_base, '/api/visualization/v1/compute', expired_request)
+                status, expired_compute = call(visualization_base, '/api/visualization/compute', expired_request)
                 assert status == 409 and expired_compute['code'] == 'SNAPSHOT_EXPIRED', expired_compute
-                cancel = call(visualization_base, '/api/visualization/v1/cancel', dict(request_id=compute['request_id']))
+                cancel = call(visualization_base, '/api/visualization/cancel', dict(request_id=compute['request_id']))
                 assert cancel[0] == 200 and cancel[1]['status'] == 'not_running', cancel
                 passed('snapshot-bound compute, version mismatch, expiry and cancel')
 
-                status, renewed = call(visualization_base, '/api/visualization/v1/snapshots/renew',
+                status, renewed = call(visualization_base, '/api/visualization/snapshots/renew',
                                        dict(snapshot_id=snapshot['snapshot_id']))
                 assert status == 200 and renewed['expires_at_unix'] >= snapshot['expires_at_unix'], renewed
-                status, released = call(visualization_base, '/api/visualization/v1/snapshots/release',
+                status, released = call(visualization_base, '/api/visualization/snapshots/release',
                                         dict(snapshot_id=snapshot['snapshot_id']))
                 assert status == 200 and released['status'] == 'released', released
-                status, expired = call(visualization_base, '/api/visualization/v1/snapshots/renew',
+                status, expired = call(visualization_base, '/api/visualization/snapshots/renew',
                                        dict(snapshot_id=snapshot['snapshot_id']))
                 assert status == 409 and expired['code'] == 'SNAPSHOT_EXPIRED', expired
-                status, released = call(visualization_base, '/api/visualization/v1/snapshots/release',
+                status, released = call(visualization_base, '/api/visualization/snapshots/release',
                                         dict(snapshot_id=snapshot['snapshot_id']))
                 assert status == 200, released
                 passed('renew, idempotent release and expiry rejection')
 
                 # Source-side limits: unknown path, oversize budget, unsafe transfer id, cancel.
-                status, unknown = call(source_base, '/channels/dataframe/exploration/v1/snapshots/acquire',
+                status, unknown = call(source_base, '/channels/dataframe/exploration/snapshots/acquire',
                                        dict(request_id=str(uuid.uuid4()), source_id='0' * 64,
                                             remaining_timeout_ms=5000))
                 assert status == 404 and unknown['code'] == 'SOURCE_UNAVAILABLE', unknown
-                status, limited = call(source_base, '/channels/dataframe/exploration/v1/snapshots/acquire',
+                status, limited = call(source_base, '/channels/dataframe/exploration/snapshots/acquire',
                                        dict(request_id=str(uuid.uuid4()), source_id=source_id, max_bytes=64,
                                             remaining_timeout_ms=5000))
                 assert status == 413 and limited['code'] == 'SNAPSHOT_LIMIT', limited
-                status, escaped = call(source_base, '/channels/dataframe/exploration/v1/snapshots/release',
+                status, escaped = call(source_base, '/channels/dataframe/exploration/snapshots/release',
                                        dict(transfer_id='../../../../etc/passwd'))
                 assert status == 200, escaped
                 assert (root / 'etc' / 'passwd').exists() is False
-                status, cancelled = call(source_base, '/channels/dataframe/exploration/v1/snapshots/cancel',
+                status, cancelled = call(source_base, '/channels/dataframe/exploration/snapshots/cancel',
                                          dict(request_id='never-started'))
                 assert status == 200 and cancelled['status'] == 'not_running', cancelled
                 passed('unknown path, byte budget and unsafe identifier are rejected')
 
-                status, second = call(visualization_base, '/api/visualization/v1/snapshots/acquire',
+                status, second = call(visualization_base, '/api/visualization/snapshots/acquire',
                                       dict(request_id=str(uuid.uuid4()), source_id=source_id))
                 assert status == 200, second
             finally:
@@ -219,13 +220,13 @@ def main():
             assert not list(shared.glob('*.arrow')), list(shared.glob('*.arrow'))
             passed('visualization shutdown releases client state and mapped objects')
 
-            status, snapshot_after = call(source_base, '/channels/dataframe/exploration/v1/snapshots/acquire',
+            status, snapshot_after = call(source_base, '/channels/dataframe/exploration/snapshots/acquire',
                                           dict(request_id=str(uuid.uuid4()), source_id=source_id,
                                                remaining_timeout_ms=5000))
             assert status == 200, snapshot_after
             transfer_object = shared / (snapshot_after['transfer_id'] + '.arrow')
             assert transfer_object.exists() and stat.S_IMODE(transfer_object.stat().st_mode) == 0o600
-            call(source_base, '/channels/dataframe/exploration/v1/snapshots/release',
+            call(source_base, '/channels/dataframe/exploration/snapshots/release',
                  dict(transfer_id=snapshot_after['transfer_id']))
             assert not transfer_object.exists(), 'release must remove the published object'
             passed('source release removes the published object')
@@ -242,10 +243,10 @@ def main():
                                       cwd=root, env=env, stdout=standalone_log, stderr=standalone_log)
         try:
             wait_ready(unavailable_base, standalone, standalone_log, 'standalone',
-                       '/api/visualization/v1/capabilities')
-            status, listing = call(unavailable_base, '/api/visualization/v1/sources')
+                       '/api/visualization/capabilities')
+            status, listing = call(unavailable_base, '/api/visualization/sources')
             assert status == 200 and listing['sources'] == [], listing
-            status, unknown = call(unavailable_base, '/api/visualization/v1/snapshots/acquire',
+            status, unknown = call(unavailable_base, '/api/visualization/snapshots/acquire',
                                    dict(request_id=str(uuid.uuid4()), source_id='0' * 64))
             assert status == 503 and unknown['code'] in ('DATA_PLANE_UNAVAILABLE', 'SOURCE_UNAVAILABLE'), unknown
             passed('missing data plane fails explicitly while database path stays available')

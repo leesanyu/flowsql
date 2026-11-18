@@ -23,9 +23,9 @@ struct NpmFamilyOutputOptions {
     bool has_result_projection = false;
 };
 struct NpmFamilyOutputSelection {
-    std::vector<NpmEntityDescriptorV1> enabled_entities;
-    std::vector<NpmEntityDescriptorV1> persisted_entities;
-    std::optional<NpmEntityDescriptorV1> observed_entity;
+    std::vector<NpmEntityDescriptor> enabled_entities;
+    std::vector<NpmEntityDescriptor> persisted_entities;
+    std::optional<NpmEntityDescriptor> observed_entity;
     std::shared_ptr<arrow::Schema> foreground_schema;
     // No observed entity means a zero-column Schema and zero rows; never a placeholder row.
 };
@@ -46,7 +46,7 @@ struct NpmFamilyDatabaseColumn {
 };
 struct NpmFamilyDatabaseContract {
     NpmFamilyDatabaseBackend backend;
-    NpmEntityDescriptorV1 entity;
+    NpmEntityDescriptor entity;
     NpmFamilyRelations relations;
     std::vector<NpmFamilyDatabaseColumn> columns;
     // Physical data rows additionally contain run_id/task_id text. Entity readback uses entity.schema exactly.
@@ -55,14 +55,14 @@ arrow::Result<NpmFamilyDatabaseContract> NpmFamilyDatabaseMapping(NpmFamilyDatab
                                                                   NpmFamilyEntityKind kind,
                                                                   packet::AddressFamily family);
 // Borrowed buffers must outlive the synchronous prepared command. No text/hex address intermediary.
-DatabaseParameterV1 NpmFamilyAddressParameter(network::IPv4Address address);
-DatabaseParameterV1 NpmFamilyAddressParameter(const network::IPv6Address& address);
-DatabaseParameterV1 NpmFamilyAddressParameter(network::IPv6Address&&) = delete;
-DatabaseParameterV1 NpmFamilyAddressParameter(const network::IPv6Address&&) = delete;
+DatabaseParameter NpmFamilyAddressParameter(network::IPv4Address address);
+DatabaseParameter NpmFamilyAddressParameter(const network::IPv6Address& address);
+DatabaseParameter NpmFamilyAddressParameter(network::IPv6Address&&) = delete;
+DatabaseParameter NpmFamilyAddressParameter(const network::IPv6Address&&) = delete;
 // Input arrays have passed RecordBatch::ValidateFull; the owner survives through prepared-command return.
-arrow::Result<DatabaseParameterV1> NpmFamilyDatabaseParameter(const arrow::Array& values, int64_t row);
-arrow::Result<DatabaseParameterV1> NpmFamilyDatabaseParameter(arrow::Array&&, int64_t) = delete;
-arrow::Result<DatabaseParameterV1> NpmFamilyDatabaseParameter(const arrow::Array&&, int64_t) = delete;
+arrow::Result<DatabaseParameter> NpmFamilyDatabaseParameter(const arrow::Array& values, int64_t row);
+arrow::Result<DatabaseParameter> NpmFamilyDatabaseParameter(arrow::Array&&, int64_t) = delete;
+arrow::Result<DatabaseParameter> NpmFamilyDatabaseParameter(const arrow::Array&&, int64_t) = delete;
 arrow::Status ValidateNpmFamilyDatabaseReadback(const NpmFamilyDatabaseContract& contract,
                                                 const arrow::RecordBatch& rows);
 
@@ -109,7 +109,7 @@ arrow::Result<NpmFamilyPublicationCursor> CompleteNpmFamilyPublication(
     const NpmFamilyPublicationProof& proof, NpmFamilyPublicationOutcome outcome,
     const std::optional<NpmFamilyPublishedProgress>& confirmed);
 // Exact relation/run binding; only source-confirmed immutable period increments become downstream progress.
-arrow::Result<PublishedDatasetProgressV1> NpmFamilyDatasetProgress(const NpmFamilyPublishedProgress& fact,
-                                                                   const PublishedDatasetRequestV1& request);
+arrow::Result<PublishedDatasetProgress> NpmFamilyDatasetProgress(const NpmFamilyPublishedProgress& fact,
+                                                                 const PublishedDatasetRequest& request);
 
 }  // namespace flowsql::npm

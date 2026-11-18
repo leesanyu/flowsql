@@ -77,7 +77,7 @@ std::string Envelope(std::string_view payload, uint64_t max_bytes) {
     Writer writer(stream);
     writer.StartObject();
     writer.Key("payload_version");
-    writer.Uint(kBaselineCheckpointPayloadVersionV1);
+    writer.Uint(kBaselineCheckpointPayloadVersion);
     writer.Key("schema_version");
     writer.Uint(1);
     writer.Key("algorithm_version");
@@ -175,8 +175,8 @@ void ValidateScalarModels(const BootstrapArtifact& artifact) {
         ValidateFormalModel(*artifact.ratio_model, FormalModelKind::kRatioBaseline);
     }
 }
-void PreflightScalar(const rapidjson::Value& payload, const Compatibility& expected,
-                     const BaselineStateLimitsV1& limits, BaselineTaskKind kind, uint64_t max_bytes) {
+void PreflightScalar(const rapidjson::Value& payload, const Compatibility& expected, const BaselineStateLimits& limits,
+                     BaselineTaskKind kind, uint64_t max_bytes) {
     Require(payload.IsObject() && payload.HasMember("kind") && payload.HasMember("compatibility"),
             "checkpoint scalar header");
     BaselineTaskKind decoded_kind{};
@@ -192,7 +192,7 @@ void PreflightScalar(const rapidjson::Value& payload, const Compatibility& expec
             payload.HasMember(item.first) && payload[item.first].IsArray() && payload[item.first].Size() <= item.second,
             "checkpoint identity capacity");
 }
-void ValidateScalar(const ScalarState& state, const Compatibility& expected, const BaselineStateLimitsV1& limits,
+void ValidateScalar(const ScalarState& state, const Compatibility& expected, const BaselineStateLimits& limits,
                     BaselineTaskKind kind, uint64_t max_bytes) {
     Require(state.kind == kind && Encode(state.compatibility, max_bytes) == Encode(expected, max_bytes),
             "checkpoint configuration/calendar mismatch");
@@ -253,8 +253,7 @@ BaselineSerializationResult CheckpointAccess::Export(const BaselineTaskBase& tas
     return {BaselineStatus::kUnsupportedFormat, {}};
 }
 template <class T>
-BaselineStatus CheckpointAccess::RestoreScalar(T& task, const BaselineCheckpointRestoreV1& restore,
-                                               uint64_t max_bytes) {
+BaselineStatus CheckpointAccess::RestoreScalar(T& task, const BaselineCheckpointRestore& restore, uint64_t max_bytes) {
     try {
         auto doc = DecodeEnvelope(restore.content, max_bytes);
         const auto expected = Capture(task.spec_, task.compiled_event_calendar_);
@@ -272,9 +271,9 @@ BaselineStatus CheckpointAccess::RestoreScalar(T& task, const BaselineCheckpoint
         return BaselineStatus::kInvalidArgument;
     }
 }
-BaselineStatus CheckpointAccess::Restore(BaselineTaskBase& task, const BaselineCheckpointRestoreV1& restore,
+BaselineStatus CheckpointAccess::Restore(BaselineTaskBase& task, const BaselineCheckpointRestore& restore,
                                          uint64_t max_bytes) {
-    if (!ValidBaselineCheckpointRestoreV1(restore, max_bytes) || task.closed_ || !task.checkpoint_bound_ ||
+    if (!ValidBaselineCheckpointRestore(restore, max_bytes) || task.closed_ || !task.checkpoint_bound_ ||
         !task.state_limits_ || task.state_operations_started_ || task.checkpoint_restored_)
         return BaselineStatus::kInvalidArgument;
     if (auto value = dynamic_cast<BaselineValueTask*>(&task)) return RestoreScalar(*value, restore, max_bytes);
@@ -433,7 +432,7 @@ uint64_t SumLimit(uint64_t a, uint64_t b) {
     return a > std::numeric_limits<uint64_t>::max() - b ? std::numeric_limits<uint64_t>::max() : a + b;
 }
 void PreflightRelation(const rapidjson::Value& payload, const RelationCompatibility& expected,
-                       const BaselineStateLimitsV1& limits, size_t shards, uint64_t max_bytes) {
+                       const BaselineStateLimits& limits, size_t shards, uint64_t max_bytes) {
     Require(payload.IsObject() && payload.MemberCount() == 5 && payload.HasMember("kind") &&
                 payload.HasMember("compatibility") && payload.HasMember("native") && payload.HasMember("managed") &&
                 payload.HasMember("fusion_layout"),
@@ -705,7 +704,7 @@ void CheckpointAccess::ValidateRelation(BaselineRelationTask& p, uint64_t max_by
     Require(p.fusion_cleanup_bucket_cursor_ < p.fusion_states_.bucket_count(), "checkpoint fusion cleanup cursor");
 }
 
-BaselineStatus CheckpointAccess::RestoreRelation(BaselineRelationTask& task, const BaselineCheckpointRestoreV1& restore,
+BaselineStatus CheckpointAccess::RestoreRelation(BaselineRelationTask& task, const BaselineCheckpointRestore& restore,
                                                  uint64_t max_bytes) {
     try {
         auto doc = DecodeEnvelope(restore.content, max_bytes);

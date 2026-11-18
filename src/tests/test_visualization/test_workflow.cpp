@@ -32,7 +32,7 @@ int main() {
         assert(rejected);
     }
     for (const std::string dialect : {"sqlite", "mysql", "postgres", "clickhouse"}) {
-        SourceSchemaV1 source{"order`\"s", {{"n", "value`\"", "number", "INTEGER"}}, dialect, "schema.dot"};
+        SourceSchema source{"order`\"s", {{"n", "value`\"", "number", "INTEGER"}}, dialect, "schema.dot"};
         rapidjson::Document input;
         input.Parse(
             R"({"workflow":[{"type":"filter","filters":[{"fid":"n","rule":{"type":"comparison","op":"gt","value":10}}]},{"type":"view","query":[{"op":"aggregate","groupBy":[],"measures":[{"field":"n","agg":"mean","asFieldKey":"avg"},{"field":"n","agg":"sum","asFieldKey":"sum"}]}]}]})");
@@ -50,8 +50,7 @@ int main() {
     assert(QuoteIdentifier("a`b", "mysql") == "`a``b`");
     assert(QuoteIdentifier("a\"b", "postgres") == "\"a\"\"b\"");
     for (const std::string dialect : {"sqlite", "mysql", "postgres", "clickhouse"}) {
-        SourceSchemaV1 calendar{
-            "calendar", {{"t", "time", "string", "DATE"}, {"v", "value", "number", "INT"}}, dialect};
+        SourceSchema calendar{"calendar", {{"t", "time", "string", "DATE"}, {"v", "value", "number", "INT"}}, dialect};
         for (const auto* unit : {"day", "month"}) {
             rapidjson::Document input;
             input.Parse(
@@ -91,21 +90,21 @@ int main() {
         assert(driver.Connect({{"path", path}, {"readonly", "true"}}) == 0);
         auto session = driver.CreateSession();
         auto* begin = dynamic_cast<flowsql::database::IDbSnapshotSession*>(session.get());
-        auto* query = dynamic_cast<IDatabaseExplorationSessionV1*>(session.get());
+        auto* query = dynamic_cast<IDatabaseExplorationSession*>(session.get());
         assert(begin && query);
-        assert(begin->BeginSnapshot(DatabaseSnapshotOptionsV1{}) == 0);
-        SourceSchemaV1 source{"data",
-                              {{"a", "a", "string", "TEXT"},
-                               {"b", "b", "string", "TEXT"},
-                               {"n", "n", "number", "INTEGER"},
-                               {"mixed", "mixed", "number", "INTEGER"}}};
+        assert(begin->BeginSnapshot(DatabaseSnapshotOptions{}) == 0);
+        SourceSchema source{"data",
+                            {{"a", "a", "string", "TEXT"},
+                             {"b", "b", "string", "TEXT"},
+                             {"n", "n", "number", "INTEGER"},
+                             {"mixed", "mixed", "number", "INTEGER"}}};
         auto execute = [&](const char* json, const std::string& mode = "complete", uint32_t maximum = 10000) {
             rapidjson::Document document;
             document.Parse(json);
             assert(!document.HasParseError());
             auto plan = CompileWorkflow(source, document, mode, maximum);
             auto parameters = BindValues(plan.parameters);
-            ExplorationResultV1 output;
+            ExplorationResult output;
             assert(query->Query(plan.sql.c_str(), parameters.data(), parameters.size(), maximum + 1, 8 * 1024 * 1024,
                                 &output) == 0);
             return output;
@@ -128,7 +127,7 @@ int main() {
         const auto injection = execute(
             R"({"workflow":[{"type":"filter","filters":[{"fid":"a","rule":{"type":"one of","value":["' OR 1=1 --"]}}]},{"type":"view","query":[{"op":"raw","fields":["a"]}]}]})");
         assert(injection.rows.empty());
-        ExplorationResultV1 invalid;
+        ExplorationResult invalid;
         assert(query->Query("DELETE FROM data", nullptr, 0, 10, 1024, &invalid) != 0);
         assert(query->Query("SELECT 1; SELECT 2", nullptr, 0, 10, 1024, &invalid) != 0);
         for (
@@ -146,7 +145,7 @@ int main() {
             }
             assert(rejected);
         }
-        SourceSchemaV1 distribution{
+        SourceSchema distribution{
             "distribution",
             {{"n", "n", "number", "REAL"}, {"d", "d", "number", "REAL"}, {"allnull", "allnull", "number", "REAL"}}};
         auto histogram = [&](const std::string& field, int bins, const std::string& filter = "") {
@@ -157,7 +156,7 @@ int main() {
                             .c_str());
             auto plan = CompileWorkflow(distribution, input, "complete", 100);
             auto parameters = BindValues(plan.parameters);
-            ExplorationResultV1 result;
+            ExplorationResult result;
             assert(query->Query(plan.sql.c_str(), parameters.data(), parameters.size(), 101, 65536, &result) == 0);
             return result;
         };

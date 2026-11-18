@@ -13,8 +13,8 @@
 
 namespace npm = flowsql::npm;
 using Direction = npm::NpmPacketDirection;
-using Outcome = npm::NpmHttp1OutcomeV1;
-using Reason = npm::NpmHttp1IncompleteReasonV1;
+using Outcome = npm::NpmHttp1Outcome;
+using Reason = npm::NpmHttp1IncompleteReason;
 
 namespace {
 
@@ -38,35 +38,33 @@ class Budget final : public npm::INpmTaskBudget {
 
 struct Fixture {
     Fixture() : tracker(Config()) {}
-    static npm::NpmHttp1ConfigV1 Config() {
-        npm::NpmHttp1ConfigV1 config;
+    static npm::NpmHttp1Config Config() {
+        npm::NpmHttp1Config config;
         config.primary_label_ids = {1001};
         return config;
     }
     void Data(uint64_t session_id, Direction direction, std::string_view bytes, std::optional<int64_t> capture_ns,
-              npm::NpmTcpStreamOriginV1 origin = npm::NpmTcpStreamOriginV1::kSyn) {
-        npm::NpmTcpStreamEventV1 event;
-        event.kind = npm::NpmTcpStreamEventKindV1::kData;
+              npm::NpmTcpStreamOrigin origin = npm::NpmTcpStreamOrigin::kSyn) {
+        npm::NpmTcpStreamEvent event;
+        event.kind = npm::NpmTcpStreamEventKind::kData;
         event.bytes = {reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()};
         event.captured_at_ns = capture_ns;
         assert(tracker.OnStreamEvent(session_id, direction, origin, event, capture_ns.value_or(0), &rows) == 0);
     }
-    void End(uint64_t session_id, Direction direction, npm::NpmTcpStreamEndReasonV1 reason, int64_t time_ns) {
-        npm::NpmTcpStreamEventV1 event;
-        event.kind = npm::NpmTcpStreamEventKindV1::kEnd;
+    void End(uint64_t session_id, Direction direction, npm::NpmTcpStreamEndReason reason, int64_t time_ns) {
+        npm::NpmTcpStreamEvent event;
+        event.kind = npm::NpmTcpStreamEventKind::kEnd;
         event.end_reason = reason;
-        assert(tracker.OnStreamEvent(session_id, direction, npm::NpmTcpStreamOriginV1::kSyn, event, time_ns, &rows) ==
-               0);
+        assert(tracker.OnStreamEvent(session_id, direction, npm::NpmTcpStreamOrigin::kSyn, event, time_ns, &rows) == 0);
     }
     void Gap(uint64_t session_id, Direction direction, bool capture_truncation, int64_t time_ns) {
-        npm::NpmTcpStreamEventV1 event;
-        event.kind = npm::NpmTcpStreamEventKindV1::kGap;
+        npm::NpmTcpStreamEvent event;
+        event.kind = npm::NpmTcpStreamEventKind::kGap;
         event.includes_capture_truncation = capture_truncation;
-        assert(tracker.OnStreamEvent(session_id, direction, npm::NpmTcpStreamOriginV1::kSyn, event, time_ns, &rows) ==
-               0);
+        assert(tracker.OnStreamEvent(session_id, direction, npm::NpmTcpStreamOrigin::kSyn, event, time_ns, &rows) == 0);
     }
-    npm::NpmHttp1TransactionTrackerV1 tracker;
-    std::vector<npm::NpmHttp1TransactionResultV1> rows;
+    npm::NpmHttp1TransactionTracker tracker;
+    std::vector<npm::NpmHttp1TransactionResult> rows;
 };
 
 void TestPipelineAndHeadContext() {
@@ -113,7 +111,7 @@ void TestTunnelsStopParsing() {
         fixture.Data(1, Direction::kBToA, pair.second + "binary tunnel data", 20);
         assert(fixture.rows.size() == 1 && fixture.rows[0].outcome == Outcome::kMatched);
         fixture.Data(1, Direction::kAToB, "GET /not-http HTTP/1.1\r\n\r\n", 30);
-        fixture.End(1, Direction::kBToA, npm::NpmTcpStreamEndReasonV1::kFin, 40);
+        fixture.End(1, Direction::kBToA, npm::NpmTcpStreamEndReason::kFin, 40);
         assert(fixture.rows.size() == 1);
     }
 }
@@ -170,19 +168,19 @@ void TestDeadlineAndLatency() {
 void TestTerminationAndAbort() {
     Fixture half_close;
     half_close.Data(1, Direction::kAToB, "GET / HTTP/1.1\r\n\r\n", 10);
-    half_close.End(1, Direction::kAToB, npm::NpmTcpStreamEndReasonV1::kFin, 11);
+    half_close.End(1, Direction::kAToB, npm::NpmTcpStreamEndReason::kFin, 11);
     assert(half_close.rows.empty());
     half_close.Data(1, Direction::kBToA, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", 20);
     assert(half_close.rows.size() == 1 && half_close.rows[0].outcome == Outcome::kMatched);
 
     Fixture response_fin;
     response_fin.Data(1, Direction::kAToB, "GET / HTTP/1.1\r\n\r\n", 10);
-    response_fin.End(1, Direction::kBToA, npm::NpmTcpStreamEndReasonV1::kFin, 20);
+    response_fin.End(1, Direction::kBToA, npm::NpmTcpStreamEndReason::kFin, 20);
     assert(response_fin.rows.size() == 1 && response_fin.rows[0].incomplete_reason == Reason::kResponseStreamEnd);
-    response_fin.End(1, Direction::kAToB, npm::NpmTcpStreamEndReasonV1::kReset, 21);
+    response_fin.End(1, Direction::kAToB, npm::NpmTcpStreamEndReason::kReset, 21);
     assert(response_fin.rows.size() == 1);
 
-    for (auto reason : {npm::NpmTcpStreamEndReasonV1::kReset, npm::NpmTcpStreamEndReasonV1::kSessionEnd}) {
+    for (auto reason : {npm::NpmTcpStreamEndReason::kReset, npm::NpmTcpStreamEndReason::kSessionEnd}) {
         Fixture reset;
         reset.Data(1, Direction::kAToB, "GET / HTTP/1.1\r\n\r\n", 10);
         reset.End(1, Direction::kBToA, reason, 20);
@@ -223,7 +221,7 @@ void TestGapAndTruncation() {
     gap_first.Data(7, Direction::kBToA, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", 3);
     assert(gap_first.rows.empty());
     Fixture end_first;
-    end_first.End(8, Direction::kAToB, npm::NpmTcpStreamEndReasonV1::kFin, 1);
+    end_first.End(8, Direction::kAToB, npm::NpmTcpStreamEndReason::kFin, 1);
     end_first.Data(8, Direction::kAToB, "GET / HTTP/1.1\r\n\r\n", 2);
     assert(end_first.rows.empty());
 }
@@ -266,14 +264,14 @@ void TestAcrossBatchesAndOrphanClose() {
     fixture.Data(1, Direction::kBToA, "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n", 40);
     assert(fixture.rows.size() == 2 && fixture.rows[1].request->target == "/two");
     assert(fixture.rows[1].latency_ns == 20);
-    fixture.End(1, Direction::kBToA, npm::NpmTcpStreamEndReasonV1::kFin, 50);
+    fixture.End(1, Direction::kBToA, npm::NpmTcpStreamEndReason::kFin, 50);
     assert(fixture.tracker.OnSessionEnd(1, npm::NpmSessionEndReason::kClosed, 51, &fixture.rows) == 0);
     assert(fixture.rows.size() == 2 && fixture.tracker.ActiveSessions() == 0);
 
     Fixture orphan;
     orphan.Data(2, Direction::kBToA, "HTTP/1.0 503 Service Unavailable\r\n\r\nbody", 100);
     assert(orphan.rows.size() == 1 && orphan.rows[0].outcome == Outcome::kResponseOnly);
-    orphan.End(2, Direction::kBToA, npm::NpmTcpStreamEndReasonV1::kFin, 110);
+    orphan.End(2, Direction::kBToA, npm::NpmTcpStreamEndReason::kFin, 110);
     assert(orphan.rows.size() == 1);
     assert(orphan.rows[0].incomplete_reason == Reason::kNoPendingRequest);
     assert(orphan.rows[0].observed_at_ns == 100 && orphan.rows[0].response->status_code == 503);
@@ -286,43 +284,43 @@ void TestBudgetAndPendingLimit() {
     auto config = Fixture::Config();
     config.max_header_bytes = 1024;
     config.max_pending_per_session = 1;
-    npm::NpmHttp1TransactionTrackerV1 tracker(config, budget);
-    std::vector<npm::NpmHttp1TransactionResultV1> rows;
-    npm::NpmTcpStreamEventV1 event;
+    npm::NpmHttp1TransactionTracker tracker(config, budget);
+    std::vector<npm::NpmHttp1TransactionResult> rows;
+    npm::NpmTcpStreamEvent event;
     const std::string request = "GET /one HTTP/1.1\r\n\r\n";
-    event.kind = npm::NpmTcpStreamEventKindV1::kData;
+    event.kind = npm::NpmTcpStreamEventKind::kData;
     event.bytes = {reinterpret_cast<const uint8_t*>(request.data()), request.size()};
     event.captured_at_ns = 10;
-    assert(tracker.OnStreamEvent(1, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, event, 10, &rows) == 0);
+    assert(tracker.OnStreamEvent(1, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, event, 10, &rows) == 0);
     assert(budget->used > 0);
-    assert(tracker.OnStreamEvent(1, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, event, 11, &rows) == ENOSPC);
+    assert(tracker.OnStreamEvent(1, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, event, 11, &rows) == ENOSPC);
     tracker.Abort();
     assert(budget->used == 0 && rows.empty());
 
     budget->limit = 1;
-    npm::NpmHttp1TransactionTrackerV1 rejected(config, budget);
-    assert(rejected.OnStreamEvent(2, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, event, 10, &rows) == ENOSPC);
+    npm::NpmHttp1TransactionTracker rejected(config, budget);
+    assert(rejected.OnStreamEvent(2, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, event, 10, &rows) == ENOSPC);
     assert(budget->used == 0);
     budget->limit = 2 * 1024 * 1024;
-    npm::NpmHttp1TransactionTrackerV1 completed(config, budget);
-    assert(completed.OnStreamEvent(3, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, event, 10, &rows) == 0);
-    npm::NpmTcpStreamEventV1 response;
+    npm::NpmHttp1TransactionTracker completed(config, budget);
+    assert(completed.OnStreamEvent(3, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, event, 10, &rows) == 0);
+    npm::NpmTcpStreamEvent response;
     const std::string response_bytes = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-    response.kind = npm::NpmTcpStreamEventKindV1::kData;
+    response.kind = npm::NpmTcpStreamEventKind::kData;
     response.bytes = {reinterpret_cast<const uint8_t*>(response_bytes.data()), response_bytes.size()};
     response.captured_at_ns = 20;
-    assert(completed.OnStreamEvent(3, Direction::kBToA, npm::NpmTcpStreamOriginV1::kSyn, response, 20, &rows) == 0);
+    assert(completed.OnStreamEvent(3, Direction::kBToA, npm::NpmTcpStreamOrigin::kSyn, response, 20, &rows) == 0);
     assert(rows.size() == 1 && budget->used > 0);
     completed.ReleaseResults(&rows);
     assert(rows.empty() && budget->used > 0);
     assert(completed.OnSessionEnd(3, npm::NpmSessionEndReason::kEof, 30, &rows) == 0);
     assert(budget->used == 0);
 
-    npm::NpmHttp1TransactionTrackerV1 header_limit(config, budget);
-    assert(header_limit.OnStreamEvent(4, Direction::kAToB, npm::NpmTcpStreamOriginV1::kSyn, event, 10, &rows) == 0);
+    npm::NpmHttp1TransactionTracker header_limit(config, budget);
+    assert(header_limit.OnStreamEvent(4, Direction::kAToB, npm::NpmTcpStreamOrigin::kSyn, event, 10, &rows) == 0);
     const std::string oversized = "HTTP/1.1 200 OK\r\nX: " + std::string(1024, 'a') + "\r\n\r\n";
     response.bytes = {reinterpret_cast<const uint8_t*>(oversized.data()), oversized.size()};
-    assert(header_limit.OnStreamEvent(4, Direction::kBToA, npm::NpmTcpStreamOriginV1::kSyn, response, 20, &rows) == 0);
+    assert(header_limit.OnStreamEvent(4, Direction::kBToA, npm::NpmTcpStreamOrigin::kSyn, response, 20, &rows) == 0);
     assert(rows.size() == 1 && rows[0].incomplete_reason == Reason::kHeaderLimitExceeded);
     header_limit.ReleaseResults(&rows);
     assert(header_limit.OnSessionEnd(4, npm::NpmSessionEndReason::kEof, 30, &rows) == 0);

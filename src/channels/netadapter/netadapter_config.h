@@ -9,8 +9,8 @@ constexpr uint64_t kSharedEnvelopeBytes = 2 * kMiB;
 constexpr uint64_t kMinimumInputBytes = kMiB;
 constexpr uint32_t kInputPacketQuantum = 16;
 constexpr uint64_t kInputByteQuantum = 64 * 1024;
-int ParseNetAdapterConfig(const std::string& json, CaptureBackendConfigV1* config, std::string* normalized,
+int ParseNetAdapterConfig(const std::string& json, CaptureBackendConfig* config, std::string* normalized,
                           std::string* error);
-CaptureSourceSetV2 DefaultSourceSet();
+CaptureSourceSet DefaultSourceSet();
 }  // namespace flowsql::channels::netadapter
 #endif

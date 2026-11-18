@@ -159,7 +159,7 @@ int main() {
     call(
         "channels/add",
         R"({"name":"events","connection_name":"offline","role":"both","topic":"events","consumer_group":"test","payload_kind":"structured"})");
-    flowsql::KafkaChannelDescriptionV1 description;
+    flowsql::KafkaChannelDescription description;
     assert(plugin.DescribeChannel("events", &description) == 0 && description.role == "both" &&
            !description.source_adapter_available);
     auto id =

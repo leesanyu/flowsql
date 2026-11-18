@@ -3,6 +3,7 @@
 
 #include "builtin_registry_plugin.h"
 
+#include <common/log.h>
 #include <common/operator_component.hpp>
 #include "builtin_registry.h"
 #include "operator_contract_package.h"
@@ -16,10 +17,10 @@ namespace builtin {
 namespace {
 
 const char component_anchor = 0;
-class ContractOperator final : public IOperator, public IOperatorContractIdentityV1 {
+class ContractOperator final : public IOperator, public IOperatorContractIdentity {
  public:
-    ContractOperator(IOperator* op, OperatorComponentContractV1 identity) : op_(op), identity_(std::move(identity)) {}
-    OperatorComponentContractV1 ContractIdentity() const override { return identity_; }
+    ContractOperator(IOperator* op, OperatorComponentContract identity) : op_(op), identity_(std::move(identity)) {}
+    OperatorComponentContract ContractIdentity() const override { return identity_; }
     std::string Category() override { return op_->Category(); }
     std::string Name() override { return op_->Name(); }
     std::string Description() override { return op_->Description(); }
@@ -31,7 +32,7 @@ class ContractOperator final : public IOperator, public IOperatorContractIdentit
 
  private:
     std::unique_ptr<IOperator> op_;
-    const OperatorComponentContractV1 identity_;
+    const OperatorComponentContract identity_;
 };
 std::string ToLowerAscii(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -47,12 +48,12 @@ int BuiltinRegistryPlugin::Load(IQuerier* querier) {
 }
 
 int BuiltinRegistryPlugin::Start() {
-    DataSemanticsErrorV1 error;
-    // Reduced legacy deployments without Config stay loadable; identity remains
-    // unavailable and a covered execution must report the missing declared contract.
-    contracts::RegisterComponent(querier_, "builtin", "passthrough", contracts::ComponentDigest(&component_anchor),
-                                 contracts::kPassthroughContract, &passthrough_contract_, &error);
-    return 0;
+    DataSemanticsError error;
+    const int rc =
+        contracts::RegisterComponent(querier_, "builtin", "passthrough", contracts::ComponentDigest(&component_anchor),
+                                     contracts::kPassthroughContract, &passthrough_contract_, &error);
+    if (rc != 0) LOG_ERROR("BuiltinRegistryPlugin::Start: %s: %s", error.code.c_str(), error.message.c_str());
+    return rc;
 }
 int BuiltinRegistryPlugin::Unload() {
     querier_ = nullptr;

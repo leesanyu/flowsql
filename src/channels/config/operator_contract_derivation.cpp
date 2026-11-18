@@ -5,7 +5,7 @@
 #include <rapidjson/schema.h>
 #include <map>
 #include <set>
-#include "data_semantics_api_schema.h"
+#include "compiled_semantics_schema.h"
 #include "operator_contract_service.h"
 namespace flowsql::channels::config {
 namespace {
@@ -28,7 +28,7 @@ Value Unknown(Alloc& a) {
 }
 Value Dictionary(const std::string& title, Alloc& a) {
     Value d(rapidjson::kObjectType);
-    Set(d, "schema_id", "flowsql.data-dictionary.v1", a);
+    Set(d, "schema_id", "flowsql.data-dictionary", a);
     Set(d, "title", title, a);
     d.AddMember("entity", Value(rapidjson::kObjectType), a).AddMember("fields", Value(rapidjson::kArrayType), a);
     return d;
@@ -64,14 +64,14 @@ struct Source {
     const Value* semantic = nullptr;
 };
 int SourceField(DataSemanticsRegistry& registry, const Value& input, const Value& physical, Source* out,
-                DataSemanticsErrorV1* error) {
+                DataSemanticsError* error) {
     out->input = &input;
     out->physical = &physical;
     if (!input.HasMember("binding_ref")) return 0;
     bool trusted = false;
     if (registry.ObservationTrusted(Get(input, "binding_ref"), &trusted, error)) return -1;
     if (!trusted) return 0;
-    DataSemanticsSnapshotV1 snapshot;
+    DataSemanticsSnapshot snapshot;
     if (registry.Resolve(Get(input, "binding_ref").c_str(), &snapshot, error)) return -1;
     out->binding.Parse(snapshot.document_json->c_str());
     if (registry.Resolve(Get(out->binding, "dictionary_ref").c_str(), &snapshot, error)) return -1;
@@ -188,7 +188,7 @@ void PruneEntity(Value& dictionary, Value& gaps, Alloc& a) {
 // Context expansion is driven by the published template and resolved roles.
 // It preserves source semantics without inventing a unit for a heterogeneous result column.
 int Contexts(DataSemanticsRegistry& registry, const Value& spec, const Value& invocation, const Value& role_map,
-             Value& preview, Alloc& a, unsigned* budget, DataSemanticsErrorV1* error) {
+             Value& preview, Alloc& a, unsigned* budget, DataSemanticsError* error) {
     const auto* items = Ptr(At(invocation, "normalized_config"), Get(spec, "repeat_from_config_pointer"));
     Set(preview, "context_state", "incomplete", a);
     if (!items || !items->IsArray()) {
@@ -197,6 +197,7 @@ int Contexts(DataSemanticsRegistry& registry, const Value& spec, const Value& in
     }
     bool complete = true;
     std::set<std::string> required;
+    std::map<std::string, Json> dictionaries;
     for (const auto& item : items->GetArray()) {
         const auto* key = Ptr(item, Get(spec, "item_key_pointer"));
         const auto* metrics = Ptr(item, Get(spec, "metric_pointer"));
@@ -262,10 +263,13 @@ int Contexts(DataSemanticsRegistry& registry, const Value& spec, const Value& in
                         if (ref.empty())
                             closed = false;
                         else {
-                            DataSemanticsSnapshotV1 dictionary;
-                            if (registry.Resolve(ref.c_str(), &dictionary, error)) return -1;
-                            Json doc;
-                            doc.Parse(dictionary.document_json->c_str());
+                            auto entry = dictionaries.try_emplace(ref);
+                            auto& doc = entry.first->second;
+                            if (entry.second) {
+                                DataSemanticsSnapshot dictionary;
+                                if (registry.Resolve(ref.c_str(), &dictionary, error)) return -1;
+                                doc.Parse(dictionary.document_json->c_str());
+                            }
                             for (const auto& field : doc["fields"].GetArray())
                                 if (Get(field, "field_id") == Get(mapped, "field_id"))
                                     Set(role, "source_semantics", Copy(field, a), a);
@@ -295,7 +299,7 @@ int Contexts(DataSemanticsRegistry& registry, const Value& spec, const Value& in
 }
 }  // namespace
 int DeriveOperatorOutputs(DataSemanticsRegistry& registry, const Value& contract, const Value& invocation,
-                          const Value& role_map, Value* previews, Alloc& a, DataSemanticsErrorV1* error) {
+                          const Value& role_map, Value* previews, Alloc& a, DataSemanticsError* error) {
     previews->SetArray();
     unsigned budget = 100000;
     for (const auto& declared : contract["outputs"].GetArray()) {
@@ -326,7 +330,7 @@ int DeriveOperatorOutputs(DataSemanticsRegistry& registry, const Value& contract
         const auto* structure =
             port.HasMember("structure_ref") ? Ptr(contract, Get(port, "structure_ref").substr(1)) : nullptr;
         if (port.HasMember("dictionary_ref")) {
-            DataSemanticsSnapshotV1 snapshot;
+            DataSemanticsSnapshot snapshot;
             if (registry.Resolve(Get(port, "dictionary_ref").c_str(), &snapshot, error)) return -1;
             Json d;
             d.Parse(snapshot.document_json->c_str());
@@ -431,22 +435,18 @@ int DeriveOperatorOutputs(DataSemanticsRegistry& registry, const Value& contract
     return 0;
 }
 
-int OperatorContractService::RecordUse(const char* text, OperatorContractSnapshotV1* out, DataSemanticsErrorV1* e) {
+int OperatorContractService::RecordUse(const char* text, OperatorContractSnapshot* out, DataSemanticsError* e) {
     if (out) *out = {};
     if (e) *e = {};
     if (!out) return Fail(e, "CONTRACT_INVALID", "observation output required");
     Json request;
     if (ParseSemanticsJson(text ? text : "", &request, e)) return -1;
-    Json schema;
-    schema.Parse(kSemanticsApiSchema);
-    Set(schema, "$ref", "#/%24defs/operatorObservationRequest", schema.GetAllocator());
-    rapidjson::SchemaDocument compiled(schema);
-    rapidjson::SchemaValidator validator(compiled);
+    rapidjson::SchemaValidator validator(CompiledSemanticsApiSchema("operatorObservationRequest"));
     if (!request.Accept(validator)) return Fail(e, "CONTRACT_INVALID", "invalid output observation");
     Json document;
     document.CopyFrom(request["document"], document.GetAllocator());
     auto& a = document.GetAllocator();
-    OperatorContractSnapshotV1 contract_snapshot;
+    OperatorContractSnapshot contract_snapshot;
     if (Resolve(Get(document, "contract_ref").c_str(), &contract_snapshot, e)) return -1;
     Json contract;
     contract.Parse(contract_snapshot.document_json->c_str());
@@ -487,11 +487,7 @@ int OperatorContractService::RecordUse(const char* text, OperatorContractSnapsho
                 return Fail(e, "OUTPUT_SCHEMA_MISMATCH", "required output was absent", "/outputs/" + port);
         } else if (state == "observed") {
             const auto& snapshot = At(*actual, "snapshot");
-            Json snapshot_schema;
-            snapshot_schema.Parse(kSemanticsApiSchema);
-            Set(snapshot_schema, "$ref", "#/%24defs/datasetSnapshot", snapshot_schema.GetAllocator());
-            rapidjson::SchemaDocument snapshot_compiled(snapshot_schema);
-            rapidjson::SchemaValidator snapshot_validator(snapshot_compiled);
+            rapidjson::SchemaValidator snapshot_validator(CompiledSemanticsApiSchema("datasetSnapshot"));
             if (!snapshot.Accept(snapshot_validator) || !snapshot.IsObject() ||
                 Get(snapshot, "schema_state") != "known" || !At(snapshot, "fields").IsArray() ||
                 Get(snapshot, "schema_fingerprint") != Hash(Canonical(snapshot["fields"])))
@@ -515,7 +511,7 @@ int OperatorContractService::RecordUse(const char* text, OperatorContractSnapsho
             const auto dictionary_ref = "dictionary." + dictionary_name + "@1";
             writes.push_back({"dictionary", dictionary_name, Encode(dictionary)});
             Value binding(rapidjson::kObjectType), map(rapidjson::kObjectType), confirmation(rapidjson::kObjectType);
-            Set(binding, "schema_id", "flowsql.data-binding.v2", a);
+            Set(binding, "schema_id", "flowsql.data-binding", a);
             Set(binding, "object_label", port, a);
             Set(binding, "dictionary_ref", dictionary_ref, a);
             for (const auto& f : dictionary["fields"].GetArray())
@@ -529,7 +525,7 @@ int OperatorContractService::RecordUse(const char* text, OperatorContractSnapsho
             binding.AddMember("confirmation", confirmation, a);
             std::string binding_name = "out_" + Hash(Canonical(snapshot["object_key"]));
             uint64_t current = 0;
-            DataSemanticsSnapshotV1 previous;
+            DataSemanticsSnapshot previous;
             if (registry_.BindingLookup(Get(snapshot["object_key"], "provider_id"),
                                         Get(snapshot["object_key"], "object_id"), &previous, e) == 0) {
                 SemanticsIdentity identity;

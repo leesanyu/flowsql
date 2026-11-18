@@ -19,9 +19,9 @@ namespace flowsql::npm {
 
 /** Builds and emits one final event row; the temporary module-state charge spans the emitter call. */
 template <typename Address>
-int EmitNpmDnsTransactionV1(const NpmDnsFamilyResult<Address>& family_result,
-                            const std::shared_ptr<INpmTaskBudget>& budget, INpmResultEmitterV1& emitter,
-                            arrow::MemoryPool* pool = nullptr);
+int EmitNpmDnsTransaction(const NpmDnsFamilyResult<Address>& family_result,
+                          const std::shared_ptr<INpmTaskBudget>& budget, INpmResultEmitter& emitter,
+                          arrow::MemoryPool* pool = nullptr);
 
 }  // namespace flowsql::npm
 

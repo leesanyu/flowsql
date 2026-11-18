@@ -195,7 +195,7 @@ int Plugin::Unload() {
     default_lock_ = -1;
     return 0;
 }
-int Plugin::OpenSession(const char* name, const char* usage, IKafkaClientSessionV1** session, std::string* error) {
+int Plugin::OpenSession(const char* name, const char* usage, IKafkaClientSession** session, std::string* error) {
     if (!session) return EINVAL;
     *session = nullptr;
     if (!name || !usage) return EINVAL;
@@ -205,7 +205,7 @@ int Plugin::OpenSession(const char* name, const char* usage, IKafkaClientSession
         ++pending_;
     }
     int rc = 0;
-    KafkaBindingSnapshotV1 snapshot;
+    KafkaBindingSnapshot snapshot;
     bool acquired = false;
     try {
         auto binding = store_.Acquire(name, usage);
@@ -236,7 +236,7 @@ int Plugin::OpenSession(const char* name, const char* usage, IKafkaClientSession
     }
     return rc;
 }
-void Plugin::ReleaseSession(IKafkaClientSessionV1* session) {
+void Plugin::ReleaseSession(IKafkaClientSession* session) {
     Client* client;
     {
         std::lock_guard<std::mutex> lock(sessions_mutex_);

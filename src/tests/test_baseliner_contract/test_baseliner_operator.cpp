@@ -42,7 +42,7 @@ std::string With(const std::string& config) {
     writer.EndObject();
     return {buffer.GetString(), buffer.GetSize()};
 }
-struct Querier : IQuerier, IConfigChannelRegistryV1 {
+struct Querier : IQuerier, IConfigChannelRegistry {
     baseline::BaselinePlugin baseline;
     ConfigSnapshot config;
     int lookups = 0;
@@ -57,12 +57,12 @@ struct Querier : IQuerier, IConfigChannelRegistryV1 {
     void* First(const Guid& id) override {
         if (std::memcmp(&id, &IID_BASELINE_SERVICE, sizeof(Guid)) == 0)
             return static_cast<IBaselineService*>(&baseline);
-        if (std::memcmp(&id, &IID_BASELINE_STATE_CONTROL_SERVICE_V1, sizeof(Guid)) == 0)
-            return static_cast<IBaselineStateControlServiceV1*>(&baseline);
-        if (std::memcmp(&id, &IID_BASELINE_CHECKPOINT_SERVICE_V1, sizeof(Guid)) == 0)
-            return static_cast<IBaselineCheckpointServiceV1*>(&baseline);
-        if (std::memcmp(&id, &IID_CONFIG_CHANNEL_REGISTRY_V1, sizeof(Guid)) == 0)
-            return static_cast<IConfigChannelRegistryV1*>(this);
+        if (std::memcmp(&id, &IID_BASELINE_STATE_CONTROL_SERVICE, sizeof(Guid)) == 0)
+            return static_cast<IBaselineStateControlService*>(&baseline);
+        if (std::memcmp(&id, &IID_BASELINE_CHECKPOINT_SERVICE, sizeof(Guid)) == 0)
+            return static_cast<IBaselineCheckpointService*>(&baseline);
+        if (std::memcmp(&id, &IID_CONFIG_CHANNEL_REGISTRY, sizeof(Guid)) == 0)
+            return static_cast<IConfigChannelRegistry*>(this);
         return nullptr;
     }
     int Traverse(const Guid& id, fntraverse fn) override {
@@ -75,7 +75,7 @@ struct Querier : IQuerier, IConfigChannelRegistryV1 {
         *out = {"t4",
                 1,
                 "json",
-                "baseliner.task.v1",
+                "flowsql.baseliner.task",
                 config.sha256_hex,
                 config.original_json.size(),
                 0,
@@ -85,8 +85,8 @@ struct Querier : IQuerier, IConfigChannelRegistryV1 {
 };
 struct Loaded {
     void* handle = nullptr;
-    IBlockTransformOperatorV2* provider = nullptr;
-    CppOperatorPluginDestroyCapabilityV2Fn destroy = nullptr;
+    IBlockTransformOperator* provider = nullptr;
+    CppOperatorPluginDestroyCapabilityFn destroy = nullptr;
     explicit Loaded(Querier& q) {
         handle = dlopen("./libflowsql_baseliner.so", RTLD_NOW | RTLD_LOCAL);
         if (!handle) std::cerr << dlerror() << '\n';
@@ -94,20 +94,19 @@ struct Loaded {
         auto version =
             reinterpret_cast<CppOperatorPluginAbiVersionFn>(dlsym(handle, kCppOperatorPluginAbiVersionSymbol));
         auto count = reinterpret_cast<CppOperatorPluginCountFn>(dlsym(handle, kCppOperatorPluginCountSymbol));
-        auto describe =
-            reinterpret_cast<CppOperatorPluginDescribeV2Fn>(dlsym(handle, kCppOperatorPluginDescribeV2Symbol));
-        auto create = reinterpret_cast<CppOperatorPluginCreateCapabilityV2Fn>(
-            dlsym(handle, kCppOperatorPluginCreateCapabilityV2Symbol));
-        destroy = reinterpret_cast<CppOperatorPluginDestroyCapabilityV2Fn>(
-            dlsym(handle, kCppOperatorPluginDestroyCapabilityV2Symbol));
+        auto describe = reinterpret_cast<CppOperatorPluginDescribeFn>(dlsym(handle, kCppOperatorPluginDescribeSymbol));
+        auto create = reinterpret_cast<CppOperatorPluginCreateCapabilityFn>(
+            dlsym(handle, kCppOperatorPluginCreateCapabilitySymbol));
+        destroy = reinterpret_cast<CppOperatorPluginDestroyCapabilityFn>(
+            dlsym(handle, kCppOperatorPluginDestroyCapabilitySymbol));
         assert(version && count && describe && create && destroy && version() == 2 && count() == 1);
-        CppOperatorDescriptorV2 descriptor{};
-        descriptor.struct_size = kCppOperatorDescriptorV2Size;
+        CppOperatorDescriptor descriptor{};
+        descriptor.struct_size = kCppOperatorDescriptorSize;
         assert(describe(0, &descriptor) == 0 && std::string(descriptor.category) == "explore" &&
                std::string(descriptor.name) == "baseliner");
-        assert(std::memcmp(&descriptor.contract_iid, &IID_BLOCK_TRANSFORM_OPERATOR_V2, sizeof(Guid)) == 0 &&
+        assert(std::memcmp(&descriptor.contract_iid, &IID_BLOCK_TRANSFORM_OPERATOR, sizeof(Guid)) == 0 &&
                describe(1, &descriptor) != 0);
-        provider = static_cast<IBlockTransformOperatorV2*>(create(0, &q));
+        provider = static_cast<IBlockTransformOperator*>(create(0, &q));
         assert(provider);
     }
     ~Loaded() {
@@ -116,11 +115,11 @@ struct Loaded {
     }
 };
 auto Task(const std::shared_ptr<Loaded>& owner, const std::string& with = With(json)) {
-    BlockTransformTaskConfigV2 c{kBlockTransformTaskConfigV2Size, kBlockTransformContractVersionV2, "execution",
-                                 with.c_str(), ""};
-    IBlockTransformTaskV2* raw = nullptr;
+    BlockTransformTaskConfig c{kBlockTransformTaskConfigSize, kBlockTransformContractVersion, "execution", with.c_str(),
+                               ""};
+    IBlockTransformTask* raw = nullptr;
     assert(owner->provider->CreateTask(c, &raw) == 0 && raw);
-    return std::unique_ptr<IBlockTransformTaskV2, std::function<void(IBlockTransformTaskV2*)>>(
+    return std::unique_ptr<IBlockTransformTask, std::function<void(IBlockTransformTask*)>>(
         raw, [owner](auto* task) { owner->provider->ReleaseTask(task); });
 }
 Observation Input(int64_t bucket) {
@@ -141,7 +140,7 @@ std::shared_ptr<arrow::RecordBatch> Batch(const std::vector<Observation>& rows) 
     assert(MakeObservationBatch(rows, 1 << 24, &batch, &error) == 0);
     return batch;
 }
-void Inspect(const std::vector<BlockTransformOutputV1>& outputs) {
+void Inspect(const std::vector<BlockTransformOutput>& outputs) {
     for (const auto& output : outputs) {
         assert(output.batch->schema()->Equals(*MakeSchema(SchemaKind::kResults), true) &&
                output.batch->ValidateFull().ok());
@@ -164,7 +163,7 @@ void Inspect(const std::vector<BlockTransformOutputV1>& outputs) {
 void ArrowPath() {
     Querier q;
     auto owner = std::make_shared<Loaded>(q);
-    auto* policy = dynamic_cast<IBlockTransformExecutionPolicyProviderV1*>(owner->provider);
+    auto* policy = dynamic_cast<IBlockTransformExecutionPolicyProvider*>(owner->provider);
     assert(policy);
     bool async = true;
     assert(policy->RequiresAsyncExecution(With(json).c_str(), "sqlite.t4", &async) == 0 && !async);
@@ -178,32 +177,32 @@ void ArrowPath() {
     exact.reset();
     for (const char* with : {R"({"config":"config.t4@latest"})", R"({"config":"config.t4@1","config":"config.t4@1"})",
                              R"({"config":"config.t4@1","parameters":"{}"})"}) {
-        BlockTransformTaskConfigV2 invalid{kBlockTransformTaskConfigV2Size, kBlockTransformContractVersionV2, "invalid",
-                                           with, ""};
-        IBlockTransformTaskV2* raw = nullptr;
+        BlockTransformTaskConfig invalid{kBlockTransformTaskConfigSize, kBlockTransformContractVersion, "invalid", with,
+                                         ""};
+        IBlockTransformTask* raw = nullptr;
         const auto count = q.lookups;
         assert(owner->provider->CreateTask(invalid, &raw) != 0 && !raw && count == q.lookups);
     }
     const auto with = With(json);
-    BlockTransformTaskConfigV2 filtered{kBlockTransformTaskConfigV2Size, kBlockTransformContractVersionV2, "filtered",
-                                        with.c_str(), R"({"version":1,"root":{"predicate":true}})"};
-    IBlockTransformTaskV2* raw = nullptr;
+    BlockTransformTaskConfig filtered{kBlockTransformTaskConfigSize, kBlockTransformContractVersion, "filtered",
+                                      with.c_str(), R"({"version":1,"root":{"predicate":true}})"};
+    IBlockTransformTask* raw = nullptr;
     assert(owner->provider->CreateTask(filtered, &raw) != 0 && !raw);
     std::vector<Observation> inputs;
     for (int64_t t = 0; t < 40; ++t) inputs.push_back(Input(t));
     std::vector<std::shared_ptr<arrow::RecordBatch>> reference;
     for (bool whole : {false, true}) {
         auto task = Task(owner, R"({"config":"config.t4@1"})");
-        auto* source = dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get());
+        auto* source = dynamic_cast<IBlockTransformInputSourceTask*>(task.get());
         assert(source && source->BindInputSource("sqlite.t4") == 0);
         std::shared_ptr<arrow::Schema> schema;
         assert(task->Open(MakeSchema(SchemaKind::kObservation), &schema) == 0);
-        std::vector<BlockTransformOutputV1> outputs;
+        std::vector<BlockTransformOutput> outputs;
         if (whole)
             assert(task->ProcessBlock(Batch(inputs), 123, &outputs) == 0);
         else
             for (const auto& o : inputs) {
-                std::vector<BlockTransformOutputV1> one;
+                std::vector<BlockTransformOutput> one;
                 assert(task->ProcessBlock(Batch({o}), 123, &one) == 0);
                 outputs.insert(outputs.end(), one.begin(), one.end());
             }
@@ -221,17 +220,17 @@ void ArrowPath() {
         }
         assert(logical_rows == static_cast<int64_t>(reference.size()));
         assert(logical_rows == 120);
-        std::vector<BlockTransformOutputV1> tail;
+        std::vector<BlockTransformOutput> tail;
         assert(task->Flush(&tail) == 0 && tail.empty());
         assert(task->Flush(&tail) != 0);
     }
     reference.clear();
     auto task = Task(owner);
-    auto* source = dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get());
+    auto* source = dynamic_cast<IBlockTransformInputSourceTask*>(task.get());
     assert(source->BindInputSource("sqlite.t4") == 0);
     std::shared_ptr<arrow::Schema> schema;
     assert(task->Open(MakeSchema(SchemaKind::kObservation), &schema) == 0);
-    std::vector<BlockTransformOutputV1> out;
+    std::vector<BlockTransformOutput> out;
     before = q.baseline.QueryServiceSnapshot(BaselineSerializationFormat::kJson);
     assert(task->ProcessBlock(Batch({Input(0), Input(0)}), 0, &out) < 0 && out.empty());
     assert(before == q.baseline.QueryServiceSnapshot(BaselineSerializationFormat::kJson));
@@ -253,21 +252,21 @@ void RelationArrow() {
 "summary_policy":{"k_head":2,"k_stable":1}}]}]})";
     Querier q;
     auto owner = std::make_shared<Loaded>(q);
-    auto* provider = dynamic_cast<IBlockTransformResultOutputProviderV1*>(owner->provider);
+    auto* provider = dynamic_cast<IBlockTransformResultOutputProvider*>(owner->provider);
     assert(provider && provider->SupportsResultOutput());
     Querier selected_querier;
     auto selected_owner = std::make_shared<Loaded>(selected_querier);
     auto selected = Task(selected_owner, With(relation));
-    auto* result_task = dynamic_cast<IBlockTransformResultOutputTaskV1*>(selected.get());
+    auto* result_task = dynamic_cast<IBlockTransformResultOutputTask*>(selected.get());
     assert(result_task);
-    BlockResultOutputBindingV1 binding;
+    BlockResultOutputBinding binding;
     binding.target = "dataframe.results";
     assert(result_task->BindResultOutput(binding) == 0);
-    assert(dynamic_cast<IBlockTransformInputSourceTaskV1*>(selected.get())->BindInputSource("sqlite.t4") == 0);
+    assert(dynamic_cast<IBlockTransformInputSourceTask*>(selected.get())->BindInputSource("sqlite.t4") == 0);
     std::shared_ptr<arrow::Schema> selected_schema;
     assert(selected->Open(MakeSchema(SchemaKind::kObservation), &selected_schema) == 0);
     auto task = Task(owner, With(relation));
-    assert(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("sqlite.t4") == 0);
+    assert(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("sqlite.t4") == 0);
     std::shared_ptr<arrow::Schema> schema;
     assert(task->Open(MakeSchema(SchemaKind::kObservation), &schema) == 0);
     ConfigSnapshot config;
@@ -289,9 +288,9 @@ void RelationArrow() {
             assert(EncodeIdentity("sqlite.t4", "d", "dist", input.kind, {uint64_t{1}}, &input.identity).ok());
             EvaluationOutput expected;
             assert(reference.Submit(input, &expected) == 0 && expected.relation);
-            std::vector<BlockTransformOutputV1> outputs;
+            std::vector<BlockTransformOutput> outputs;
             assert(task->ProcessBlock(Batch({input}), 0, &outputs) == 0 && outputs.size() == 2);
-            std::vector<BlockTransformOutputV1> specified;
+            std::vector<BlockTransformOutput> specified;
             assert(selected->ProcessBlock(Batch({input}), 0, &specified) == 0 && specified.size() == 1);
             assert(specified[0].batch->Equals(*outputs[0].batch));
             Inspect({outputs[0]});
@@ -305,11 +304,11 @@ void RelationArrow() {
             assert(fusion->GetColumnByName("can_alert")->IsNull(0));
         }
     }
-    std::vector<BlockTransformOutputV1> tail;
+    std::vector<BlockTransformOutput> tail;
     assert(selected->Flush(&tail) == 0 && tail.empty());
     selected->Cancel();  // A completed registration remains visible even if confirmation sees cancellation.
     assert(result_task->CompleteResultOutputPublication(true) != 0);
-    auto* summary = dynamic_cast<IBlockTransformManagedSinkTaskV1*>(selected.get());
+    auto* summary = dynamic_cast<IBlockTransformManagedSinkTask*>(selected.get());
     rapidjson::Document completed;
     completed.Parse(summary->ManagedSinkResultJson().c_str());
     assert(std::string(completed["results_output"]["status"].GetString()) == "committed" &&
@@ -328,20 +327,20 @@ void PollPolicyAndProgress() {
     auto owner = std::make_shared<Loaded>(q);
     bool async = false;
     auto with = With(text);
-    auto* policy = dynamic_cast<IBlockTransformExecutionPolicyProviderV1*>(owner->provider);
+    auto* policy = dynamic_cast<IBlockTransformExecutionPolicyProvider*>(owner->provider);
     const auto before = q.baseline.QueryServiceSnapshot(BaselineSerializationFormat::kJson);
     assert(policy->RequiresAsyncExecution(with.c_str(), "sqlite.t4", &async) == 0 && async);
     assert(before == q.baseline.QueryServiceSnapshot(BaselineSerializationFormat::kJson));
     auto task = Task(owner, with);
-    assert(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("sqlite.t4") == 0);
+    assert(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("sqlite.t4") == 0);
     std::shared_ptr<arrow::Schema> schema;
     assert(task->Open(MakeSchema(SchemaKind::kObservation), &schema) == 0);
-    auto* progress = dynamic_cast<IBlockTransformInputProgressTaskV1*>(task.get());
+    auto* progress = dynamic_cast<IBlockTransformInputProgressTask*>(task.get());
     assert(progress);
-    BlockInputProgressV1 p;
+    BlockInputProgress p;
     p.datasets.push_back({"d", "epoch", "position-1", 1});
     assert(progress->AcceptInputProgress(p) == 0);
-    std::vector<BlockTransformOutputV1> outputs;
+    std::vector<BlockTransformOutput> outputs;
     assert(task->ProcessBlock(Batch({Input(0)}), 0, &outputs) == 0);
     outputs.clear();
     p.datasets[0].closed_before_bucket = 2;
@@ -363,20 +362,20 @@ void DatabasePath() {
     assert(source && source->ExecuteSql("CREATE TABLE facts(id BIGINT,t BIGINT,v DOUBLE)") >= 0);
     assert(source->ExecuteSql("INSERT INTO facts VALUES(1,0,100),(1,1,110),(1,2,120)") >= 0);
     auto task = Task(owner);
-    auto* binding = dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get());
+    auto* binding = dynamic_cast<IBlockTransformInputSourceTask*>(task.get());
     assert(binding->BindInputSource("sqlite.t4") == 0);
-    auto* input_task = dynamic_cast<IBlockTransformDatabaseInputTaskV1*>(task.get());
+    auto* input_task = dynamic_cast<IBlockTransformDatabaseInputTask*>(task.get());
     assert(input_task);
-    BlockDatabaseInputBindingV1 bind;
+    BlockDatabaseInputBinding bind;
     bind.source = source;
     bind.exact_source = "sqlite.t4";
-    BlockDatabaseInputV1 input;
+    BlockDatabaseInput input;
     assert(input_task->CreateDatabaseInput(bind, &input) == 0 && input.input);
     BlockTransformPipelineConfig config;
     config.source = input.input;
     config.source_schema = input.schema;
     config.transform = task.get();
-    config.time_transform = task.get();
+    config.time_transform = dynamic_cast<IBlockTransformTimeDrivenTask*>(task.get());
     config.output_consumer = [&](const auto& output) {
         Inspect({output});
         return 0;
@@ -397,7 +396,7 @@ void DatabasePath() {
 void DataFrameTaskPath() {
     Querier q;
     auto owner = std::make_shared<Loaded>(q);
-    auto* capability = dynamic_cast<IBlockTransformDataFrameInputProviderV1*>(owner->provider);
+    auto* capability = dynamic_cast<IBlockTransformDataFrameInputProvider*>(owner->provider);
     assert(capability && capability->SupportsDataFrameInput());
     rapidjson::Document doc;
     doc.Parse(json);
@@ -421,7 +420,7 @@ void DataFrameTaskPath() {
     for (int t = 39; t >= 0; --t) assert(data.AppendRow({uint32_t{1}, int32_t{t}, float(100 + t % 3)}) == 0);
     assert(source->Write(&data) == 0);
     auto original = data.ToArrow();
-    BlockDataFrameInputBindingV1 binding;
+    BlockDataFrameInputBinding binding;
     binding.source = source;
     binding.exact_source = "dataframe.samples";
     for (int invalid = 0; invalid < 6; ++invalid) {
@@ -436,10 +435,10 @@ void DataFrameTaskPath() {
             rejected_config.assign(text.GetString(), text.GetSize());
         }
         auto task = Task(owner, With(rejected_config));
-        assert(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("dataframe.samples") == 0);
-        auto* input_task = dynamic_cast<IBlockTransformDataFrameInputTaskV1*>(task.get());
+        assert(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("dataframe.samples") == 0);
+        auto* input_task = dynamic_cast<IBlockTransformDataFrameInputTask*>(task.get());
         assert(input_task);
-        BlockDataFrameInputV1 input;
+        BlockDataFrameInput input;
         auto bind = binding;
         if (invalid == 0) bind.contract_version = 99;
         if (invalid == 1) input.struct_size = 1;
@@ -457,15 +456,15 @@ void DataFrameTaskPath() {
                                          ".db";
     assert(database.Option(database_options.c_str()) == 0 && database.Load(nullptr) == 0 && database.Start() == 0);
     auto target = database.AcquireChannel("sqlite", "t4");
-    BlockTransformManagedSinkBindingV1 managed;
+    BlockTransformManagedSinkBinding managed;
     managed.sink_channel = target.get();
     managed.target = "sqlite.t4";
     managed.category = "sqlite";
     managed.name = "t4";
     auto create = [&]() {
         auto task = Task(owner, With(configuration));
-        assert(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("dataframe.samples") == 0);
-        auto* sink = dynamic_cast<IBlockTransformManagedSinkTaskV1*>(task.get());
+        assert(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("dataframe.samples") == 0);
+        auto* sink = dynamic_cast<IBlockTransformManagedSinkTask*>(task.get());
         assert(sink);
         const int rc = sink->BindManagedSink(managed);
         if (rc != 0) std::cerr << "DataFrame managed bind: " << task->LastError() << '\n';
@@ -485,13 +484,13 @@ void DataFrameTaskPath() {
     std::string snapshot_fingerprint;
     {
         auto task = create();
-        auto* input_task = dynamic_cast<IBlockTransformDataFrameInputTaskV1*>(task.get());
-        BlockDataFrameInputV1 input;
+        auto* input_task = dynamic_cast<IBlockTransformDataFrameInputTask*>(task.get());
+        BlockDataFrameInput input;
         assert(input_task->CreateDataFrameInput(binding, &input) == 0);
         std::shared_ptr<arrow::Schema> output_schema;
         assert(task->Open(input.schema, &output_schema) == 0);
         auto event = input.input->PollBlock();
-        std::vector<BlockTransformOutputV1> outputs;
+        std::vector<BlockTransformOutput> outputs;
         assert(event.kind == BlockPollEvent::kData && task->ProcessBlock(event.batch, 0, &outputs) == 0 &&
                outputs.empty());
         assert(input.input->ReleaseBlock(event.batch) == 0);
@@ -512,8 +511,8 @@ void DataFrameTaskPath() {
     assert(source->Write(&data) == 0);
     {
         auto task = create();
-        BlockDataFrameInputV1 input;
-        assert(dynamic_cast<IBlockTransformDataFrameInputTaskV1*>(task.get())->CreateDataFrameInput(binding, &input) !=
+        BlockDataFrameInput input;
+        assert(dynamic_cast<IBlockTransformDataFrameInputTask*>(task.get())->CreateDataFrameInput(binding, &input) !=
                0);
         assert(std::string(task->LastError()).find("fingerprint mismatch") != std::string::npos && !input.input);
     }
@@ -524,15 +523,15 @@ void DataFrameTaskPath() {
     assert(source->Write(&data) == 0);
     for (bool replay : {false, true}) {
         auto task = create();
-        auto* input_task = dynamic_cast<IBlockTransformDataFrameInputTaskV1*>(task.get());
-        BlockDataFrameInputV1 input;
+        auto* input_task = dynamic_cast<IBlockTransformDataFrameInputTask*>(task.get());
+        BlockDataFrameInput input;
         assert(input_task->CreateDataFrameInput(binding, &input) == 0);
         BlockTransformPipelineConfig config;
         config.source = input.input;
         config.source_schema = input.schema;
         config.transform = task.get();
-        config.time_transform = task.get();
-        config.input_progress_task = dynamic_cast<IBlockTransformInputProgressTaskV1*>(task.get());
+        config.time_transform = dynamic_cast<IBlockTransformTimeDrivenTask*>(task.get());
+        config.input_progress_task = dynamic_cast<IBlockTransformInputProgressTask*>(task.get());
         config.output_consumer = [](const auto&) { return 0; };
         {
             BlockTransformPipelineRunner runner(config);
@@ -543,7 +542,7 @@ void DataFrameTaskPath() {
             assert(rc == BlockTransformPipelineError::kNone);
         }
         rapidjson::Document summary;
-        summary.Parse(dynamic_cast<IBlockTransformManagedSinkTaskV1*>(task.get())->ManagedSinkResultJson().c_str());
+        summary.Parse(dynamic_cast<IBlockTransformManagedSinkTask*>(task.get())->ManagedSinkResultJson().c_str());
         assert(replay ? summary["rows_written"].GetInt64() == 0 : summary["rows_written"].GetInt64() == 117);
         assert(summary["source_positions"].Size() == 1 &&
                summary["source_positions"][0]["closed_before_bucket"].GetInt64() == 40 &&
@@ -567,14 +566,14 @@ void ResultCancellation() {
     auto owner = std::make_shared<Loaded>(querier);
     for (bool before_flush : {true, false}) {
         auto task = Task(owner);
-        auto* results = dynamic_cast<IBlockTransformResultOutputTaskV1*>(task.get());
-        BlockResultOutputBindingV1 binding;
+        auto* results = dynamic_cast<IBlockTransformResultOutputTask*>(task.get());
+        BlockResultOutputBinding binding;
         binding.target = "dataframe.results";
         assert(results && results->BindResultOutput(binding) == 0);
-        assert(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("sqlite.t4") == 0);
+        assert(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("sqlite.t4") == 0);
         std::shared_ptr<arrow::Schema> schema;
         assert(task->Open(MakeSchema(SchemaKind::kObservation), &schema) == 0);
-        std::vector<BlockTransformOutputV1> outputs;
+        std::vector<BlockTransformOutput> outputs;
         assert(task->ProcessBlock(Batch({Input(0)}), 0, &outputs) == 0);
         outputs.clear();
         if (before_flush) {
@@ -586,7 +585,7 @@ void ResultCancellation() {
             assert(results->CompleteResultOutputPublication(false) != 0);
         }
         rapidjson::Document summary;
-        summary.Parse(dynamic_cast<IBlockTransformManagedSinkTaskV1*>(task.get())->ManagedSinkResultJson().c_str());
+        summary.Parse(dynamic_cast<IBlockTransformManagedSinkTask*>(task.get())->ManagedSinkResultJson().c_str());
         assert(std::string(summary["results_output"]["status"].GetString()) == "cancelled" &&
                summary["results_output"]["rows_written"].GetInt64() == 0);
     }
@@ -597,8 +596,8 @@ void ModelOutputTaskPath() {
     auto with = With(json);
     with.pop_back();
     with += R"(,"model_output":"dataframe.models"})";
-    auto* normalizer = dynamic_cast<IBlockTransformSourceConfigProviderV1*>(owner->provider);
-    auto* policy = dynamic_cast<IBlockTransformExecutionPolicyProviderV1*>(owner->provider);
+    auto* normalizer = dynamic_cast<IBlockTransformSourceConfigProvider*>(owner->provider);
+    auto* policy = dynamic_cast<IBlockTransformExecutionPolicyProvider*>(owner->provider);
     assert(normalizer && policy);
     std::string normalized, error;
     assert(normalizer->NormalizeSourceConfig(with.c_str(), "sqlite.t4", &normalized, &error) == 0);
@@ -610,11 +609,11 @@ void ModelOutputTaskPath() {
     assert(policy->RequiresAsyncExecution(with.c_str(), "sqlite.t4", &async) == 0 && !async);
     for (int scenario = 0; scenario < 7; ++scenario) {
         auto task = Task(owner, with);
-        auto* models = dynamic_cast<IBlockTransformModelOutputTaskV1*>(task.get());
+        auto* models = dynamic_cast<IBlockTransformModelOutputTask*>(task.get());
         assert(models && models->ModelOutputTarget() == "dataframe.models");
         auto stage = std::make_shared<DataFrameChannel>("dataframe", "models");
         assert(stage->Open() == 0);
-        BlockModelOutputBindingV1 binding;
+        BlockModelOutputBinding binding;
         binding.primary_target = scenario == 0 ? "dataframe.models" : "dataframe.results";
         binding.dataframe = stage;
         if (scenario == 1) binding.contract_version = 99;
@@ -628,10 +627,10 @@ void ModelOutputTaskPath() {
         binding.dataframe.reset();
         stage.reset();
         assert(!lifetime.expired());  // The task owns the output lease through EOF/publication.
-        assert(dynamic_cast<IBlockTransformInputSourceTaskV1*>(task.get())->BindInputSource("sqlite.t4") == 0);
+        assert(dynamic_cast<IBlockTransformInputSourceTask*>(task.get())->BindInputSource("sqlite.t4") == 0);
         std::shared_ptr<arrow::Schema> schema;
         assert(task->Open(MakeSchema(SchemaKind::kObservation), &schema) == 0);
-        std::vector<BlockTransformOutputV1> outputs;
+        std::vector<BlockTransformOutput> outputs;
         if (scenario != 5) {
             assert(task->ProcessBlock(Batch(scenario == 4 ? std::vector<Observation>{Input(0)}
                                                           : std::vector<Observation>{Input(0), Input(1)}),
@@ -645,7 +644,7 @@ void ModelOutputTaskPath() {
             stage = lifetime.lock();
             assert(stage->Read(&frame) != 0 || frame.RowCount() == 0);
             rapidjson::Document summary;
-            summary.Parse(dynamic_cast<IBlockTransformManagedSinkTaskV1*>(task.get())->ManagedSinkResultJson().c_str());
+            summary.Parse(dynamic_cast<IBlockTransformManagedSinkTask*>(task.get())->ManagedSinkResultJson().c_str());
             assert(std::string(summary["model_output"]["status"].GetString()) == "cancelled");
             continue;
         }
@@ -657,8 +656,8 @@ void ModelOutputTaskPath() {
         assert(batch && batch->schema()->Equals(*MakeSchema(SchemaKind::kModelParameters), true));
         assert(batch->num_rows() == (scenario == 5 ? 0 : 1));
         dataset::Json observed;
-        DataSemanticsErrorV1 contract_error;
-        assert(contracts::ProducerOutputs(dynamic_cast<IOperatorOutputObservationV1*>(task.get()), &observed,
+        DataSemanticsError contract_error;
+        assert(contracts::ProducerOutputs(dynamic_cast<IOperatorOutputObservation*>(task.get()), &observed,
                                           &contract_error) == 0);
         bool found = false;
         for (const auto& port : observed.GetArray())
@@ -673,14 +672,14 @@ void ModelOutputTaskPath() {
         assert(scenario == 6 ? models->CompleteModelOutputPublication(true) != 0
                              : models->CompleteModelOutputPublication(true) == 0);
         rapidjson::Document summary;
-        summary.Parse(dynamic_cast<IBlockTransformManagedSinkTaskV1*>(task.get())->ManagedSinkResultJson().c_str());
+        summary.Parse(dynamic_cast<IBlockTransformManagedSinkTask*>(task.get())->ManagedSinkResultJson().c_str());
         assert(std::string(summary["model_output"]["status"].GetString()) == "committed");
         task.reset();
         stage.reset();
         assert(lifetime.expired());
     }
     auto plain = Task(owner);
-    assert(dynamic_cast<IBlockTransformModelOutputTaskV1*>(plain.get())->ModelOutputTarget().empty());
+    assert(dynamic_cast<IBlockTransformModelOutputTask*>(plain.get())->ModelOutputTarget().empty());
 }
 }  // namespace
 int main() {

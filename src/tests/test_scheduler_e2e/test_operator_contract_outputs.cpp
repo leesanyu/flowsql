@@ -34,7 +34,7 @@ int main() {
     auto* channels = static_cast<IChannelRegistry*>(loader->First(IID_CHANNEL_REGISTRY));
     auto* host = static_cast<IBinAddonHost*>(loader->First(IID_BINADDON_HOST));
     auto* scheduler = static_cast<ISchedulerControlService*>(loader->First(IID_SCHEDULER_CONTROL_SERVICE));
-    auto* registry = static_cast<IDataSemanticsRegistryV1*>(loader->First(IID_DATA_SEMANTICS_REGISTRY_V1));
+    auto* registry = static_cast<IDataSemanticsRegistry*>(loader->First(IID_DATA_SEMANTICS_REGISTRY));
     auto* directory = static_cast<IOperatorCatalog*>(loader->First(IID_OPERATOR_CATALOG));
     assert(channels && host && scheduler && registry && directory);
     std::filesystem::copy_file(FIXTURE_OUTPUT_PATH, root + "/output.so");
@@ -57,7 +57,7 @@ int main() {
     };
     add("input", false);
     add("empty", true);
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     auto control = [&](const std::string& op, const Value& request) {
         Json result;
         const int rc = contracts::Control(loader, op, request, &result, &error);
@@ -98,7 +98,7 @@ int main() {
         return result;
     };
     auto resolve = [&](const std::string& exact) {
-        DataSemanticsSnapshotV1 snapshot;
+        DataSemanticsSnapshot snapshot;
         assert(registry->Resolve(exact.c_str(), &snapshot, &error) == 0);
         Json result;
         result.Parse(snapshot.document_json->c_str());

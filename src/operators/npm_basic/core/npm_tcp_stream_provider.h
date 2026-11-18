@@ -18,13 +18,13 @@ class NpmProtocolModuleAdapter;
 /** Borrowed adapter and consumer pointers are frozen at Open and outlive the provider. */
 struct NpmTcpStreamRegistration {
     NpmProtocolModuleAdapter* adapter = nullptr;
-    INpmTcpStreamConsumerV1* consumer = nullptr;
+    INpmTcpStreamConsumer* consumer = nullptr;
 };
 
 /** Task-private stream coordinator. The runtime operation gate serializes all calls and cancellation. */
 class NpmTcpStreamProvider final {
  public:
-    static NpmTcpStreamError Create(NpmTcpStreamConfigV1 config, std::shared_ptr<INpmTaskBudget> budget,
+    static NpmTcpStreamError Create(NpmTcpStreamConfig config, std::shared_ptr<INpmTaskBudget> budget,
                                     Span<const NpmTcpStreamRegistration> registrations,
                                     std::unique_ptr<NpmTcpStreamProvider>* output,
                                     const std::atomic<bool>* cancellation_requested = nullptr);
@@ -41,13 +41,13 @@ class NpmTcpStreamProvider final {
     const NpmTcpStreamFailure& Failure() const noexcept { return failure_; }
 
  private:
-    struct ConsumerGate final : INpmTcpStreamConsumerV1 {
-        ConsumerGate(INpmTcpStreamConsumerV1* target, const std::atomic<bool>* cancellation_requested)
+    struct ConsumerGate final : INpmTcpStreamConsumer {
+        ConsumerGate(INpmTcpStreamConsumer* target, const std::atomic<bool>* cancellation_requested)
             : target(target), cancellation_requested(cancellation_requested) {}
-        INpmTcpStreamConsumerV1* target = nullptr;
+        INpmTcpStreamConsumer* target = nullptr;
         const std::atomic<bool>* cancellation_requested = nullptr;
-        int OnTcpStreamReadable(const NpmTcpStreamContextV1& context, INpmTcpStreamCursorV1& cursor,
-                                INpmResultEmitterV1& emitter) override;
+        int OnTcpStreamReadable(const NpmTcpStreamContext& context, INpmTcpStreamCursor& cursor,
+                                INpmResultEmitter& emitter) override;
     };
     struct Entry {
         NpmSessionSnapshotBatch snapshot;
@@ -57,7 +57,7 @@ class NpmTcpStreamProvider final {
     };
     using Entries = std::map<uint64_t, Entry>;
 
-    NpmTcpStreamProvider(NpmTcpStreamConfigV1 config, std::shared_ptr<INpmTaskBudget> budget,
+    NpmTcpStreamProvider(NpmTcpStreamConfig config, std::shared_ptr<INpmTaskBudget> budget,
                          const std::atomic<bool>* cancellation_requested);
     void Initialize(Span<const NpmTcpStreamRegistration> registrations);
     void Reserve(uint64_t bytes);
@@ -67,7 +67,7 @@ class NpmTcpStreamProvider final {
     void Erase(Entries::iterator at) noexcept;
     void SaveFailure(const NpmTcpStreamSharedDirection& direction) noexcept;
 
-    NpmTcpStreamConfigV1 config_;
+    NpmTcpStreamConfig config_;
     std::shared_ptr<INpmTaskBudget> budget_;
     std::vector<NpmTcpStreamRegistration> registrations_;
     std::vector<ConsumerGate> consumer_gates_;

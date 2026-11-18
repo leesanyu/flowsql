@@ -100,7 +100,7 @@ int VisualizationPlugin::Start() {
     server_.new_task_queue = [this] { return new httplib::ThreadPool(limits_.max_active + 4); };
     if (!service_.Init(querier_, limits_, options_.dataframe_upstream, options_.dataframe_shared_dir)) return -1;
     service_.Routes(server_);
-    server_.Get("/api/visualization/v1/capabilities", [](const auto&, auto& res) {
+    server_.Get("/api/visualization/capabilities", [](const auto&, auto& res) {
         res.set_header("Cache-Control", "no-store");
         res.set_content(
             R"({"api_version":1,"workflow_version":"graphic-walker-0.5.3","dialects":["sqlite","mysql","postgres","clickhouse"]})",

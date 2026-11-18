@@ -65,12 +65,15 @@ def main():
         static = directory / 'exploration'
         shutil.copytree(output / 'exploration', static)
         options = json.dumps(dict(port=visual, static_dir=str(static)))
-        with service(output, directory, 'visualization', options, direct + '/api/visualization/v1/capabilities'):
+        with service(output, directory, 'visualization', options, direct + '/api/visualization/capabilities'):
             def web_options(p, suffix, upstream=''):
                 return f'port={p};db_path={directory}/{suffix}.db;upload_dir={directory}/{suffix}-uploads;visualization_upstream={upstream}'
             with service(output, directory, 'web', web_options(web, 'web', direct), host + '/api/version'), \
                  service(output, directory, 'web', web_options(empty, 'empty'), unconfigured + '/api/version'), \
                  service(output, directory, 'web', web_options(unavailable, 'unavailable', f'http://127.0.0.1:{port()}'), unreachable + '/api/version'):
+                for endpoint, expected in ((direct, 404), (host, 405)):
+                    with request(endpoint + '/api/visualization/v1/capabilities') as obsolete:
+                        assert obsolete.status == expected, 'obsolete internal route must be rejected'
                 subprocess.run([node, str(Path(__file__).with_name('browser.mjs')), direct, host, unconfigured,
                                 str(evidence / 'browser.json'), unreachable], check=True, timeout=120)
             with request(direct + '/exploration/') as response:

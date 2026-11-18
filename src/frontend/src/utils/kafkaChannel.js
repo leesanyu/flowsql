@@ -15,14 +15,14 @@ export const connectionDraft = (row = {}) => ({
 export const channelDraft = (row = {}) => ({
   name: row.name || '', connection_name: row.connection_name || '', role: row.role || 'source',
   topic: row.topic || '', consumer_group: row.consumer_group || '', payload_kind: row.payload_kind || 'structured',
-  packet_source_enabled: row.payload_kind === 'packet' && row.payload_options?.source?.encoding === 'flowsql_packet_v1',
+  packet_source_enabled: row.payload_kind === 'packet' && row.payload_options?.source?.encoding === 'flowsql_packet',
   packet_source: {
     stream_id: row.payload_kind === 'packet' ? row.payload_options?.source?.stream_id || '' : '',
     observation_domain_id: row.payload_kind === 'packet' ? row.payload_options?.source?.observation_domain_id || '' : '',
     inputs: (row.payload_kind === 'packet' ? row.payload_options?.source?.inputs : null)?.map((input) => ({ ...input })) || [{ source_id: 0, queue_id: 0, source_name: '' }],
     ...Object.fromEntries(Object.entries({ offset_reset: 'earliest', commit_policy: 'after_success', max_packets_per_batch: 256, max_bytes_per_batch: 1048576, max_message_bytes: 2097152, max_wait_ms: 100 }).map(([key, fallback]) => [key, row.payload_kind === 'packet' ? row.payload_options?.source?.[key] ?? fallback : fallback]))
   },
-  packet_sink_enabled: row.payload_kind === 'packet' && row.payload_options?.sink?.encoding === 'flowsql_packet_v1',
+  packet_sink_enabled: row.payload_kind === 'packet' && row.payload_options?.sink?.encoding === 'flowsql_packet',
   packet_sink_present: row.payload_kind === 'packet' && row.payload_options?.sink !== undefined,
   packet_sink: {
     stream_id: row.payload_kind === 'packet' ? row.payload_options?.sink?.stream_id || '' : '',
@@ -148,7 +148,7 @@ export const buildChannel = (draft, revision = 0) => {
     requireValue(['earliest', 'latest', 'error'].includes(source.offset_reset) && ['after_success', 'none'].includes(source.commit_policy), '请选择合法位点策略')
     const limits = [['max_packets_per_batch', 1, 4096], ['max_bytes_per_batch', 1024, 16777216], ['max_message_bytes', 1024, 16777216], ['max_wait_ms', 1, 1000]]
     for (const [key, low, high] of limits) requireValue(Number.isInteger(source[key]) && source[key] >= low && source[key] <= high, `${key} 范围为 ${low}～${high}`)
-    payload.payload_options = { source: { encoding: 'flowsql_packet_v1', stream_id: source.stream_id, observation_domain_id: source.observation_domain_id, inputs, offset_reset: source.offset_reset, commit_policy: source.commit_policy, ...Object.fromEntries(limits.map(([key]) => [key, source[key]])) } }
+    payload.payload_options = { source: { encoding: 'flowsql_packet', stream_id: source.stream_id, observation_domain_id: source.observation_domain_id, inputs, offset_reset: source.offset_reset, commit_policy: source.commit_policy, ...Object.fromEntries(limits.map(([key]) => [key, source[key]])) } }
   }
   if (draft.role !== 'source' && draft.payload_kind === 'packet') {
     if (draft.packet_sink_enabled) {
@@ -157,7 +157,7 @@ export const buildChannel = (draft, revision = 0) => {
       const limits = [['max_message_bytes', 1024, 16777216], ['queue_max_messages', 1, 65536], ['queue_max_bytes', 1048576, 268435456], ['delivery_timeout_ms', 100, 120000]]
       for (const [key, low, high] of limits) requireValue(Number.isInteger(sink[key]) && sink[key] >= low && sink[key] <= high, `${key} 范围为 ${low}～${high}`)
       requireValue(sink.queue_max_bytes >= sink.max_message_bytes, '队列字节必须不少于消息上限')
-      payload.payload_options = { ...payload.payload_options, sink: { encoding: 'flowsql_packet_v1', stream_id: sink.stream_id, ...Object.fromEntries(limits.map(([key]) => [key, sink[key]])) } }
+      payload.payload_options = { ...payload.payload_options, sink: { encoding: 'flowsql_packet', stream_id: sink.stream_id, ...Object.fromEntries(limits.map(([key]) => [key, sink[key]])) } }
     } else if (draft.packet_sink_present) payload.payload_options = { ...payload.payload_options, sink: {} }
   }
   if (revision) payload.expected_revision = revision

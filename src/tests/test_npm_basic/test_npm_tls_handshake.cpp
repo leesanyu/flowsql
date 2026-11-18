@@ -77,13 +77,13 @@ std::string Record(uint8_t content_type, uint8_t message_type, std::string body)
 
 struct Harness {
     npm::NpmSessionView session;
-    npm::NpmTlsHandshakeTrackerV1 tracker;
+    npm::NpmTlsHandshakeTracker tracker;
     uint64_t offsets[2]{};
-    std::optional<npm::NpmTlsHandshakeResultV1> result;
+    std::optional<npm::NpmTlsHandshakeResult> result;
 
     explicit Harness(int64_t timeout = 100) : tracker(7, Config(timeout)) { session.session_id = 7; }
-    static npm::NpmTlsConfigV1 Config(int64_t timeout) {
-        npm::NpmTlsConfigV1 config;
+    static npm::NpmTlsConfig Config(int64_t timeout) {
+        npm::NpmTlsConfig config;
         config.primary_label_ids = {1001};
         config.handshake_timeout_ns = timeout;
         config.max_hello_bytes = 4096;
@@ -91,59 +91,59 @@ struct Harness {
     }
     void Send(npm::NpmPacketDirection direction, std::string bytes, std::optional<int64_t> capture, int64_t observed) {
         const auto index = static_cast<uint8_t>(direction);
-        npm::NpmTcpStreamContextV1 context;
+        npm::NpmTcpStreamContext context;
         context.session = &session;
         context.direction = direction;
-        context.origin = npm::NpmTcpStreamOriginV1::kSyn;
+        context.origin = npm::NpmTcpStreamOrigin::kSyn;
         context.observed_at_ns = observed;
-        npm::NpmTcpStreamEventV1 event;
-        event.kind = npm::NpmTcpStreamEventKindV1::kData;
+        npm::NpmTcpStreamEvent event;
+        event.kind = npm::NpmTcpStreamEventKind::kData;
         event.begin = offsets[index];
         event.end = event.begin + bytes.size();
         event.bytes = {reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()};
         event.captured_at_ns = capture;
         offsets[index] = event.end;
-        assert(tracker.Consume(context, event, &result) == npm::NpmTlsTrackerErrorV1::kNone);
+        assert(tracker.Consume(context, event, &result) == npm::NpmTlsTrackerError::kNone);
     }
     void Gap(npm::NpmPacketDirection direction, bool truncated, int64_t observed) {
         const auto index = static_cast<uint8_t>(direction);
-        npm::NpmTcpStreamContextV1 context;
+        npm::NpmTcpStreamContext context;
         context.session = &session;
         context.direction = direction;
-        context.origin = npm::NpmTcpStreamOriginV1::kSyn;
+        context.origin = npm::NpmTcpStreamOrigin::kSyn;
         context.observed_at_ns = observed;
-        npm::NpmTcpStreamEventV1 event;
-        event.kind = npm::NpmTcpStreamEventKindV1::kGap;
+        npm::NpmTcpStreamEvent event;
+        event.kind = npm::NpmTcpStreamEventKind::kGap;
         event.begin = offsets[index];
         event.end = event.begin + 3;
         event.includes_capture_truncation = truncated;
         offsets[index] = event.end;
-        assert(tracker.Consume(context, event, &result) == npm::NpmTlsTrackerErrorV1::kNone);
+        assert(tracker.Consume(context, event, &result) == npm::NpmTlsTrackerError::kNone);
     }
-    void End(npm::NpmPacketDirection direction, npm::NpmTcpStreamEndReasonV1 reason, int64_t observed) {
+    void End(npm::NpmPacketDirection direction, npm::NpmTcpStreamEndReason reason, int64_t observed) {
         const auto index = static_cast<uint8_t>(direction);
-        npm::NpmTcpStreamContextV1 context;
+        npm::NpmTcpStreamContext context;
         context.session = &session;
         context.direction = direction;
-        context.origin = npm::NpmTcpStreamOriginV1::kSyn;
+        context.origin = npm::NpmTcpStreamOrigin::kSyn;
         context.observed_at_ns = observed;
-        npm::NpmTcpStreamEventV1 event;
-        event.kind = npm::NpmTcpStreamEventKindV1::kEnd;
+        npm::NpmTcpStreamEvent event;
+        event.kind = npm::NpmTcpStreamEventKind::kEnd;
         event.begin = event.end = offsets[index];
         event.end_reason = reason;
-        assert(tracker.Consume(context, event, &result) == npm::NpmTlsTrackerErrorV1::kNone);
+        assert(tracker.Consume(context, event, &result) == npm::NpmTlsTrackerError::kNone);
     }
     void Watermark(int64_t value) {
-        assert(tracker.OnCaptureWatermark(value, &result) == npm::NpmTlsTrackerErrorV1::kNone);
+        assert(tracker.OnCaptureWatermark(value, &result) == npm::NpmTlsTrackerError::kNone);
     }
     void SessionEnd(npm::NpmSessionEndReason reason, int64_t observed) {
-        assert(tracker.OnSessionEnd(reason, observed, &result) == npm::NpmTlsTrackerErrorV1::kNone);
+        assert(tracker.OnSessionEnd(reason, observed, &result) == npm::NpmTlsTrackerError::kNone);
     }
 };
 
 void TestTls13AndTls12() {
-    using Outcome = npm::NpmTlsOutcomeV1;
-    using Reason = npm::NpmTlsIncompleteReasonV1;
+    using Outcome = npm::NpmTlsOutcome;
+    using Reason = npm::NpmTlsIncompleteReason;
     Harness tls13;
     tls13.Send(npm::NpmPacketDirection::kAToB, Record(22, 1, Client()), 10, 10);
     assert(tls13.tracker.HasCandidate() && !tls13.result && tls13.tracker.NextEventDeadlineNs() == 110);
@@ -167,8 +167,8 @@ void TestTls13AndTls12() {
 }
 
 void TestRetryAndBadOrder() {
-    using Outcome = npm::NpmTlsOutcomeV1;
-    using Reason = npm::NpmTlsIncompleteReasonV1;
+    using Outcome = npm::NpmTlsOutcome;
+    using Reason = npm::NpmTlsIncompleteReason;
     Harness retry;
     retry.Send(npm::NpmPacketDirection::kAToB, Record(22, 1, Client()), 10, 10);
     retry.Send(npm::NpmPacketDirection::kBToA, Record(22, 2, Server(true, true)), 20, 20);
@@ -190,8 +190,8 @@ void TestRetryAndBadOrder() {
 }
 
 void TestFatalAndVisibility() {
-    using Outcome = npm::NpmTlsOutcomeV1;
-    using Reason = npm::NpmTlsIncompleteReasonV1;
+    using Outcome = npm::NpmTlsOutcome;
+    using Reason = npm::NpmTlsIncompleteReason;
     Harness fatal;
     fatal.Send(npm::NpmPacketDirection::kAToB, Record(22, 1, Client()), 10, 10);
     fatal.Send(npm::NpmPacketDirection::kAToB, Record(23, 0, std::string(100, 'e')), 11, 11);
@@ -215,8 +215,8 @@ void TestFatalAndVisibility() {
 }
 
 void TestDeadlinesAndTime() {
-    using Outcome = npm::NpmTlsOutcomeV1;
-    using Reason = npm::NpmTlsIncompleteReasonV1;
+    using Outcome = npm::NpmTlsOutcome;
+    using Reason = npm::NpmTlsIncompleteReason;
     Harness deadline;
     deadline.Send(npm::NpmPacketDirection::kAToB, Record(22, 1, Client()), 10, 10);
     deadline.Watermark(109);
@@ -264,8 +264,8 @@ void TestDeadlinesAndTime() {
 }
 
 void TestEndGapAbortAndNoCandidate() {
-    using Outcome = npm::NpmTlsOutcomeV1;
-    using Reason = npm::NpmTlsIncompleteReasonV1;
+    using Outcome = npm::NpmTlsOutcome;
+    using Reason = npm::NpmTlsIncompleteReason;
     Harness empty;
     empty.Send(npm::NpmPacketDirection::kAToB, "GET /", 1, 1);
     empty.SessionEnd(npm::NpmSessionEndReason::kEof, 2);
@@ -273,7 +273,7 @@ void TestEndGapAbortAndNoCandidate() {
 
     Harness half_closed;
     half_closed.Send(npm::NpmPacketDirection::kAToB, Record(22, 1, Client(false)), 10, 10);
-    half_closed.End(npm::NpmPacketDirection::kAToB, npm::NpmTcpStreamEndReasonV1::kFin, 11);
+    half_closed.End(npm::NpmPacketDirection::kAToB, npm::NpmTcpStreamEndReason::kFin, 11);
     assert(!half_closed.result);
     half_closed.Send(npm::NpmPacketDirection::kBToA, Record(22, 2, Server(false)), 20, 20);
     assert(!half_closed.result);
@@ -283,7 +283,7 @@ void TestEndGapAbortAndNoCandidate() {
 
     Harness server_fin;
     server_fin.Send(npm::NpmPacketDirection::kAToB, Record(22, 1, Client()), 10, 10);
-    server_fin.End(npm::NpmPacketDirection::kBToA, npm::NpmTcpStreamEndReasonV1::kFin, 15);
+    server_fin.End(npm::NpmPacketDirection::kBToA, npm::NpmTcpStreamEndReason::kFin, 15);
     assert(server_fin.result && server_fin.result->incomplete_reason == Reason::kServerStreamEnd);
     server_fin.SessionEnd(npm::NpmSessionEndReason::kClosed, 16);
     assert(!server_fin.result);
@@ -318,7 +318,7 @@ void TestEndGapAbortAndNoCandidate() {
                               npm::NpmSessionEndReason::kTupleReuse, npm::NpmSessionEndReason::kEof}) {
         Harness ended;
         ended.Send(npm::NpmPacketDirection::kAToB, Record(22, 1, Client()), 10, 10);
-        ended.End(npm::NpmPacketDirection::kAToB, npm::NpmTcpStreamEndReasonV1::kReset, 20);
+        ended.End(npm::NpmPacketDirection::kAToB, npm::NpmTcpStreamEndReason::kReset, 20);
         assert(!ended.result);
         ended.SessionEnd(reason, 21);
         assert(ended.result && ended.result->incomplete_reason == Reason::kSessionEnd);
@@ -335,8 +335,8 @@ void TestEndGapAbortAndNoCandidate() {
 }
 
 void TestPartialAndOrdering() {
-    using Outcome = npm::NpmTlsOutcomeV1;
-    using Reason = npm::NpmTlsIncompleteReasonV1;
+    using Outcome = npm::NpmTlsOutcome;
+    using Reason = npm::NpmTlsIncompleteReason;
     Harness partial;
     auto client = Record(22, 1, Client());
     partial.Send(npm::NpmPacketDirection::kAToB, client.substr(0, 12), 10, 10);

@@ -13,29 +13,29 @@
 namespace flowsql::npm {
 
 /** Task-private HTTP/1 module; the shared stream cursor is borrowed only during callbacks. */
-class NpmHttp1ProtocolModuleV1 final : public INpmProtocolModuleV1, public INpmTcpStreamConsumerV1 {
+class NpmHttp1ProtocolModule final : public INpmProtocolModule, public INpmTcpStreamConsumer {
  public:
-    NpmHttp1ProtocolModuleV1(NpmHttp1ConfigV1 config, std::shared_ptr<INpmTaskBudget> budget);
-    ~NpmHttp1ProtocolModuleV1() override;
+    NpmHttp1ProtocolModule(NpmHttp1Config config, std::shared_ptr<INpmTaskBudget> budget);
+    ~NpmHttp1ProtocolModule() override;
 
-    int OnInput(const NpmInputEventV1& input, INpmResultEmitterV1& emitter) override;
-    int OnSessionSnapshot(const NpmSessionView& session, int64_t observed_at_ns, INpmResultEmitterV1& emitter) override;
+    int OnInput(const NpmInputEvent& input, INpmResultEmitter& emitter) override;
+    int OnSessionSnapshot(const NpmSessionView& session, int64_t observed_at_ns, INpmResultEmitter& emitter) override;
     int OnSessionEnd(const NpmSessionView& session, NpmSessionEndReason reason, int64_t observed_at_ns,
-                     INpmResultEmitterV1& emitter) override;
+                     INpmResultEmitter& emitter) override;
     std::optional<int64_t> NextEventDeadlineNs() const override;
-    int OnTime(const NpmModuleTimeV1& time, INpmResultEmitterV1& emitter) override;
-    int Finish(int64_t observed_at_ns, INpmResultEmitterV1& emitter) override;
+    int OnTime(const NpmModuleTime& time, INpmResultEmitter& emitter) override;
+    int Finish(int64_t observed_at_ns, INpmResultEmitter& emitter) override;
     void Abort() noexcept override;
-    int OnTcpStreamReadable(const NpmTcpStreamContextV1& context, INpmTcpStreamCursorV1& cursor,
-                            INpmResultEmitterV1& emitter) override;
+    int OnTcpStreamReadable(const NpmTcpStreamContext& context, INpmTcpStreamCursor& cursor,
+                            INpmResultEmitter& emitter) override;
 
  private:
     int RememberSession(const NpmSessionView& session);
     void ForgetSession(uint64_t session_id) noexcept;
-    int EmitRows(std::vector<NpmHttp1TransactionResultV1>* rows, INpmResultEmitterV1& emitter);
+    int EmitRows(std::vector<NpmHttp1TransactionResult>* rows, INpmResultEmitter& emitter);
 
     std::shared_ptr<INpmTaskBudget> budget_;
-    NpmHttp1TransactionTrackerV1 transactions_;
+    NpmHttp1TransactionTracker transactions_;
     std::map<uint64_t, NpmTransactionIdentity> identities_;
     bool finished_ = false;
     bool aborted_ = false;

@@ -21,11 +21,12 @@ namespace flowsql::npm {
 class NpmBasicOperator;
 class NpmBasicTaskRuntime;
 
-class NpmBasicTask final : public IBlockTransformTaskV2,
-                           public IBlockTransformCaptureFactTaskV2,
-                           public IBlockTransformManagedSinkTaskV1,
-                           public IBlockTransformInputSourceTaskV1,
-                           public IOperatorConfigAdapterV1 {
+class NpmBasicTask final : public IBlockTransformTask,
+                           public IBlockTransformTimeDrivenTask,
+                           public IBlockTransformCaptureFactTask,
+                           public IBlockTransformManagedSinkTask,
+                           public IBlockTransformInputSourceTask,
+                           public IOperatorConfigAdapter {
  public:
     NpmBasicTask(const NpmBasicTask&) = delete;
     NpmBasicTask& operator=(const NpmBasicTask&) = delete;
@@ -34,18 +35,18 @@ class NpmBasicTask final : public IBlockTransformTaskV2,
 
     int Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_ptr<arrow::Schema>* output_schema) override;
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
-                     std::vector<BlockTransformOutputV1>* outputs) override;
-    int Flush(std::vector<BlockTransformOutputV1>* outputs) override;
+                     std::vector<BlockTransformOutput>* outputs) override;
+    int Flush(std::vector<BlockTransformOutput>* outputs) override;
     void Cancel() override;
     std::string LastError() const override;
     int BindInputSource(const char* source) override;
-    int ResolveInvocation(const char* request_json, std::string* result_json, DataSemanticsErrorV1* error) override;
-    int BindManagedSink(const BlockTransformManagedSinkBindingV1& binding) override;
+    int ResolveInvocation(const char* request_json, std::string* result_json, DataSemanticsError* error) override;
+    int BindManagedSink(const BlockTransformManagedSinkBinding& binding) override;
     std::string ManagedSinkResultJson() const override;
-    int BindCaptureSources(const CaptureSourceSetV2& sources) override;
-    int AcceptCaptureFacts(const std::vector<CaptureProgressV1>& facts) override;
-    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override;
-    int OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* outputs) override;
+    int BindCaptureSources(const CaptureSourceSet& sources) override;
+    int AcceptCaptureFacts(const std::vector<CaptureProgress>& facts) override;
+    int GetTimeDriveState(BlockTransformTimeDriveState* state) override;
+    int OnTime(const BlockTransformTimeEvent& event, std::vector<BlockTransformOutput>* outputs) override;
 
     const std::string& TaskId() const noexcept;
     const std::string& WithParamsJson() const noexcept;
@@ -63,7 +64,7 @@ class NpmBasicTask final : public IBlockTransformTaskV2,
 
     friend class NpmBasicOperator;
 
-    NpmBasicTask(const BlockTransformTaskConfigV1& config, IQuerier* querier, NpmBasicOperator* owner, bool v2);
+    NpmBasicTask(const BlockTransformTaskConfig& config, IQuerier* querier, NpmBasicOperator* owner);
     ~NpmBasicTask() override;
 
     static int ErrorCodeForState(State state) noexcept;
@@ -82,14 +83,13 @@ class NpmBasicTask final : public IBlockTransformTaskV2,
     IChannel* managed_channel_ = nullptr;
     IQuerier* querier_ = nullptr;
     NpmBasicOperator* owner_ = nullptr;
-    OperatorComponentContractV1 component_;
+    OperatorComponentContract component_;
     std::string semantics_context_;
-    bool v2_ = false;
     bool capture_bound_ = false;
-    CaptureSourceSetV2 capture_sources_;
+    CaptureSourceSet capture_sources_;
     std::vector<std::string> capture_source_names_;
-    std::unique_ptr<CaptureProgressTrackerV2> capture_tracker_;
-    std::deque<CaptureProgressV1> pending_capture_facts_;
+    std::unique_ptr<MultiInputCaptureProgressTracker> capture_tracker_;
+    std::deque<CaptureProgress> pending_capture_facts_;
     bool realtime_origin_initialized_ = false;
     std::shared_ptr<NpmBasicTaskRuntime> runtime_;
     std::atomic<State> state_{State::kCreated};
@@ -99,10 +99,7 @@ class NpmBasicTask final : public IBlockTransformTaskV2,
     bool has_observed_at_ = false;
 };
 
-class NpmBasicOperator final : public IPlugin,
-                               public IBlockTransformOperatorV1,
-                               public IBlockTransformOperatorV2,
-                               public IOperatorConfigAdapterV1 {
+class NpmBasicOperator final : public IPlugin, public IBlockTransformOperator, public IOperatorConfigAdapter {
  public:
     NpmBasicOperator() noexcept = default;
     /** Creates an already-started in-process provider for focused unit tests. */
@@ -117,11 +114,9 @@ class NpmBasicOperator final : public IPlugin,
     std::string Category() const override;
     std::string Name() const override;
     std::string Description() const override;
-    int ResolveInvocation(const char* request_json, std::string* result_json, DataSemanticsErrorV1* error) override;
-    int CreateTask(const BlockTransformTaskConfigV1& config, IBlockTransformTaskV1** task) override;
-    void ReleaseTask(IBlockTransformTaskV1* task) override;
-    int CreateTask(const BlockTransformTaskConfigV2& config, IBlockTransformTaskV2** task) override;
-    void ReleaseTask(IBlockTransformTaskV2* task) override;
+    int ResolveInvocation(const char* request_json, std::string* result_json, DataSemanticsError* error) override;
+    int CreateTask(const BlockTransformTaskConfig& config, IBlockTransformTask** task) override;
+    void ReleaseTask(IBlockTransformTask* task) override;
 
  private:
     IQuerier* querier_ = nullptr;

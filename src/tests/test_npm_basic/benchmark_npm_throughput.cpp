@@ -213,7 +213,7 @@ std::shared_ptr<arrow::RecordBatch> MakeInput(int batch_rows, flowsql::IProtocol
     return batch;
 }
 
-uint64_t DigestOutputs(const std::vector<flowsql::BlockTransformOutputV1>& outputs,
+uint64_t DigestOutputs(const std::vector<flowsql::BlockTransformOutput>& outputs,
                        const std::shared_ptr<arrow::Schema>& schema, uint64_t* digest) {
     uint64_t count = 0;
     const auto entity = schema->metadata()->Get("flowsql.entity").ValueOrDie();
@@ -260,7 +260,7 @@ void VerifyManagedReadback(flowsql::IDatabaseChannel* channel, const std::string
             "managed run did not complete with known metadata");
     for (const auto& entity : result["entities"].GetArray()) {
         const std::string id = entity["entity_id"].GetString();
-        const std::string sql = "SELECT * FROM npm_" + id + "_v1_data WHERE __npm_run_id='" +
+        const std::string sql = "SELECT * FROM npm_" + id + "_data WHERE __npm_run_id='" +
                                 result["run_id"].GetString() + "' ORDER BY session_id,revision";
         std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
         if (std::string_view(channel->Category()) == "clickhouse") {
@@ -326,7 +326,7 @@ double Milliseconds(std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
-class BenchmarkConfigRegistry final : public flowsql::IConfigChannelRegistryV1 {
+class BenchmarkConfigRegistry final : public flowsql::IConfigChannelRegistry {
  public:
     int Resolve(const char* reference, flowsql::ConfigChannelSnapshot* output, std::string* error) override {
         Require(reference && std::string_view(reference) == "config.throughput@1" && output,
@@ -335,9 +335,9 @@ class BenchmarkConfigRegistry final : public flowsql::IConfigChannelRegistryV1 {
         snapshot.channel_name = "throughput";
         snapshot.revision = 1;
         snapshot.format = "yaml";
-        snapshot.schema_id = "flowsql.io/flow-labeling/v1alpha1";
+        snapshot.schema_id = "flowsql.io/flow-labeling";
         snapshot.sha256_hex = "frozen-in-benchmark-source";
-        snapshot.content = std::make_shared<const std::string>(R"YAML(api_version: flowsql.io/flow-labeling/v1alpha1
+        snapshot.content = std::make_shared<const std::string>(R"YAML(api_version: flowsql.io/flow-labeling
 kind: FlowLabelingSet
 spec:
   engine:
@@ -380,7 +380,7 @@ class BenchmarkQuerier final : public flowsql::IQuerier {
         return delegate_->Traverse(iid, callback);
     }
     void* First(const flowsql::Guid& iid) override {
-        const auto& registry_id = flowsql::IID_CONFIG_CHANNEL_REGISTRY_V1;
+        const auto& registry_id = flowsql::IID_CONFIG_CHANNEL_REGISTRY;
         return !(iid < registry_id) && !(registry_id < iid) ? registry_ : delegate_->First(iid);
     }
 
@@ -400,11 +400,11 @@ std::string QuoteJson(std::string_view text) {
 
 // Optional cost probe forwards the production database API and keeps timing out of frontend runs.
 class DatabaseCostProbe final : public flowsql::IDatabaseChannel,
-                                public flowsql::IDatabasePreparedCommandV1,
-                                public flowsql::IDatabaseArrowWriteV1 {
+                                public flowsql::IDatabasePreparedCommand,
+                                public flowsql::IDatabaseArrowWrite {
  public:
     explicit DatabaseCostProbe(flowsql::IDatabaseChannel* channel) : channel_(channel) {
-        prepared_ = dynamic_cast<flowsql::IDatabasePreparedCommandV1*>(channel_);
+        prepared_ = dynamic_cast<flowsql::IDatabasePreparedCommand*>(channel_);
         Require(prepared_ != nullptr, "database prepared command interface missing");
     }
     const char* Category() override { return channel_->Category(); }
@@ -442,7 +442,7 @@ class DatabaseCostProbe final : public flowsql::IDatabaseChannel,
             Require(bytes.ok(), "Arrow logical byte measurement failed");
             arrow_bytes_ += *bytes;
         }
-        auto* writer = dynamic_cast<flowsql::IDatabaseArrowWriteV1*>(channel_);
+        auto* writer = dynamic_cast<flowsql::IDatabaseArrowWrite*>(channel_);
         Require(writer != nullptr, "budgeted Arrow capability missing");
         const auto started = std::chrono::steady_clock::now();
         const int result = writer->WriteArrowBatchesWithPool(table, rows, pool);
@@ -455,15 +455,15 @@ class DatabaseCostProbe final : public flowsql::IDatabaseChannel,
     }
     const char* GetLastError() override { return channel_->GetLastError(); }
     bool IsConnected() override { return channel_->IsConnected(); }
-    int ExecutePrepared(const char* sql, const flowsql::DatabaseParameterV1* parameters, size_t count) override {
+    int ExecutePrepared(const char* sql, const flowsql::DatabaseParameter* parameters, size_t count) override {
         ++single_calls_;
         return Measure([&] { return prepared_->ExecutePrepared(sql, parameters, count); });
     }
-    int ExecutePreparedBatch(const char* sql, const flowsql::DatabaseParameterV1* parameters, size_t width,
+    int ExecutePreparedBatch(const char* sql, const flowsql::DatabaseParameter* parameters, size_t width,
                              size_t rows) override {
         ++batch_calls_;
         batch_rows_ += rows;
-        parameter_bytes_ += width * rows * sizeof(flowsql::DatabaseParameterV1);
+        parameter_bytes_ += width * rows * sizeof(flowsql::DatabaseParameter);
         return Measure([&] { return prepared_->ExecutePreparedBatch(sql, parameters, width, rows); });
     }
     void BeginMeasurement() {
@@ -496,7 +496,7 @@ class DatabaseCostProbe final : public flowsql::IDatabaseChannel,
         heap_peak_ = std::max(heap_peak_, static_cast<uint64_t>(heap.uordblks + heap.hblkhd));
     }
     flowsql::IDatabaseChannel* channel_;
-    flowsql::IDatabasePreparedCommandV1* prepared_;
+    flowsql::IDatabasePreparedCommand* prepared_;
     uint64_t sql_calls_ = 0, single_calls_ = 0, batch_calls_ = 0, batch_rows_ = 0, parameter_bytes_ = 0, heap_peak_ = 0;
     double prepared_ms_ = 0;
     uint64_t arrow_calls_ = 0, arrow_rows_ = 0, arrow_bytes_ = 0;
@@ -504,9 +504,9 @@ class DatabaseCostProbe final : public flowsql::IDatabaseChannel,
 };
 
 struct BenchmarkCapability {
-    flowsql::IBlockTransformOperatorV1* provider = nullptr;
-    flowsql::IBlockTransformTaskV1* task = nullptr;
-    flowsql::CppOperatorPluginDestroyCapabilityV2Fn destroy_capability = nullptr;
+    flowsql::IBlockTransformOperator* provider = nullptr;
+    flowsql::IBlockTransformTask* task = nullptr;
+    flowsql::CppOperatorPluginDestroyCapabilityFn destroy_capability = nullptr;
 
     ~BenchmarkCapability() {
         if (task != nullptr) {
@@ -529,13 +529,13 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
     BenchmarkQuerier querier(loader, &registry);
     flowsql::test::ScopedSharedLibrary library(FLOWSQL_NPM_BASIC_PLUGIN_PATH);
     Require(static_cast<bool>(library), "npm.basic library loading failed");
-    const auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityV2Fn>(
-        library.Symbol(flowsql::kCppOperatorPluginCreateCapabilityV2Symbol));
+    const auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityFn>(
+        library.Symbol(flowsql::kCppOperatorPluginCreateCapabilitySymbol));
     BenchmarkCapability capability;
-    capability.destroy_capability = reinterpret_cast<flowsql::CppOperatorPluginDestroyCapabilityV2Fn>(
-        library.Symbol(flowsql::kCppOperatorPluginDestroyCapabilityV2Symbol));
+    capability.destroy_capability = reinterpret_cast<flowsql::CppOperatorPluginDestroyCapabilityFn>(
+        library.Symbol(flowsql::kCppOperatorPluginDestroyCapabilitySymbol));
     Require(create && capability.destroy_capability, "npm.basic capability symbols missing");
-    capability.provider = static_cast<flowsql::IBlockTransformOperatorV1*>(create(0, &querier));
+    capability.provider = static_cast<flowsql::IBlockTransformOperator*>(create(0, &querier));
     Require(capability.provider != nullptr, "capability creation failed");
     const auto input =
         MakeInput(batch_rows, protocol, family, pattern, cardinality, 1000000000, 0, source_count, &wire_digest);
@@ -566,18 +566,18 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
     const std::string params = "{\"input_namespace\":\"" + std::string(namespace_length, 'n') +
                                "\",\"source_domains\":\"" + domains + "\",\"observing\":\"" + entity +
                                "\",\"features\":\"" + features + "\",\"parameters\":" + QuoteJson(parameters) + '}';
-    flowsql::BlockTransformTaskConfigV1 config;
+    flowsql::BlockTransformTaskConfig config;
     config.task_id = "throughput-t1";
     config.with_params_json = params.c_str();
     config.pushed_filter_plan_json = R"({"version":1,"root":null})";
     Require(capability.provider->CreateTask(config, &capability.task) == 0 && capability.task, "CreateTask failed");
-    flowsql::IBlockTransformManagedSinkTaskV1* managed_task = nullptr;
+    flowsql::IBlockTransformManagedSinkTask* managed_task = nullptr;
     std::string managed_target;
     if (managed_channel) {
-        managed_task = dynamic_cast<flowsql::IBlockTransformManagedSinkTaskV1*>(capability.task);
+        managed_task = dynamic_cast<flowsql::IBlockTransformManagedSinkTask*>(capability.task);
         Require(managed_task != nullptr, "managed sink task interface missing");
         managed_target = std::string(managed_channel->Category()) + '.' + managed_channel->Name();
-        flowsql::BlockTransformManagedSinkBindingV1 binding;
+        flowsql::BlockTransformManagedSinkBinding binding;
         binding.sink_channel = managed_channel;
         binding.target = managed_target.c_str();
         binding.category = managed_channel->Category();
@@ -588,10 +588,10 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
     std::shared_ptr<arrow::Schema> schema;
     const int open_rc = capability.task->Open(input->schema(), &schema);
     Require(open_rc == 0, "Open failed: " + capability.task->LastError());
-    std::vector<flowsql::BlockTransformOutputV1> outputs;
+    std::vector<flowsql::BlockTransformOutput> outputs;
     // Warm-up belongs to the same task. ACK cardinality is established by this batch.
     Require(capability.task->ProcessBlock(input, 1000, &outputs) ==
-                static_cast<int>(flowsql::BlockTransformStatusV1::kContinue),
+                static_cast<int>(flowsql::BlockTransformStatus::kContinue),
             "warm-up failed");
     output_rows += DigestOutputs(outputs, schema, &digest);
     outputs.clear();
@@ -608,7 +608,7 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
         started = std::chrono::steady_clock::now();
         const int rc = capability.task->ProcessBlock(batch, 1000, &outputs);
         process_ms += Milliseconds(started);
-        Require(rc == static_cast<int>(flowsql::BlockTransformStatusV1::kContinue),
+        Require(rc == static_cast<int>(flowsql::BlockTransformStatus::kContinue),
                 "ProcessBlock failed: " + capability.task->LastError());
         started = std::chrono::steady_clock::now();
         output_rows += DigestOutputs(outputs, schema, &digest);
@@ -686,10 +686,10 @@ void RunLookupProbe(int rows, int iterations, int source_count, bool progress) {
     using namespace flowsql;
     npm::NpmObservationDomainMap domains;
     domains.input_namespace = "lookup.namespace";
-    CaptureSourceSetV2 sources;
+    CaptureSourceSet sources;
     for (int i = 0; i < source_count; ++i) {
         domains.bindings.push_back({static_cast<uint32_t>(i), static_cast<uint64_t>(i + 7)});
-        CaptureQueueIdentityV1 identity;
+        CaptureQueueIdentity identity;
         identity.source_id = static_cast<uint32_t>(i);
         identity.generation = 1;
         identity.source_name = "benchmark.capture";
@@ -703,13 +703,13 @@ void RunLookupProbe(int rows, int iterations, int source_count, bool progress) {
     Require(npm::NpmObservationDomainLookup::Create(domains, std::make_shared<LookupProbeBudget>(), &lookup) ==
                 npm::NpmObservationDomainLookupError::kNone,
             "domain lookup creation failed");
-    CaptureProgressTrackerV2 tracker(sources);
-    std::vector<CaptureProgressV1> facts(static_cast<size_t>(source_count));
+    MultiInputCaptureProgressTracker tracker(sources);
+    std::vector<CaptureProgress> facts(static_cast<size_t>(source_count));
     for (int i = 0; i < source_count; ++i) {
         facts[i].source_id = static_cast<uint32_t>(i);
         facts[i].generation = 1;
         facts[i].source_idle_confirmed = true;
-        facts[i].backlog = CaptureBacklogV1::kEmpty;
+        facts[i].backlog = CaptureBacklog::kEmpty;
     }
     if (progress) {
         for (auto& fact : facts) {
@@ -717,7 +717,7 @@ void RunLookupProbe(int rows, int iterations, int source_count, bool progress) {
             fact.capture_time_ns = 1;
         }
         auto warm = tracker;
-        Require(warm.Observe(facts) == CaptureProgressErrorV1::kNone && warm.CommonCandidateNs() == 1,
+        Require(warm.Observe(facts) == CaptureProgressError::kNone && warm.CommonCandidateNs() == 1,
                 "capture probe warm-up failed");
     } else {
         uint64_t warm_domain = 0;
@@ -738,7 +738,7 @@ void RunLookupProbe(int rows, int iterations, int source_count, bool progress) {
             }
             // Mirrors AcceptCaptureFacts' outer transactional copy, then Observe's input-state copy.
             auto candidate = tracker;
-            Require(candidate.Observe(facts) == CaptureProgressErrorV1::kNone, "capture-fact acceptance failed");
+            Require(candidate.Observe(facts) == CaptureProgressError::kNone, "capture-fact acceptance failed");
             tracker = std::move(candidate);
             const auto watermark = tracker.CommonCandidateNs();
             Require(watermark && *watermark == i + 1, "common progress mismatch");
@@ -830,8 +830,8 @@ int main(int argc, char* argv[]) {
         Require(protocol != nullptr, "NPI protocol interface not registered");
         std::shared_ptr<flowsql::IDatabaseChannel> channel;
         if (argc >= 13) {
-            auto* leases = static_cast<flowsql::IDatabaseChannelLeaseProviderV1*>(
-                loader->First(flowsql::IID_DATABASE_CHANNEL_LEASE_PROVIDER_V1));
+            auto* leases = static_cast<flowsql::IDatabaseChannelLeaseProvider*>(
+                loader->First(flowsql::IID_DATABASE_CHANNEL_LEASE_PROVIDER));
             Require(leases != nullptr, "database lease interface missing");
             channel = leases->AcquireChannel(argv[11], argv[12]);
             Require(channel && channel->IsOpened() && channel->IsConnected(), "measurement database unavailable");

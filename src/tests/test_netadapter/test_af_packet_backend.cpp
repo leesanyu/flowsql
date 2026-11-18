@@ -15,9 +15,9 @@
 using namespace flowsql;
 using namespace flowsql::channels::netadapter;
 int main(int argc, char** argv) {
-    CaptureBackendConfigV1 config;
+    CaptureBackendConfig config;
     config.backend = "af_packet";
-    std::shared_ptr<ICaptureBackendSessionV1> session;
+    std::shared_ptr<ICaptureBackendSession> session;
     std::string error;
     assert(OpenAfPacket(config, &session, &error) == EINVAL && !session);
     config.interfaces = {"absent-test"};
@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
     while (std::chrono::steady_clock::now() < deadline) {
         for (size_t i = 0; i < seen.size(); ++i) {
             for (int work = 0; work < 64; ++work) {
-                CapturePacketViewV1 view;
+                CapturePacketView view;
                 const int read = session->TryRead(i, &view);
                 if (read == EAGAIN) break;
                 assert(read == 0);
@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
     }
     for (size_t i = 0; i < seen.size(); ++i) {
         assert(seen[i]);
-        CaptureCountersV1 counters;
+        CaptureCounters counters;
         assert(session->ReadCounters(i, &counters) == 0);
         assert(counters.available_mask & kCaptureReceivedPacketsAvailable);
         std::cout << config.interfaces[i]
@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
                   << " ring_bytes=" << session->Inputs()[i].buffer_bytes << "\n";
     }
     session->Cancel();
-    CapturePacketViewV1 view;
+    CapturePacketView view;
     assert(session->TryRead(0, &view) == ECANCELED);
     session.reset();
     assert(plugin.Stop() == 0 && plugin.Unload() == 0);

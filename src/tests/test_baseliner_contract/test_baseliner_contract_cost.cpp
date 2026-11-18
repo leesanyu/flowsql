@@ -42,25 +42,19 @@ struct Measurement {
     uint64_t cold = 0, ready = 0;
     BaselineSerializationResult snapshot;
 };
-Measurement Submit(bool typed) {
+Measurement Submit() {
     Environment env;
     auto task = env.plugin.CreateValueTask(task_config, BaselineSerializationFormat::kJson).second;
     assert(task);
-    auto* capability = dynamic_cast<IBaselineValueEvaluationV1*>(task.get());
-    assert(capability);
     Measurement m;
     const auto cpu = CpuNs();
     const auto start = Clock::now();
     for (int64_t t = 0; t < kSubmits; ++t) {
         ValueRollingObservation observation{"s", t, 100. + t % 10, 1};
-        RollingBaselineResult result;
-        if (typed) {
-            auto output = capability->SubmitObservationWithReadiness(observation, {});
-            m.cold += output.readiness == BaselineEvaluationReadinessV1::kColdStart;
-            m.ready += output.readiness == BaselineEvaluationReadinessV1::kReady;
-            result = std::move(output.result);
-        } else
-            result = task->SubmitObservation(observation, {});
+        auto output = task->SubmitObservation(observation, {});
+        m.cold += output.readiness == BaselineEvaluationReadiness::kColdStart;
+        m.ready += output.readiness == BaselineEvaluationReadiness::kReady;
+        const auto& result = output.result;
         assert(result.status == BaselineStatus::kOk);
         m.checksum += result.baseline_mu + result.baseline_lower + result.baseline_upper + result.update_weight;
     }
@@ -112,18 +106,12 @@ void Handoff() {
               << "}\n";
 }
 }  // namespace
-int main(int argc, char** argv) {
-    const bool reverse = argc > 1 && std::stoi(argv[1]) % 2;
-    const auto first = Submit(reverse), second = Submit(!reverse);
-    const auto& old = reverse ? second : first;
-    const auto& typed = reverse ? first : second;
-    assert(old.checksum == typed.checksum && old.snapshot == typed.snapshot);
-    assert(typed.cold == 1 && typed.ready == kSubmits - 1);
-    std::cout << "CONTRACT_SUBMIT {\"observations\":" << kSubmits << ",\"identities\":1,\"typed_first\":" << reverse
-              << ",\"legacy_wall_ns_per_observation\":" << old.wall_ns / kSubmits
-              << ",\"typed_wall_ns_per_observation\":" << typed.wall_ns / kSubmits
-              << ",\"legacy_cpu_ns_per_observation\":" << old.cpu_ns / kSubmits
-              << ",\"typed_cpu_ns_per_observation\":" << typed.cpu_ns / kSubmits << ",\"checksum\":" << typed.checksum
-              << "}\n";
+int main() {
+    const auto measurement = Submit();
+    assert(measurement.cold == 1 && measurement.ready == kSubmits - 1);
+    std::cout << "CONTRACT_SUBMIT {\"observations\":" << kSubmits << ",\"identities\":1"
+              << ",\"wall_ns_per_observation\":" << measurement.wall_ns / kSubmits
+              << ",\"cpu_ns_per_observation\":" << measurement.cpu_ns / kSubmits
+              << ",\"checksum\":" << measurement.checksum << "}\n";
     Handoff();
 }

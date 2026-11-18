@@ -235,6 +235,7 @@ class WebE2ERuntime {
 
         loader_->Regist(flowsql::IID_BLOCK_STREAM_OPERATOR, counter_);
         const char* libraries[] = {
+            "libflowsql_config_channel.so",
             "libflowsql_npi.so",
             "libflowsql_pcapfile.so",
             "libflowsql_scheduler.so",
@@ -252,9 +253,11 @@ class WebE2ERuntime {
         const std::string catalog_option =
             "data_dir=" + dataframe_dir_.string() +
             ";operator_db_dir=" + operator_db_dir_.string();
+        const std::string semantics_option = "db_path=" + (operator_db_dir_ / "semantics.db").string();
         const char* options[] = {
-            npi_option.c_str(), pcapfile_option.c_str(), nullptr, nullptr, catalog_option.c_str(), web_option.c_str()};
-        assert(loader_->Load(flowsql::get_absolute_process_path(), libraries, options, 6) == 0);
+            semantics_option.c_str(), npi_option.c_str(), pcapfile_option.c_str(), nullptr, nullptr,
+            catalog_option.c_str(),   web_option.c_str()};
+        assert(loader_->Load(flowsql::get_absolute_process_path(), libraries, options, 7) == 0);
         assert(CountRoutes(loader_, "POST", "/channels/dataframe/preview") == 1);
 
         BindSchedulerRoute(scheduler_http_.get(),

@@ -70,7 +70,7 @@ struct NpmPacketBatchProcessStatus {
 NpmPacketBatchProcessStatus ProcessNpmOfflinePacketBatch(
     const NpmObservationDomainLookup& domain_map, const NpmPacketBatchView& batch, NpmSessionTable& sessions,
     packet::IPacketFamilyProtocolIdentifier& identifier, const std::vector<INpmAnalysisModule*>& modules,
-    INpmResultWriter& writer, NpmSessionSnapshotBatch* ended_events, const IFlowLabelMatcherV1* matcher = nullptr,
+    INpmResultWriter& writer, NpmSessionSnapshotBatch* ended_events, const IFlowLabelMatcher* matcher = nullptr,
     const std::vector<NpmProtocolModuleAdapter*>& protocol_modules = {}, NpmTcpStreamProvider* streams = nullptr,
     bool advance_offline_progress = true);
 

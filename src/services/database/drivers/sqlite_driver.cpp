@@ -19,7 +19,7 @@ namespace flowsql {
 namespace database {
 namespace {
 
-int BindSqliteParameters(sqlite3_stmt* statement, const DatabaseParameterV1* parameters, size_t parameter_count,
+int BindSqliteParameters(sqlite3_stmt* statement, const DatabaseParameter* parameters, size_t parameter_count,
                          std::string* error) {
     if (parameter_count > static_cast<size_t>(std::numeric_limits<int>::max())) {
         *error = "prepared command parameter count exceeds SQLite limit";
@@ -34,22 +34,22 @@ int BindSqliteParameters(sqlite3_stmt* statement, const DatabaseParameterV1* par
         const int position = static_cast<int>(index + 1);
         int rc = SQLITE_MISUSE;
         switch (parameter.kind) {
-            case DatabaseParameterKindV1::kNull:
+            case DatabaseParameterKind::kNull:
                 rc = sqlite3_bind_null(statement, position);
                 break;
-            case DatabaseParameterKindV1::kInt64:
+            case DatabaseParameterKind::kInt64:
                 rc = sqlite3_bind_int64(statement, position, parameter.int64_value);
                 break;
-            case DatabaseParameterKindV1::kUInt64: {
+            case DatabaseParameterKind::kUInt64: {
                 const std::string value = std::to_string(parameter.uint64_value);
                 rc = sqlite3_bind_text(statement, position, value.c_str(), static_cast<int>(value.size()),
                                        SQLITE_TRANSIENT);
                 break;
             }
-            case DatabaseParameterKindV1::kDouble:
+            case DatabaseParameterKind::kDouble:
                 rc = sqlite3_bind_double(statement, position, parameter.double_value);
                 break;
-            case DatabaseParameterKindV1::kString:
+            case DatabaseParameterKind::kString:
                 if ((!parameter.data && parameter.size != 0) ||
                     parameter.size > static_cast<size_t>(std::numeric_limits<int>::max())) {
                     rc = SQLITE_MISUSE;
@@ -59,7 +59,7 @@ int BindSqliteParameters(sqlite3_stmt* statement, const DatabaseParameterV1* par
                                            SQLITE_TRANSIENT);
                 }
                 break;
-            case DatabaseParameterKindV1::kBlob:
+            case DatabaseParameterKind::kBlob:
                 if ((!parameter.data && parameter.size != 0) ||
                     parameter.size > static_cast<size_t>(std::numeric_limits<int>::max())) {
                     rc = SQLITE_MISUSE;
@@ -181,7 +181,7 @@ SqliteSession::~SqliteSession() {
     }
 }
 
-int SqliteSession::ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) {
+int SqliteSession::ExecutePrepared(const char* sql, const DatabaseParameter* parameters, size_t parameter_count) {
     last_error_.clear();
     if (!sql || (parameter_count != 0 && !parameters)) {
         last_error_ = "invalid prepared command";
@@ -208,7 +208,7 @@ int SqliteSession::ExecutePrepared(const char* sql, const DatabaseParameterV1* p
     return changed;
 }
 
-int SqliteSession::ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters,
+int SqliteSession::ExecutePreparedBatch(const char* sql, const DatabaseParameter* parameters,
                                         size_t parameters_per_execution, size_t execution_count) {
     last_error_.clear();
     if (!sql || parameters_per_execution > static_cast<size_t>(std::numeric_limits<int>::max()) ||
@@ -387,7 +387,7 @@ class SqliteBatchWriter : public RelationBatchWriterBase {
     int InsertBatch(std::shared_ptr<arrow::RecordBatch> batch) override {
         if (batch->num_rows() == 0) return 0;
 
-        // SQLite 逐行 INSERT（不支持多值 INSERT 的旧版本兼容）
+        // SQLite 逐行写入当前批次，BINARY 使用十六进制字面量
         // 字符串转义：' → ''（SQL 标准），BINARY 用 X'...' 十六进制字面量
         auto quote_string = [](const std::string& s) -> std::string {
             std::string r = "'";
@@ -569,7 +569,7 @@ void SqliteDriver::ReturnToPool(sqlite3* db) {
     }
 }
 
-int SqliteSession::BeginSnapshot(const DatabaseSnapshotOptionsV1& options) {
+int SqliteSession::BeginSnapshot(const DatabaseSnapshotOptions& options) {
     snapshot_timeout_ms_ = options.operation_timeout_ms;
     sqlite3_busy_timeout(conn_, snapshot_timeout_ms_);
     if (sqlite3_exec(conn_, "PRAGMA query_only=ON; BEGIN", nullptr, nullptr, nullptr) != SQLITE_OK) {
@@ -585,8 +585,8 @@ void SqliteSession::CancelSnapshot() {
     sqlite3_interrupt(conn_);
 }
 
-int SqliteSession::Query(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count,
-                         uint32_t max_rows, uint64_t max_bytes, ExplorationResultV1* output) {
+int SqliteSession::Query(const char* sql, const DatabaseParameter* parameters, size_t parameter_count,
+                         uint32_t max_rows, uint64_t max_bytes, ExplorationResult* output) {
     *output = {};
     last_error_.clear();
     if (snapshot_cancelled_) {
@@ -626,7 +626,7 @@ int SqliteSession::Query(const char* sql, const DatabaseParameterV1* parameters,
         last_error_ = snapshot_cancelled_ ? "CANCELLED" : (progress.timeout ? "TIMEOUT" : "DATABASE_ERROR");
         return -1;
     }
-    ExplorationResultV1 result;
+    ExplorationResult result;
     for (int i = 0; i < sqlite3_column_count(raw); ++i) {
         const char* native = sqlite3_column_decltype(raw, i);
         result.columns.push_back({sqlite3_column_name(raw, i), native ? native : ""});
@@ -638,7 +638,7 @@ int SqliteSession::Query(const char* sql, const DatabaseParameterV1* parameters,
             last_error_ = "RESULT_LIMIT";
             return -1;
         }
-        std::vector<ExplorationValueV1> row;
+        std::vector<ExplorationValue> row;
         for (int i = 0; i < sqlite3_column_count(raw); ++i) {
             const int type = sqlite3_column_type(raw, i);
             const auto length = (type == SQLITE_TEXT || type == SQLITE_BLOB) ? sqlite3_column_bytes(raw, i) : 0;
@@ -669,7 +669,7 @@ int SqliteSession::Query(const char* sql, const DatabaseParameterV1* parameters,
     *output = std::move(result);
     return 0;
 }
-int SqliteSession::SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+int SqliteSession::SnapshotPage(const char* sql, const DatabaseParameter* parameters, size_t count,
                                 std::shared_ptr<arrow::Schema> expected, uint32_t max_rows, uint64_t max_bytes,
                                 std::shared_ptr<arrow::RecordBatch>* output) {
     output->reset();

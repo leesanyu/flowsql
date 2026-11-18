@@ -10,9 +10,9 @@ struct BlockInvocation {
     IQuerier* querier = nullptr;
     Invocation invocation;
     dataset::Json parameters{rapidjson::kObjectType}, inputs{rapidjson::kArrayType}, context{rapidjson::kObjectType};
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     std::shared_ptr<BlockInvocation> previous;
-    int Check(IBlockTransformTaskV1* task, IOperatorConfigAdapterV1* fallback,
+    int Check(IBlockTransformTask* task, IOperatorConfigAdapter* fallback,
               const std::shared_ptr<arrow::Schema>& schema) {
         using namespace dataset;
         error = {};
@@ -22,10 +22,9 @@ struct BlockInvocation {
         Json execution;
         execution.CopyFrom(context, execution.GetAllocator());
         if (invocation.component.contract_state == "declared" && actual.Empty()) {
-            auto* service = querier
-                                ? static_cast<IOperatorDataContractV1*>(querier->First(IID_OPERATOR_DATA_CONTRACT_V1))
-                                : nullptr;
-            OperatorContractSnapshotV1 definition;
+            auto* service =
+                querier ? static_cast<IOperatorDataContract*>(querier->First(IID_OPERATOR_DATA_CONTRACT)) : nullptr;
+            OperatorContractSnapshot definition;
             if (!service) return Fail(&error, "UNAVAILABLE", "declared operator contract service unavailable");
             if (service->Resolve(invocation.component.contract_ref.c_str(), &definition, &error)) return -1;
             Json document;
@@ -52,7 +51,7 @@ struct BlockInvocation {
                 Set(execution, "input_shapes", std::move(shapes), execution.GetAllocator());
             }
         }
-        auto* adapter = dynamic_cast<IOperatorConfigAdapterV1*>(task);
+        auto* adapter = dynamic_cast<IOperatorConfigAdapter*>(task);
         Json previous;
         if (invocation.resolved.IsObject() && invocation.resolved.HasMember("inputs"))
             previous.CopyFrom(invocation.resolved["inputs"], previous.GetAllocator());
@@ -92,9 +91,9 @@ struct BlockInvocation {
 
 // Checks the actual stage input before Open and freezes task-resolved runtime
 // facts after Open; ProcessBlock/time/flush use that same exclusive task.
-class CheckedBlockTask final : public IBlockTransformTaskV1, public IBlockTransformTimeDrivenTaskV1 {
+class CheckedBlockTask final : public IBlockTransformTask, public IBlockTransformTimeDrivenTask {
  public:
-    CheckedBlockTask(IBlockTransformTaskV1* task, IOperatorConfigAdapterV1* fallback,
+    CheckedBlockTask(IBlockTransformTask* task, IOperatorConfigAdapter* fallback,
                      std::shared_ptr<BlockInvocation> state)
         : task_(task), fallback_(fallback), state_(std::move(state)) {}
     int Open(std::shared_ptr<arrow::Schema> input, std::shared_ptr<arrow::Schema>* output) override {
@@ -102,17 +101,16 @@ class CheckedBlockTask final : public IBlockTransformTaskV1, public IBlockTransf
             if (output) output->reset();
             return EINVAL;
         }
-        if (auto* publisher = dynamic_cast<IOperatorOutputPublicationV1*>(task_)) {
+        if (auto* publisher = dynamic_cast<IOperatorOutputPublication*>(task_)) {
             publisher->SetOutputPublicationObserver([state = state_, task = task_] {
                 dataset::Json actual;
-                if (ProducerOutputs(dynamic_cast<IOperatorOutputObservationV1*>(task), &actual, &state->error))
-                    return -1;
+                if (ProducerOutputs(dynamic_cast<IOperatorOutputObservation*>(task), &actual, &state->error)) return -1;
                 return Observe(state->querier, &state->invocation, actual, "partial", &state->error);
             });
         }
         const auto rc = task_->Open(input, output);
         if (rc) return rc;
-        if (dynamic_cast<IOperatorConfigAdapterV1*>(task_) && state_->Check(task_, fallback_, input)) {
+        if (dynamic_cast<IOperatorConfigAdapter*>(task_) && state_->Check(task_, fallback_, input)) {
             task_->Cancel();
             return EINVAL;
         }
@@ -123,28 +121,28 @@ class CheckedBlockTask final : public IBlockTransformTaskV1, public IBlockTransf
         return 0;
     }
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t time,
-                     std::vector<BlockTransformOutputV1>* output) override {
+                     std::vector<BlockTransformOutput>* output) override {
         const auto rc = task_->ProcessBlock(input, time, output);
         if (rc < 0) return rc;
         return Validate(output) ? EINVAL : rc;
     }
-    int Flush(std::vector<BlockTransformOutputV1>* output) override {
+    int Flush(std::vector<BlockTransformOutput>* output) override {
         const auto rc = task_->Flush(output);
         if (rc) return rc;
         if (Validate(output)) return EINVAL;
         if (ObservePrimary(state_->querier, &state_->invocation, output_schema_, rows_,
-                           dynamic_cast<IOperatorOutputObservationV1*>(task_), "complete", &state_->error)) {
+                           dynamic_cast<IOperatorOutputObservation*>(task_), "complete", &state_->error)) {
             output->clear();
             return EINVAL;
         }
         return 0;
     }
-    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override {
-        auto* time = dynamic_cast<IBlockTransformTimeDrivenTaskV1*>(task_);
+    int GetTimeDriveState(BlockTransformTimeDriveState* state) override {
+        auto* time = dynamic_cast<IBlockTransformTimeDrivenTask*>(task_);
         return time ? time->GetTimeDriveState(state) : ENOTSUP;
     }
-    int OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* output) override {
-        auto* time = dynamic_cast<IBlockTransformTimeDrivenTaskV1*>(task_);
+    int OnTime(const BlockTransformTimeEvent& event, std::vector<BlockTransformOutput>* output) override {
+        auto* time = dynamic_cast<IBlockTransformTimeDrivenTask*>(task_);
         if (!time) return ENOTSUP;
         const auto rc = time->OnTime(event, output);
         return rc < 0 ? rc : Validate(output) ? EINVAL : rc;
@@ -155,12 +153,12 @@ class CheckedBlockTask final : public IBlockTransformTaskV1, public IBlockTransf
     }
 
  private:
-    int Validate(std::vector<BlockTransformOutputV1>* output) {
+    int Validate(std::vector<BlockTransformOutput>* output) {
         if (state_->invocation.component.contract_state != "declared") return 0;
         for (const auto& item : *output) {
             if (!item.batch || !output_schema_ || !item.batch->schema()->Equals(*output_schema_)) {
                 dataset::Json unobserved(rapidjson::kArrayType);
-                DataSemanticsErrorV1 ignored;
+                DataSemanticsError ignored;
                 (void)Observe(state_->querier, &state_->invocation, unobserved, "failed", &ignored);
                 output->clear();
                 return dataset::Fail(&state_->error, "OUTPUT_SCHEMA_MISMATCH", "block output schema changed");
@@ -171,8 +169,8 @@ class CheckedBlockTask final : public IBlockTransformTaskV1, public IBlockTransf
     }
     std::shared_ptr<arrow::Schema> output_schema_;
     int64_t rows_ = 0;
-    IBlockTransformTaskV1* task_;
-    IOperatorConfigAdapterV1* fallback_;
+    IBlockTransformTask* task_;
+    IOperatorConfigAdapter* fallback_;
     std::shared_ptr<BlockInvocation> state_;
 };
 }  // namespace flowsql::contracts

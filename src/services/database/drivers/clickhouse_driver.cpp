@@ -152,27 +152,27 @@ namespace {
 
 struct ClickHouseParameterizedSql {
     std::string sql;
-    std::vector<DatabaseParameterV1> parameters;
+    std::vector<DatabaseParameter> parameters;
 };
 
-const char* ClickHouseParameterType(DatabaseParameterKindV1 kind) {
+const char* ClickHouseParameterType(DatabaseParameterKind kind) {
     switch (kind) {
-        case DatabaseParameterKindV1::kInt64:
+        case DatabaseParameterKind::kInt64:
             return "Int64";
-        case DatabaseParameterKindV1::kUInt64:
+        case DatabaseParameterKind::kUInt64:
             return "UInt64";
-        case DatabaseParameterKindV1::kDouble:
+        case DatabaseParameterKind::kDouble:
             return "Float64";
-        case DatabaseParameterKindV1::kString:
-        case DatabaseParameterKindV1::kBlob:
+        case DatabaseParameterKind::kString:
+        case DatabaseParameterKind::kBlob:
             return "String";
-        case DatabaseParameterKindV1::kNull:
+        case DatabaseParameterKind::kNull:
             return nullptr;
     }
     return nullptr;
 }
 
-bool RewriteClickHouseParameters(std::string_view sql, const DatabaseParameterV1* parameters, size_t parameter_count,
+bool RewriteClickHouseParameters(std::string_view sql, const DatabaseParameter* parameters, size_t parameter_count,
                                  ClickHouseParameterizedSql* output) {
     bool single_quoted = false;
     bool double_quoted = false;
@@ -198,7 +198,7 @@ bool RewriteClickHouseParameters(std::string_view sql, const DatabaseParameterV1
         }
         if (parameter >= parameter_count) return false;
         const auto& value = parameters[parameter++];
-        if (value.kind == DatabaseParameterKindV1::kNull) {
+        if (value.kind == DatabaseParameterKind::kNull) {
             output->sql += "NULL";
             continue;
         }
@@ -209,19 +209,19 @@ bool RewriteClickHouseParameters(std::string_view sql, const DatabaseParameterV1
     return parameter == parameter_count && !single_quoted && !double_quoted && !backtick_quoted;
 }
 
-std::string ClickHouseParameterValue(const DatabaseParameterV1& parameter) {
+std::string ClickHouseParameterValue(const DatabaseParameter& parameter) {
     switch (parameter.kind) {
-        case DatabaseParameterKindV1::kInt64:
+        case DatabaseParameterKind::kInt64:
             return std::to_string(parameter.int64_value);
-        case DatabaseParameterKindV1::kUInt64:
+        case DatabaseParameterKind::kUInt64:
             return std::to_string(parameter.uint64_value);
-        case DatabaseParameterKindV1::kDouble: {
+        case DatabaseParameterKind::kDouble: {
             std::ostringstream text;
             text << std::setprecision(std::numeric_limits<double>::max_digits10) << parameter.double_value;
             return text.str();
         }
-        case DatabaseParameterKindV1::kString:
-        case DatabaseParameterKindV1::kBlob: {
+        case DatabaseParameterKind::kString:
+        case DatabaseParameterKind::kBlob: {
             // ClickHouse parses HTTP String parameters in escaped-text format.
             // Escape transport control bytes; the prepared value remains a borrowed binary span.
             const auto bytes =
@@ -240,7 +240,7 @@ std::string ClickHouseParameterValue(const DatabaseParameterV1& parameter) {
             }
             return escaped;
         }
-        case DatabaseParameterKindV1::kNull:
+        case DatabaseParameterKind::kNull:
             return {};
     }
     return {};
@@ -248,7 +248,7 @@ std::string ClickHouseParameterValue(const DatabaseParameterV1& parameter) {
 
 }  // namespace
 
-int ClickHouseSession::ExecuteParameterizedHttp(const std::string& sql, const DatabaseParameterV1* parameters,
+int ClickHouseSession::ExecuteParameterizedHttp(const std::string& sql, const DatabaseParameter* parameters,
                                                 size_t parameter_count) {
     // HTTP query parameters must encode their entire byte span, including embedded NUL.
     // httplib::encode_url stops at NUL and leaves '&', '%' and '=' unescaped.
@@ -284,7 +284,7 @@ int ClickHouseSession::ExecuteParameterizedHttp(const std::string& sql, const Da
     return 0;
 }
 
-int ClickHouseSession::ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) {
+int ClickHouseSession::ExecutePrepared(const char* sql, const DatabaseParameter* parameters, size_t parameter_count) {
     last_error_.clear();
     if (!sql || (parameter_count != 0 && !parameters)) {
         last_error_ = "invalid prepared command";
@@ -298,7 +298,7 @@ int ClickHouseSession::ExecutePrepared(const char* sql, const DatabaseParameterV
     return ExecuteParameterizedHttp(rewritten.sql, rewritten.parameters.data(), rewritten.parameters.size());
 }
 
-int ClickHouseSession::ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters,
+int ClickHouseSession::ExecutePreparedBatch(const char* sql, const DatabaseParameter* parameters,
                                             size_t parameters_per_execution, size_t execution_count) {
     last_error_.clear();
     if (!sql || (execution_count != 0 && (!parameters || parameters_per_execution == 0)) ||
@@ -513,7 +513,7 @@ int ClickHouseSession::SerializeArrowStream(const std::vector<std::shared_ptr<ar
     return 0;
 }
 
-int ClickHouseSession::BeginSnapshot(const DatabaseSnapshotOptionsV1& options) {
+int ClickHouseSession::BeginSnapshot(const DatabaseSnapshotOptions& options) {
     if (options.consistent_transaction) {
         last_error_ = "ClickHouse requires immutable_range or completed NPM run";
         return -1;
@@ -530,7 +530,7 @@ void ClickHouseSession::CancelSnapshot() {
     snapshot_cancelled_ = true;
     if (snapshot_client_) snapshot_client_->stop();
 }
-int ClickHouseSession::SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+int ClickHouseSession::SnapshotPage(const char* sql, const DatabaseParameter* parameters, size_t count,
                                     std::shared_ptr<arrow::Schema> expected, uint32_t max_rows, uint64_t max_bytes,
                                     std::shared_ptr<arrow::RecordBatch>* output) {
     output->reset();
@@ -639,8 +639,8 @@ void ClickHouseSession::Cancel() {
     KillExplorationQuery();
     if (snapshot_client_) snapshot_client_->stop();
 }
-int ClickHouseSession::Query(const char* sql, const DatabaseParameterV1* parameters, size_t count, uint32_t max_rows,
-                             uint64_t max_bytes, ExplorationResultV1* output) {
+int ClickHouseSession::Query(const char* sql, const DatabaseParameter* parameters, size_t count, uint32_t max_rows,
+                             uint64_t max_bytes, ExplorationResult* output) {
     *output = {};
     last_error_.clear();
     if (snapshot_cancelled_) {
@@ -729,7 +729,7 @@ int ClickHouseSession::Query(const char* sql, const DatabaseParameterV1* paramet
         last_error_ = "DATABASE_ERROR";
         return -1;
     }
-    ExplorationResultV1 result;
+    ExplorationResult result;
     std::vector<std::string> types;
     for (const auto& column : document["meta"].GetArray()) {
         if (!column.IsObject() || !column.HasMember("name") || !column["name"].IsString() ||
@@ -749,7 +749,7 @@ int ClickHouseSession::Query(const char* sql, const DatabaseParameterV1* paramet
             last_error_ = "RESULT_LIMIT";
             return -1;
         }
-        std::vector<ExplorationValueV1> row;
+        std::vector<ExplorationValue> row;
         for (size_t c = 0; c < types.size(); ++c) {
             const auto& cell = values[c];
             const auto& type = types[c];

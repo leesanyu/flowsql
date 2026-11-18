@@ -15,10 +15,10 @@ namespace flowsql::channels::netadapter {
 class NetAdapterPlugin final : public IPlugin,
                                public IBlockStreamFactory,
                                public IBlockStreamManager,
-                               public IBlockStreamChannelDescriptorV1,
-                               public IBlockStreamReaderFactoryV1,
-                               public IFilterDomainResolverV1,
-                               public IFilterPushdownV1 {
+                               public IBlockStreamChannelDescriptor,
+                               public IBlockStreamReaderFactory,
+                               public IFilterDomainResolver,
+                               public IFilterPushdown {
  public:
     int Option(const char* option) override;
     int Load(IQuerier* querier) override;
@@ -33,17 +33,17 @@ class NetAdapterPlugin final : public IPlugin,
     void QueryChannels(
         std::function<void(const std::string&, const std::string&, const std::string&, const std::string&)> callback)
         override;
-    void DescribeChannelTypes(std::function<void(const BlockStreamChannelTypeDescriptorV1&)> callback) const override;
-    int CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** reader) override;
+    void DescribeChannelTypes(std::function<void(const BlockStreamChannelTypeDescriptor&)> callback) const override;
+    int CreateReader(const BlockStreamReaderConfig& config, IBlockStreamChannel** reader) override;
     void ReleaseReader(IBlockStreamChannel* reader) override;
-    int Resolve(const FilterDomainResolveRequestV1& request, FilterDomainResolveResultV1* result) const override;
-    int EvaluatePushdown(const FilterPushdownRequestV1& request, FilterPushdownResultV1* result) const override;
+    int Resolve(const FilterDomainResolveRequest& request, FilterDomainResolveResult* result) const override;
+    int EvaluatePushdown(const FilterPushdownRequest& request, FilterPushdownResult* result) const override;
 
  private:
     struct Channel;
     struct Lease;
     int Save(const std::string& name, const std::string& option, uint64_t domain, bool remove);
-    ICaptureBackendProviderV1* Provider(const std::string& backend) const;
+    ICaptureBackendProvider* Provider(const std::string& backend) const;
     std::string path_ = "./netadapter.db";
     sqlite3* db_ = nullptr;
     IQuerier* querier_ = nullptr;

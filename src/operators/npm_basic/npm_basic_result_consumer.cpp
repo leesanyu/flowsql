@@ -93,15 +93,8 @@ bool IsEntityId(std::string_view value) {
 }
 
 bool IsManagedDataTable(std::string_view value) {
-    if (value.size() < 11 || value.size() > 80 || value.substr(0, 4) != "npm_") return false;
-    const size_t version = value.rfind("_v");
-    if (version == std::string_view::npos || value.substr(value.size() - 5) != "_data" ||
-        !IsEntityId(value.substr(4, version - 4))) {
-        return false;
-    }
-    const auto digits = value.substr(version + 2, value.size() - version - 7);
-    return !digits.empty() && std::all_of(digits.begin(), digits.end(),
-                                          [](char character) { return character >= '0' && character <= '9'; });
+    return value.size() >= 10 && value.substr(0, 4) == "npm_" && value.substr(value.size() - 5) == "_data" &&
+           IsEntityId(value.substr(4, value.size() - 9));
 }
 
 std::string NowExpression(DatabaseBackend backend) {
@@ -255,46 +248,46 @@ std::string DatabaseType(DatabaseBackend backend, const arrow::DataType& type, b
     return mapped;
 }
 
-DatabaseParameterV1 StringParameter(std::string_view value) {
-    DatabaseParameterV1 parameter;
-    parameter.kind = DatabaseParameterKindV1::kString;
+DatabaseParameter StringParameter(std::string_view value) {
+    DatabaseParameter parameter;
+    parameter.kind = DatabaseParameterKind::kString;
     parameter.data = value.data();
     parameter.size = value.size();
     return parameter;
 }
 
-DatabaseParameterV1 IntParameter(int64_t value) {
-    DatabaseParameterV1 parameter;
-    parameter.kind = DatabaseParameterKindV1::kInt64;
+DatabaseParameter IntParameter(int64_t value) {
+    DatabaseParameter parameter;
+    parameter.kind = DatabaseParameterKind::kInt64;
     parameter.int64_value = value;
     return parameter;
 }
 
-DatabaseParameterV1 UIntParameter(uint64_t value) {
-    DatabaseParameterV1 parameter;
-    parameter.kind = DatabaseParameterKindV1::kUInt64;
+DatabaseParameter UIntParameter(uint64_t value) {
+    DatabaseParameter parameter;
+    parameter.kind = DatabaseParameterKind::kUInt64;
     parameter.uint64_value = value;
     return parameter;
 }
 
-DatabaseParameterV1 DoubleParameter(double value) {
-    DatabaseParameterV1 parameter;
-    parameter.kind = DatabaseParameterKindV1::kDouble;
+DatabaseParameter DoubleParameter(double value) {
+    DatabaseParameter parameter;
+    parameter.kind = DatabaseParameterKind::kDouble;
     parameter.double_value = value;
     return parameter;
 }
 
-DatabaseParameterV1 NullParameter() { return {}; }
+DatabaseParameter NullParameter() { return {}; }
 
-DatabaseParameterV1 BlobParameter(const void* data, size_t size) {
-    DatabaseParameterV1 parameter;
-    parameter.kind = DatabaseParameterKindV1::kBlob;
+DatabaseParameter BlobParameter(const void* data, size_t size) {
+    DatabaseParameter parameter;
+    parameter.kind = DatabaseParameterKind::kBlob;
     parameter.data = data;
     parameter.size = size;
     return parameter;
 }
 
-bool AppendArrayValue(const arrow::Array& array, int64_t row, DatabaseParameterV1* parameter) {
+bool AppendArrayValue(const arrow::Array& array, int64_t row, DatabaseParameter* parameter) {
     if (array.IsNull(row)) {
         *parameter = NullParameter();
         return true;
@@ -372,7 +365,7 @@ class PendingOutputLease final {
 };
 
 struct EntityStorage {
-    NpmEntityDescriptorV1 descriptor;
+    NpmEntityDescriptor descriptor;
     std::string canonical;
     std::string fingerprint;
     std::string data_table;
@@ -865,10 +858,10 @@ std::string ObjectTypeQuery(DatabaseBackend backend, std::string_view name) {
            std::string(name) + "'";
 }
 
-class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, public INpmFamilyProgressConsumer {
+class NpmDatabaseResultConsumer final : public INpmManagedResultConsumer, public INpmFamilyProgressConsumer {
  public:
-    NpmDatabaseResultConsumer(IDatabaseChannel* channel, IDatabasePreparedCommandV1* commands, DatabaseBackend backend,
-                              NpmResultContextV1 context, std::vector<EntityStorage> entities,
+    NpmDatabaseResultConsumer(IDatabaseChannel* channel, IDatabasePreparedCommand* commands, DatabaseBackend backend,
+                              NpmResultContext context, std::vector<EntityStorage> entities,
                               std::shared_ptr<INpmTaskBudget> budget)
         : channel_(channel),
           commands_(commands),
@@ -880,14 +873,14 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
 
     ~NpmDatabaseResultConsumer() override {
         Cancel();
-        NpmResultFailureV1 failure;
+        NpmResultFailure failure;
         failure.code = ECANCELED;
         failure.stage = "open";
         failure.message = "managed result consumer destroyed before terminal state";
         (void)FailRun(failure);
     }
 
-    int Consume(const NpmResultContextV1& context, const NpmEntityDescriptorV1& entity,
+    int Consume(const NpmResultContext& context, const NpmEntityDescriptor& entity,
                 const arrow::RecordBatch& rows) override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (terminal_ || publication_failed_) return EPIPE;
@@ -959,7 +952,7 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
                 columns.insert(columns.end(), rows.columns().begin(), rows.columns().end());
                 auto batch =
                     arrow::RecordBatch::Make(arrow::schema(std::move(fields)), rows.num_rows(), std::move(columns));
-                auto* writer = dynamic_cast<IDatabaseArrowWriteV1*>(channel_);
+                auto* writer = dynamic_cast<IDatabaseArrowWrite*>(channel_);
                 const int rc = writer->WriteArrowBatchesWithPool(found->data_table.c_str(), {batch}, arrow_pool_.get());
                 if (rc != 0) {
                     publication_failed_ = true;
@@ -978,18 +971,18 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
             return EOVERFLOW;
         }
         const size_t parameter_count = static_cast<size_t>(rows.num_rows()) * parameters_per_row;
-        if (parameter_count > std::numeric_limits<uint64_t>::max() / sizeof(DatabaseParameterV1)) return EOVERFLOW;
-        PendingOutputLease lease(budget_, static_cast<uint64_t>(parameter_count * sizeof(DatabaseParameterV1)));
+        if (parameter_count > std::numeric_limits<uint64_t>::max() / sizeof(DatabaseParameter)) return EOVERFLOW;
+        PendingOutputLease lease(budget_, static_cast<uint64_t>(parameter_count * sizeof(DatabaseParameter)));
         if (!lease.Reserve()) return ENOSPC;
 
         try {
-            std::vector<DatabaseParameterV1> parameters;
+            std::vector<DatabaseParameter> parameters;
             parameters.reserve(parameter_count);
             for (int64_t row = 0; row < rows.num_rows(); ++row) {
                 parameters.push_back(StringParameter(context_.run_id));
                 parameters.push_back(StringParameter(context_.task_id));
                 for (const auto& column : rows.columns()) {
-                    DatabaseParameterV1 parameter;
+                    DatabaseParameter parameter;
                     if (!AppendArrayValue(*column, row, &parameter)) return ENOTSUP;
                     parameters.push_back(parameter);
                 }
@@ -1031,18 +1024,18 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
         const NpmFamilyPublicationProof proof{true, request.closed_before_ns, true, true, false};
         if (!ValidateNpmFamilyPublication(basic->publication, request, proof).ok()) return EINVAL;
         const int64_t next = previous ? previous->committed_position + 1 : 1;
-        const DatabaseParameterV1 parameters[] = {StringParameter(context_.run_id),
-                                                  StringParameter(request.key.entity_id),
-                                                  StringParameter(basic->history_relation),
-                                                  StringParameter(context_.run_id),
-                                                  IntParameter(next),
-                                                  IntParameter(progress.period_ns),
-                                                  IntParameter(progress.closed_before_ns)};
+        const DatabaseParameter parameters[] = {StringParameter(context_.run_id),
+                                                StringParameter(request.key.entity_id),
+                                                StringParameter(basic->history_relation),
+                                                StringParameter(context_.run_id),
+                                                IntParameter(next),
+                                                IntParameter(progress.period_ns),
+                                                IntParameter(progress.closed_before_ns)};
         PendingOutputLease lease(budget_, sizeof(parameters));
         if (!lease.Reserve()) return ENOSPC;
         const int rc = commands_->ExecutePrepared(
             "INSERT INTO "
-            "npm_result_progress_v1(run_id,entity_id,relation_name,epoch,position,period_ns,closed_before_ns) "
+            "npm_result_progress(run_id,entity_id,relation_name,epoch,position,period_ns,closed_before_ns) "
             "VALUES(?,?,?,?,?,?,?)",
             parameters, 7);
         if (rc < 0 || (backend_ != DatabaseBackend::kClickHouse && rc != 1)) {
@@ -1070,8 +1063,8 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
         if (publication_failed_) return EPIPE;
         const std::string status = "completed";
         const int64_t completed_at = NowNs();
-        const DatabaseParameterV1 parameters[] = {StringParameter(status), IntParameter(completed_at),
-                                                  StringParameter(context_.run_id)};
+        const DatabaseParameter parameters[] = {StringParameter(status), IntParameter(completed_at),
+                                                StringParameter(context_.run_id)};
         const int rc =
             UpdateRun("status=?, completed_at_ns=?, metadata_status='known'", "status='writing'", parameters, 3);
         if (rc < 0 || (backend_ != DatabaseBackend::kClickHouse && rc != 1)) {
@@ -1087,14 +1080,14 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
 
     void Cancel() noexcept override { cancelled_.store(true, std::memory_order_release); }
 
-    int FailRun(const NpmResultFailureV1& failure) override {
+    int FailRun(const NpmResultFailure& failure) override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (terminal_) return terminal_status_ == "completed" ? EALREADY : 0;
         const std::string status = "incomplete";
         const std::string stage = failure.stage ? failure.stage : "unknown";
         const std::string message = failure.message ? failure.message : "managed result run failed";
         const int64_t completed_at = NowNs();
-        const DatabaseParameterV1 parameters[] = {
+        const DatabaseParameter parameters[] = {
             StringParameter(status), IntParameter(completed_at), IntParameter(failure.code),
             StringParameter(stage),  StringParameter(message),   StringParameter(context_.run_id),
         };
@@ -1151,7 +1144,7 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
     }
 
  private:
-    int UpdateRun(std::string_view assignments, std::string_view predicate, const DatabaseParameterV1* parameters,
+    int UpdateRun(std::string_view assignments, std::string_view predicate, const DatabaseParameter* parameters,
                   size_t parameter_count) {
         const std::string prefix = backend_ == DatabaseBackend::kClickHouse ? "ALTER TABLE npm_result_runs UPDATE "
                                                                             : "UPDATE npm_result_runs SET ";
@@ -1162,9 +1155,9 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
     }
 
     IDatabaseChannel* channel_ = nullptr;
-    IDatabasePreparedCommandV1* commands_ = nullptr;
+    IDatabasePreparedCommand* commands_ = nullptr;
     DatabaseBackend backend_ = DatabaseBackend::kSqlite;
-    NpmResultContextV1 context_;
+    NpmResultContext context_;
     std::vector<EntityStorage> entities_;
     std::shared_ptr<INpmTaskBudget> budget_;
     std::shared_ptr<arrow::MemoryPool> arrow_pool_;
@@ -1177,7 +1170,7 @@ class NpmDatabaseResultConsumer final : public INpmManagedResultConsumerV1, publ
     std::string error_;
 };
 
-class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV1 {
+class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactory {
  public:
     NpmDatabaseResultConsumerFactory(IDatabaseChannel* channel, std::string input_namespace,
                                      std::optional<uint32_t> retention_days)
@@ -1185,9 +1178,8 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
         if (channel_) supported_backend_ = ParseBackend(channel_->Category(), &backend_);
     }
 
-    int Create(const NpmResultContextV1& context, const std::vector<NpmEntityDescriptorV1>& entities,
-               std::shared_ptr<INpmTaskBudget> budget,
-               std::unique_ptr<INpmManagedResultConsumerV1>* consumer) override {
+    int Create(const NpmResultContext& context, const std::vector<NpmEntityDescriptor>& entities,
+               std::shared_ptr<INpmTaskBudget> budget, std::unique_ptr<INpmManagedResultConsumer>* consumer) override {
         std::lock_guard<std::mutex> open_lock(ManagedResultOpenMutex());
         if (!consumer || *consumer || !channel_ || !budget || context.run_id.empty() || context.task_id.empty() ||
             input_namespace_.empty() || !supported_backend_ || !channel_->IsOpened() || !channel_->IsConnected()) {
@@ -1196,17 +1188,17 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
         if (retention_days_ && (*retention_days_ < 1 || *retention_days_ > 3650)) {
             return Fail(EINVAL, "managed result retention_days must be in 1..3650");
         }
-        auto* commands = dynamic_cast<IDatabasePreparedCommandV1*>(channel_);
+        auto* commands = dynamic_cast<IDatabasePreparedCommand*>(channel_);
         if (!commands) return Fail(ENOTSUP, "database channel has no prepared command capability");
-        if (backend_ == DatabaseBackend::kClickHouse && !dynamic_cast<IDatabaseArrowWriteV1*>(channel_)) {
+        if (backend_ == DatabaseBackend::kClickHouse && !dynamic_cast<IDatabaseArrowWrite*>(channel_)) {
             return Fail(ENOTSUP, "ClickHouse channel has no budgeted Arrow write capability");
         }
         try {
             std::vector<EntityStorage> storage;
             storage.reserve(entities.size());
             for (const auto& entity : entities) {
-                const auto contract = ValidateNpmEntityDescriptorV1(entity);
-                if (contract.error != NpmProtocolContractErrorV1::kNone || !IsEntityId(entity.entity_id)) {
+                const auto contract = ValidateNpmEntityDescriptor(entity);
+                if (contract.error != NpmProtocolContractError::kNone || !IsEntityId(entity.entity_id)) {
                     return Fail(EINVAL, "invalid managed result entity: " + entity.entity_id);
                 }
                 for (const auto& field : entity.schema->fields()) {
@@ -1221,22 +1213,21 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
                 next.descriptor = entity;
                 next.canonical = SchemaCanonical(*entity.schema);
                 next.fingerprint = Fingerprint(next.canonical);
-                const std::string suffix = entity.entity_id + "_v" + std::to_string(entity.schema_version);
-                next.data_table = "npm_" + suffix + "_data";
-                next.history_relation =
-                    "npm_" + entity.entity_id + "_history_v" + std::to_string(entity.schema_version);
-                next.latest_relation = "npm_" + entity.entity_id + "_latest_v" + std::to_string(entity.schema_version);
-                next.final_relation = "npm_" + entity.entity_id + "_final_v" + std::to_string(entity.schema_version);
+                const std::string prefix = "npm_" + entity.entity_id;
+                next.data_table = prefix + "_data";
+                next.history_relation = prefix + "_history";
+                next.latest_relation = prefix + "_latest";
+                next.final_relation = prefix + "_final";
                 storage.push_back(std::move(next));
             }
             if (CreateCatalog(commands) != 0) return last_code_;
             const std::string progress_ddl =
                 backend_ == DatabaseBackend::kClickHouse
-                    ? "CREATE TABLE IF NOT EXISTS npm_result_progress_v1(run_id String,entity_id String,relation_name "
+                    ? "CREATE TABLE IF NOT EXISTS npm_result_progress(run_id String,entity_id String,relation_name "
                       "String,"
                       "epoch String,position Int64,period_ns Int64,closed_before_ns Int64) ENGINE=MergeTree "
                       "ORDER BY (run_id,entity_id,position)"
-                    : "CREATE TABLE IF NOT EXISTS npm_result_progress_v1(run_id VARCHAR(128) NOT NULL,"
+                    : "CREATE TABLE IF NOT EXISTS npm_result_progress(run_id VARCHAR(128) NOT NULL,"
                       "entity_id VARCHAR(128) NOT NULL,relation_name VARCHAR(128) NOT NULL,epoch VARCHAR(128) NOT NULL,"
                       "position BIGINT NOT NULL,period_ns BIGINT NOT NULL,closed_before_ns BIGINT NOT NULL,"
                       "PRIMARY KEY(run_id,entity_id,position))";
@@ -1249,7 +1240,7 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
             const std::string writing = "writing";
             const std::string known = "known";
             const int64_t started_at = NowNs();
-            const DatabaseParameterV1 run_parameters[] = {
+            const DatabaseParameter run_parameters[] = {
                 StringParameter(context.run_id),
                 StringParameter(context.task_id),
                 StringParameter(input_namespace_),
@@ -1290,7 +1281,7 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
         return code;
     }
 
-    int PurgeOneBatch(IDatabasePreparedCommandV1* commands) {
+    int PurgeOneBatch(IDatabasePreparedCommand* commands) {
         StringRows runs;
         std::string error;
         const std::string eligible =
@@ -1323,7 +1314,7 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
             StringRows progress_rows;
             if (ReadStringRows(
                     channel_, backend_,
-                    "SELECT position FROM npm_result_progress_v1 WHERE run_id=" + QuoteLiteral(backend_, run_id) +
+                    "SELECT position FROM npm_result_progress WHERE run_id=" + QuoteLiteral(backend_, run_id) +
                         " ORDER BY position LIMIT " + std::to_string(kPurgeBatchRows),
                     1, &progress_rows, &error) != 0)
                 return EIO;
@@ -1336,10 +1327,10 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
                 }
                 const std::string purge_progress =
                     backend_ == DatabaseBackend::kClickHouse
-                        ? "ALTER TABLE npm_result_progress_v1 DELETE WHERE run_id=? AND position<=? SETTINGS "
+                        ? "ALTER TABLE npm_result_progress DELETE WHERE run_id=? AND position<=? SETTINGS "
                           "mutations_sync=2"
-                        : "DELETE FROM npm_result_progress_v1 WHERE run_id=? AND position<=?";
-                const DatabaseParameterV1 parameters[] = {run_parameter, IntParameter(last_position)};
+                        : "DELETE FROM npm_result_progress WHERE run_id=? AND position<=?";
+                const DatabaseParameter parameters[] = {run_parameter, IntParameter(last_position)};
                 return commands->ExecutePrepared(purge_progress.c_str(), parameters, 2) < 0 ? EIO : 0;
             }
             const std::string sql = backend_ == DatabaseBackend::kClickHouse
@@ -1383,7 +1374,7 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
         if (ReadStringRows(channel_, backend_, probe, 1, &remaining, &error) != 0) return EIO;
         if (remaining.empty()) {
             const auto table_parameter = StringParameter(table);
-            const DatabaseParameterV1 parameters[] = {table_parameter, run_parameter};
+            const DatabaseParameter parameters[] = {table_parameter, run_parameter};
             sql = backend_ == DatabaseBackend::kClickHouse
                       ? "ALTER TABLE npm_result_runs UPDATE purge_cursor=? WHERE run_id=? AND status='purging' "
                         "SETTINGS mutations_sync=2"
@@ -1393,7 +1384,7 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
         return 0;
     }
 
-    int CreateCatalog(IDatabasePreparedCommandV1*) {
+    int CreateCatalog(IDatabasePreparedCommand*) {
         std::string run_ddl =
             "CREATE TABLE IF NOT EXISTS npm_result_runs("
             "run_id String,task_id String,input_namespace String,status String,"
@@ -1477,18 +1468,6 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
             {"latest_relation", "TEXT", true, 0},    {"final_relation", "TEXT", true, 0},
         };
         std::string validation_error;
-        std::vector<SqliteTableColumn> actual_runs;
-        if (ReadSqliteTableColumns(channel_, kRunTable, &actual_runs, &validation_error) != 0) {
-            return Fail(EIO, "failed to inspect managed result catalog: " + validation_error);
-        }
-        if (actual_runs.size() + 1 == run_columns.size()) {
-            auto legacy_columns = run_columns;
-            legacy_columns.pop_back();
-            if (ValidateSqliteTableColumns(channel_, kRunTable, legacy_columns, &validation_error) != 0 ||
-                channel_->ExecuteSql("ALTER TABLE npm_result_runs ADD COLUMN purge_cursor TEXT") < 0) {
-                return Fail(EINVAL, "managed result catalog contract conflict: " + validation_error);
-            }
-        }
         if (ValidateSqliteTableColumns(channel_, kRunTable, run_columns, &validation_error) != 0 ||
             ValidateSqliteTableColumns(channel_, kEntityTable, entity_columns, &validation_error) != 0) {
             return Fail(EINVAL, "managed result catalog contract conflict: " + validation_error);
@@ -1551,23 +1530,6 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
                 if (column.type == "String") column.type = "TEXT";
             }
         }
-        if (runs.size() + 1 == expected_runs.size()) {
-            auto legacy_columns = expected_runs;
-            legacy_columns.pop_back();
-            if (ValidateDatabaseColumns(backend_, kRunTable, runs, legacy_columns, &error) != 0) {
-                return Fail(EINVAL, "managed result catalog contract conflict: " + error);
-            }
-            const std::string type = backend_ == DatabaseBackend::kClickHouse ? "Nullable(String)"
-                                     : backend_ == DatabaseBackend::kMysql    ? "VARCHAR(128)"
-                                                                              : "TEXT";
-            if (channel_->ExecuteSql(("ALTER TABLE npm_result_runs ADD COLUMN purge_cursor " + type).c_str()) < 0) {
-                return Fail(EIO, std::string("failed to extend managed result catalog: ") + channel_->GetLastError());
-            }
-            runs.clear();
-            if (ReadStringRows(channel_, backend_, MetadataColumnsQuery(backend_, kRunTable), 4, &runs, &error) != 0) {
-                return Fail(EIO, "failed to recheck managed result catalog: " + error);
-            }
-        }
         if (ValidateDatabaseColumns(backend_, kRunTable, runs, expected_runs, &error) != 0 ||
             ValidateDatabaseColumns(backend_, kEntityTable, entities, expected_entities, &error) != 0) {
             return Fail(EINVAL, "managed result catalog contract conflict: " + error);
@@ -1575,10 +1537,10 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
         return 0;
     }
 
-    int PrepareEntity(IDatabasePreparedCommandV1* commands, EntityStorage* entity) {
+    int PrepareEntity(IDatabasePreparedCommand* commands, EntityStorage* entity) {
         const std::string semantics =
-            entity->descriptor.revision_semantics == NpmRevisionSemanticsV1::kEvent ? "event" : "cumulative";
-        const DatabaseParameterV1 parameters[] = {
+            entity->descriptor.revision_semantics == NpmRevisionSemantics::kEvent ? "event" : "cumulative";
+        const DatabaseParameter parameters[] = {
             StringParameter(entity->descriptor.entity_id),
             IntParameter(entity->descriptor.schema_version),
             StringParameter(entity->descriptor.module_id),
@@ -1692,8 +1654,8 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
         return 0;
     }
 
-    int PrepareNonSqliteEntityCatalog(IDatabasePreparedCommandV1* commands, const EntityStorage* entity,
-                                      const DatabaseParameterV1* parameters) {
+    int PrepareNonSqliteEntityCatalog(IDatabasePreparedCommand* commands, const EntityStorage* entity,
+                                      const DatabaseParameter* parameters) {
         StringRows rows;
         std::string error;
         const std::string query = backend_ == DatabaseBackend::kClickHouse
@@ -1715,7 +1677,7 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
         if (ReadStringRows(channel_, backend_, query, 12, &rows, &error) != 0) return -1;
         const std::vector<std::string> expected = {
             entity->descriptor.module_id,
-            entity->descriptor.revision_semantics == NpmRevisionSemanticsV1::kEvent ? "event" : "cumulative",
+            entity->descriptor.revision_semantics == NpmRevisionSemantics::kEvent ? "event" : "cumulative",
             entity->descriptor.identity_column,
             entity->descriptor.revision_column,
             entity->descriptor.observed_at_column,
@@ -1818,7 +1780,7 @@ class NpmDatabaseResultConsumerFactory final : public INpmResultConsumerFactoryV
 
 }  // namespace
 
-std::unique_ptr<INpmResultConsumerFactoryV1> MakeNpmDatabaseResultConsumerFactory(
+std::unique_ptr<INpmResultConsumerFactory> MakeNpmDatabaseResultConsumerFactory(
     IDatabaseChannel* channel, std::string input_namespace, std::optional<uint32_t> retention_days) {
     return std::make_unique<NpmDatabaseResultConsumerFactory>(channel, std::move(input_namespace), retention_days);
 }

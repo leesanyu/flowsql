@@ -168,7 +168,7 @@ for generation in range(2):
                                                           "sink": {"encoding":"json", "entity":"alert", "schema_version":1, "record_kind":"upsert", "key_fields":["id"], "revision_field":"revision"}}})
                 post("channels/add", {"name": "packets", "connection_name": "persisted", "role": "both",
                                       "topic": "packets", "consumer_group": "npm", "payload_kind": "packet",
-                                      "payload_options": {"source": {"encoding":"flowsql_packet_v1", "stream_id":"probe",
+                                      "payload_options": {"source": {"encoding":"flowsql_packet", "stream_id":"probe",
                                           "observation_domain_id":"18446744073709551615",
                                           "inputs":[{"source_id":0,"queue_id":2,"source_name":"eth0"}]}, "sink":{}}})
                 test_id = post("tests/start", {"target": "channel", "name": "events", "timeout_ms": 1}, 202)["test_id"]

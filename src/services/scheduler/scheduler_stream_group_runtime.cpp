@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "scheduler_plugin.h"
 
@@ -384,9 +379,6 @@ int SchedulerPlugin::SubmitStreamGroupNodeRuntime(StreamGroupCallbackContext* ct
         if (error_msg) *error_msg = "node " + node_id + " SQL parse failed: " + stmt.error;
         return EINVAL;
     }
-    if (stmt.sources.empty() && !stmt.source.empty()) {
-        stmt.sources.push_back(stmt.source);
-    }
     if (stmt.sources.empty()) {
         if (error_msg) *error_msg = "node " + node_id + " source channel not found";
         return EINVAL;
@@ -394,7 +386,6 @@ int SchedulerPlugin::SubmitStreamGroupNodeRuntime(StreamGroupCallbackContext* ct
 
     auto override_it = ctx->node_source_overrides.find(node_id);
     if (override_it != ctx->node_source_overrides.end()) {
-        stmt.source = override_it->second;
         stmt.sources.clear();
         stmt.sources.push_back(override_it->second);
     }

@@ -476,10 +476,14 @@ int DatabasePlugin::LoadFromYaml() {
         YAML::Node root = YAML::LoadFile(config_file_);
         auto db_channels = root["channels"]["database_channels"];
         if (!db_channels || !db_channels.IsSequence()) return 0;
-        bool migrate_identity = false;
 
         for (const auto& ch : db_channels) {
-            migrate_identity = migrate_identity || !ch["dataset_instance_id"];
+            const auto identity = ch["dataset_instance_id"];
+            if (!identity || !identity.IsScalar() || identity.as<std::string>().empty()) {
+                last_error_ = "persisted database channel requires dataset_instance_id";
+                LOG_ERROR("DatabasePlugin::LoadFromYaml: %s", last_error_.c_str());
+                return -1;
+            }
             std::string config_str;
             for (const auto& kv : ch) {
                 std::string key = kv.first.as<std::string>();
@@ -489,12 +493,11 @@ int DatabasePlugin::LoadFromYaml() {
                 config_str += key + "=" + val;
             }
             if (!config_str.empty()) {
-                ParseSingleConfig(config_str.c_str());
+                if (ParseSingleConfig(config_str.c_str()) != 0) return -1;
             }
         }
         LOG_INFO("DatabasePlugin::LoadFromYaml: loaded %zu channel(s) from %s",
                  configs_.size(), config_file_.c_str());
-        if (migrate_identity && SaveToYaml() != 0) return -1;
     } catch (const std::exception& e) {
         LOG_ERROR("DatabasePlugin::LoadFromYaml: failed to parse %s: %s",
                   config_file_.c_str(), e.what());

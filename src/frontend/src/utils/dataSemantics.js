@@ -6,10 +6,10 @@ export const semanticKeys = {
 }
 const semantics = (keys) => Object.fromEntries(keys.map(k => [k, unknown()]))
 export function blankDocument(kind) {
-  const schema_id = `flowsql.data-${kind}.v1`
+  const schema_id = `flowsql.data-${kind}`
   if (kind === 'standard') return { schema_id, title: '', ...semantics(semanticKeys.standard) }
   if (kind === 'dictionary') return { schema_id, title: '', description: unknown(), entity: semantics(semanticKeys.entity), fields: [] }
-  return { schema_id, object_key: { provider_id: '', object_id: '' }, object_label: '', dictionary_ref: '', field_map: {}, declared_schema: null }
+  return { schema_id, object_key: { provider_id: '', object_id: '' }, object_label: '', dictionary_ref: '', field_map: {}, declared_schema: null, source_snapshot: null, confirmation: { source_revision: '', items: [] } }
 }
 export const blankField = () => ({ field_id: '', name: '', title: '', type: { system: 'opaque', name: '', parameters: {} }, nullable: true, ...semantics(semanticKeys.field) })
 // Validate syntax before rewriting integer tokens; quoted strings are left intact.

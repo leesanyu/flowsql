@@ -116,9 +116,6 @@ std::string BuildRuntimeGraphOperatorName(const SqlStatement& stmt) {
         }
         return out;
     }
-    if (!stmt.op_category.empty() && !stmt.op_name.empty()) {
-        return stmt.op_category + "." + stmt.op_name;
-    }
     return "transfer";
 }
 
@@ -186,9 +183,6 @@ std::string BuildLocalRuntimeGraph(const TaskRecord& rec,
             view.op_name = "operator";
         } else {
             view.sources = stmt.sources;
-            if (view.sources.empty() && !stmt.source.empty()) {
-                view.sources.push_back(stmt.source);
-            }
             if (view.sources.empty()) view.sources = {"unknown.source"};
             for (auto& src : view.sources) {
                 src = NormalizeRuntimeGraphChannelName(src);

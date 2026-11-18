@@ -56,10 +56,10 @@ struct Ring {
         return 0;
     }
 };
-class AfPacketSession final : public ICaptureBackendSessionV1 {
+class AfPacketSession final : public ICaptureBackendSession {
  public:
-    const std::vector<CaptureBackendInputV1>& Inputs() const override { return inputs; }
-    int TryRead(uint32_t index, CapturePacketViewV1* view) override {
+    const std::vector<CaptureBackendInput>& Inputs() const override { return inputs; }
+    int TryRead(uint32_t index, CapturePacketView* view) override {
         if (cancelled) return ECANCELED;
         if (!view || index >= rings.size()) return EINVAL;
         auto& ring = *rings[index];
@@ -113,15 +113,15 @@ class AfPacketSession final : public ICaptureBackendSessionV1 {
         else
             ring.offset += offset;
     }
-    CaptureBacklogV1 Backlog(uint32_t index) const override {
+    CaptureBacklog Backlog(uint32_t index) const override {
         const auto& ring = *rings[index];
-        if (ring.remaining || ring.UserBlock()) return CaptureBacklogV1::kPresent;
+        if (ring.remaining || ring.UserBlock()) return CaptureBacklog::kPresent;
         // Kernel-owned partially filled V3 blocks are invisible until retirement. Counters must prove them empty.
-        if (!ring.counters_valid) return CaptureBacklogV1::kUnknown;
-        return ring.consumed == ring.received - ring.dropped ? CaptureBacklogV1::kEmpty : CaptureBacklogV1::kPresent;
+        if (!ring.counters_valid) return CaptureBacklog::kUnknown;
+        return ring.consumed == ring.received - ring.dropped ? CaptureBacklog::kEmpty : CaptureBacklog::kPresent;
     }
     int64_t IdleTimeNs(uint32_t index) const override { return rings[index]->idle_time; }
-    int ReadCounters(uint32_t index, CaptureCountersV1* output) override {
+    int ReadCounters(uint32_t index, CaptureCounters* output) override {
         if (!output || index >= rings.size()) return EINVAL;
         auto& ring = *rings[index];
         const int rc = ring.Statistics();
@@ -133,7 +133,7 @@ class AfPacketSession final : public ICaptureBackendSessionV1 {
         return 0;
     }
     void Cancel() override { cancelled = true; }
-    std::vector<CaptureBackendInputV1> inputs;
+    std::vector<CaptureBackendInput> inputs;
     std::vector<std::unique_ptr<Ring>> rings;
 
  private:
@@ -145,7 +145,7 @@ class AfPacketSession final : public ICaptureBackendSessionV1 {
     std::atomic<bool> cancelled{false};
 };
 }  // namespace
-int OpenAfPacket(const CaptureBackendConfigV1& config, std::shared_ptr<ICaptureBackendSessionV1>* output,
+int OpenAfPacket(const CaptureBackendConfig& config, std::shared_ptr<ICaptureBackendSession>* output,
                  std::string* error) {
     if (!output) return EINVAL;
     output->reset();
@@ -205,7 +205,7 @@ int OpenAfPacket(const CaptureBackendConfigV1& config, std::shared_ptr<ICaptureB
             if (setsockopt(ring->fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &membership, sizeof(membership)) != 0)
                 return fail(errno, "promiscuous membership failed: " + name);
         }
-        CaptureBackendInputV1 input;
+        CaptureBackendInput input;
         input.interface_name = name;
         input.ifindex = ifindex;
         input.readiness_fd = ring->fd;

@@ -6,13 +6,13 @@
 #include <cstdint>
 
 namespace flowsql {
-const Guid IID_CHANNEL_DATASET_DESCRIPTOR_V1 = {
+const Guid IID_CHANNEL_DATASET_DESCRIPTOR = {
     0x2d334dd8, 0x40ad, 0x4550, {0x9a, 0xb1, 0xd4, 0xd2, 0xa3, 0xb6, 0x50, 0x19}};
-struct ChannelDatasetRequestV1 {
+struct ChannelDatasetRequest {
     std::string locator_json;
     uint32_t timeout_ms = 5000;
 };
-struct ChannelDatasetSnapshotV1 {
+struct ChannelDatasetSnapshot {
     std::shared_ptr<const std::string> document_json;
 };
 // Optional producer_metadata.dictionary_source identifies a verified producer:
@@ -21,10 +21,10 @@ struct ChannelDatasetSnapshotV1 {
 // resolves it from the registered author contract, verifies it and native fields,
 // and exposes a read-only default_dictionary. This creates no binding or run.
 // Providers own metadata discovery; no data reads, credentials or implicit lazy loading.
-interface IChannelDatasetDescriptorV1 {
-    virtual ~IChannelDatasetDescriptorV1() = default;
+interface IChannelDatasetDescriptor {
+    virtual ~IChannelDatasetDescriptor() = default;
     virtual const char* ProviderId() const = 0;
     // Thread safe. Failure clears output. The total call budget is timeout_ms (1..30000).
-    virtual int Describe(const ChannelDatasetRequestV1&, ChannelDatasetSnapshotV1*, DataSemanticsErrorV1*) = 0;
+    virtual int Describe(const ChannelDatasetRequest&, ChannelDatasetSnapshot*, DataSemanticsError*) = 0;
 };
 }  // namespace flowsql

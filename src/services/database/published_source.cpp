@@ -9,30 +9,30 @@
 
 namespace flowsql::database {
 namespace {
-class NpmPublishedReader final : public IDatabasePublishedProgressReaderV1 {
+class NpmPublishedReader final : public IDatabasePublishedProgressReader {
  public:
-    NpmPublishedReader(IDatabaseChannel* source, DatabaseSnapshotOptionsV1 options)
+    NpmPublishedReader(IDatabaseChannel* source, DatabaseSnapshotOptions options)
         : source_(source), options_(options) {}
-    int ReadProgress(const PublishedDatasetRequestV1& request, const std::string& position,
-                     PublishedDatasetProgressV1* output) override {
+    int ReadProgress(const PublishedDatasetRequest& request, const std::string& position,
+                     PublishedDatasetProgress* output) override {
         if (!output) return -1;
         *output = {};
         if (cancelled_) return Fail("published source cancelled");
         if (request.dataset_id.empty() || request.relation.empty() || request.run_id.empty() ||
             request.bucket_ns <= 0 || !request.npm_period_increment)
             return Fail("NPM publication requires an explicit run and period-increment relation");
-        const std::string entity = request.relation == "npm_basic_ipv4_history_v1"   ? "basic_ipv4"
-                                   : request.relation == "npm_basic_ipv6_history_v1" ? "basic_ipv6"
-                                                                                     : "";
+        const std::string entity = request.relation == "npm_basic_ipv4_history"   ? "basic_ipv4"
+                                   : request.relation == "npm_basic_ipv6_history" ? "basic_ipv6"
+                                                                                  : "";
         if (entity.empty()) return Fail("NPM publication requires a concrete basic family history relation");
-        auto* capability = dynamic_cast<IDatabaseSnapshotSourceV1*>(source_);
-        std::shared_ptr<IDatabaseSnapshotSessionV1> session;
+        auto* capability = dynamic_cast<IDatabaseSnapshotSource*>(source_);
+        std::shared_ptr<IDatabaseSnapshotSession> session;
         if (!capability || capability->CreateSnapshotSession(options_, &session) != 0)
             return Fail(source_->GetLastError());
         std::atomic_store(&active_, session);
         struct Clear {
-            std::shared_ptr<IDatabaseSnapshotSessionV1>* active;
-            ~Clear() { std::atomic_store(active, std::shared_ptr<IDatabaseSnapshotSessionV1>{}); }
+            std::shared_ptr<IDatabaseSnapshotSession>* active;
+            ~Clear() { std::atomic_store(active, std::shared_ptr<IDatabaseSnapshotSession>{}); }
         } clear{&active_};
         if (cancelled_) {
             session->Cancel();
@@ -59,11 +59,11 @@ class NpmPublishedReader final : public IDatabasePublishedProgressReaderV1 {
                         : backend == "postgres" ? " COLLATE \"C\""
                                                 : "");
             };
-            DatabaseParameterV1 run;
-            run.kind = DatabaseParameterKindV1::kString;
+            DatabaseParameter run;
+            run.kind = DatabaseParameterKind::kString;
             run.data = request.run_id.data();
             run.size = request.run_id.size();
-            auto read = [&](const std::string& sql, const std::vector<DatabaseParameterV1>& values,
+            auto read = [&](const std::string& sql, const std::vector<DatabaseParameter>& values,
                             std::shared_ptr<arrow::Schema> schema) {
                 std::shared_ptr<arrow::RecordBatch> rows;
                 if (session->ReadPage(sql.c_str(), values.data(), values.size(), schema, 2, 65536, &rows) != 0)
@@ -90,13 +90,13 @@ class NpmPublishedReader final : public IDatabasePublishedProgressReaderV1 {
                 (!runs->column(2)->IsNull(0) &&
                  std::static_pointer_cast<arrow::Int64Array>(runs->column(2))->Value(0) <= now))
                 throw std::runtime_error("NPM run incomplete, expired or purging");
-            DatabaseParameterV1 selected_relation;
-            selected_relation.kind = DatabaseParameterKindV1::kString;
+            DatabaseParameter selected_relation;
+            selected_relation.kind = DatabaseParameterKind::kString;
             selected_relation.data = request.relation.data();
             selected_relation.size = request.relation.size();
-            std::vector<DatabaseParameterV1> values{run, selected_relation};
+            std::vector<DatabaseParameter> values{run, selected_relation};
             std::string sql = "SELECT epoch,position,period_ns,closed_before_ns FROM " +
-                              relation("npm_result_progress_v1") + " WHERE " + text("run_id") + "=? AND " +
+                              relation("npm_result_progress") + " WHERE " + text("run_id") + "=? AND " +
                               text("relation_name") + "=? AND entity_id='" + entity + "'";
             if (!position.empty()) {
                 int64_t n;
@@ -104,8 +104,8 @@ class NpmPublishedReader final : public IDatabasePublishedProgressReaderV1 {
                 if (parsed.ec != std::errc{} || parsed.ptr != position.data() + position.size() || n <= 0 ||
                     std::to_string(n) != position)
                     throw std::runtime_error("invalid publication position");
-                DatabaseParameterV1 p;
-                p.kind = DatabaseParameterKindV1::kInt64;
+                DatabaseParameter p;
+                p.kind = DatabaseParameterKind::kInt64;
                 p.int64_value = n;
                 values.push_back(p);
                 sql += " AND position=?";
@@ -146,14 +146,14 @@ class NpmPublishedReader final : public IDatabasePublishedProgressReaderV1 {
         return -1;
     }
     IDatabaseChannel* source_;
-    DatabaseSnapshotOptionsV1 options_;
-    std::shared_ptr<IDatabaseSnapshotSessionV1> active_;
+    DatabaseSnapshotOptions options_;
+    std::shared_ptr<IDatabaseSnapshotSession> active_;
     std::atomic<bool> cancelled_{false};
     std::string error_;
 };
 }  // namespace
-std::shared_ptr<IDatabasePublishedProgressReaderV1> MakeNpmPublishedProgressReader(IDatabaseChannel* source,
-                                                                                   DatabaseSnapshotOptionsV1 options) {
+std::shared_ptr<IDatabasePublishedProgressReader> MakeNpmPublishedProgressReader(IDatabaseChannel* source,
+                                                                                 DatabaseSnapshotOptions options) {
     options.consistent_transaction = std::string(source->Category()) != "clickhouse";
     return std::make_shared<NpmPublishedReader>(source, options);
 }

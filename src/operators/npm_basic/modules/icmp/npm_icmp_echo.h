@@ -14,7 +14,7 @@
 
 namespace flowsql::npm {
 
-class NpmIcmpEchoTrackerV1 {
+class NpmIcmpEchoTracker {
  public:
     struct Emit {
         std::function<int(const NpmIcmpEvent4&)> ipv4;
@@ -26,8 +26,8 @@ class NpmIcmpEchoTrackerV1 {
         explicit operator bool() const { return bool(ipv4) && bool(ipv6); }
     };
 
-    NpmIcmpEchoTrackerV1(NpmIcmpConfigV1 config, std::shared_ptr<INpmTaskBudget> budget);
-    ~NpmIcmpEchoTrackerV1();
+    NpmIcmpEchoTracker(NpmIcmpConfig config, std::shared_ptr<INpmTaskBudget> budget);
+    ~NpmIcmpEchoTracker();
 
     template <typename Address>
     int OnEcho(const NpmIcmpFamilyParsed<Address>& message, uint64_t observation_domain_id, int64_t captured_at_ns,
@@ -46,20 +46,20 @@ class NpmIcmpEchoTrackerV1 {
         bool operator()(const NpmIcmpFamilyEchoKey<Address>&, const NpmIcmpFamilyEchoKey<Address>&) const;
     };
     template <typename Address>
-    using PendingMap = std::map<NpmIcmpFamilyEchoKey<Address>, NpmIcmpPendingEchoV1, EchoKeyLess<Address>>;
+    using PendingMap = std::map<NpmIcmpFamilyEchoKey<Address>, NpmIcmpPendingEcho, EchoKeyLess<Address>>;
     using DeadlineKey = std::pair<int64_t, uint64_t>;
     // std::map nodes remain stable until retirement. The deadline owns no duplicate address key.
     using DeadlineTarget = std::variant<const NpmIcmpEchoKey4*, const NpmIcmpEchoKey6*>;
     template <typename Address>
     static constexpr uint64_t PendingCharge() {
-        return sizeof(NpmIcmpFamilyEchoKey<Address>) + sizeof(NpmIcmpPendingEchoV1) + sizeof(DeadlineKey) +
+        return sizeof(NpmIcmpFamilyEchoKey<Address>) + sizeof(NpmIcmpPendingEcho) + sizeof(DeadlineKey) +
                sizeof(DeadlineTarget) + 8 * sizeof(void*);
     }
     template <typename Address>
-    NpmIcmpFamilyEvent<Address> MakeEchoEvent(const NpmIcmpFamilyEchoKey<Address>&, const NpmIcmpPendingEchoV1&,
+    NpmIcmpFamilyEvent<Address> MakeEchoEvent(const NpmIcmpFamilyEchoKey<Address>&, const NpmIcmpPendingEcho&,
                                               int64_t observed_at_ns, std::string outcome) const;
     template <typename Address>
-    void Erase(const NpmIcmpFamilyEchoKey<Address>&, const NpmIcmpPendingEchoV1&) noexcept;
+    void Erase(const NpmIcmpFamilyEchoKey<Address>&, const NpmIcmpPendingEcho&) noexcept;
     template <typename Address>
     PendingMap<Address>& Pending() {
         if constexpr (sizeof(Address) == 4)
@@ -69,7 +69,7 @@ class NpmIcmpEchoTrackerV1 {
     }
     int EmitDeadline(int64_t observed_at_ns, const char* reason, const Emit&);
 
-    NpmIcmpConfigV1 config_;
+    NpmIcmpConfig config_;
     std::shared_ptr<INpmTaskBudget> budget_;
     PendingMap<network::IPv4Address> pending4_;
     PendingMap<network::IPv6Address> pending6_;

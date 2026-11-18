@@ -24,136 +24,135 @@
 
 namespace flowsql::npm {
 namespace {
-NpmProtocolContractStatusV1 Invalid(std::string field) {
-    return {NpmProtocolContractErrorV1::kInvalidPlan, std::move(field)};
+NpmProtocolContractStatus Invalid(std::string field) {
+    return {NpmProtocolContractError::kInvalidPlan, std::move(field)};
 }
 }  // namespace
 
-NpmProtocolContractStatusV1 ValidateNpmModuleInstanceV1(const NpmModulePlanV1& plan,
-                                                        const NpmModuleInstanceV1& instance) {
+NpmProtocolContractStatus ValidateNpmModuleInstance(const NpmModulePlan& plan, const NpmModuleInstance& instance) {
     if ((instance.protocol && instance.analysis) ||
         (!instance.protocol && !instance.analysis && plan.module_id != "basic")) {
         return Invalid(plan.module_id);
     }
     if (plan.requires_tcp_stream != (instance.tcp_stream_consumer != nullptr) ||
         (instance.tcp_stream_consumer != nullptr &&
-         dynamic_cast<INpmTcpStreamConsumerV1*>(instance.protocol.get()) != instance.tcp_stream_consumer)) {
+         dynamic_cast<INpmTcpStreamConsumer*>(instance.protocol.get()) != instance.tcp_stream_consumer)) {
         return Invalid(plan.module_id + "/tcp_stream_consumer");
     }
     return {};
 }
 
-const NpmModuleCatalogV1& ProductionNpmModuleCatalogV1() {
-    static const NpmModuleCatalogV1 catalog = {
+const NpmModuleCatalog& ProductionNpmModuleCatalog() {
+    static const NpmModuleCatalog catalog = {
         {"basic",
          true,
          {"basic_ipv4", "basic_ipv6"},
-         [](const NpmBasicTaskConfig& config, std::string_view, NpmPreparedModuleV1* out) {
+         [](const NpmBasicTaskConfig& config, std::string_view, NpmPreparedModule* out) {
              out->plan.module_id = "basic";
              out->plan.input_mask = 3;
-             out->plan.entities = {NpmBasicEntityDescriptorV1(packet::AddressFamily::kIPv4),
-                                   NpmBasicEntityDescriptorV1(packet::AddressFamily::kIPv6)};
-             out->create = [](NpmProtocolContext&, std::shared_ptr<INpmTaskBudget>) { return NpmModuleInstanceV1{}; };
-             return NpmProtocolContractStatusV1{};
+             out->plan.entities = {NpmBasicEntityDescriptor(packet::AddressFamily::kIPv4),
+                                   NpmBasicEntityDescriptor(packet::AddressFamily::kIPv6)};
+             out->create = [](NpmProtocolContext&, std::shared_ptr<INpmTaskBudget>) { return NpmModuleInstance{}; };
+             return NpmProtocolContractStatus{};
          }},
         {"session",
          true,
          {"session_ipv4", "session_ipv6"},
-         [](const NpmBasicTaskConfig& config, std::string_view, NpmPreparedModuleV1* out) {
+         [](const NpmBasicTaskConfig& config, std::string_view, NpmPreparedModule* out) {
              out->plan.module_id = "session";
              out->plan.input_mask = 3;
-             out->plan.entities = {NpmSessionEntityDescriptorV1(packet::AddressFamily::kIPv4),
-                                   NpmSessionEntityDescriptorV1(packet::AddressFamily::kIPv6)};
+             out->plan.entities = {NpmSessionEntityDescriptor(packet::AddressFamily::kIPv4),
+                                   NpmSessionEntityDescriptor(packet::AddressFamily::kIPv6)};
              const auto ranges = config.features.session_max_tcp_ranges_per_direction;
              out->create = [ranges](NpmProtocolContext& context, std::shared_ptr<INpmTaskBudget> budget) {
-                 NpmModuleInstanceV1 result;
+                 NpmModuleInstance result;
                  result.analysis = std::make_unique<NpmSessionAnalysisModule>(context, std::move(budget), ranges);
                  return result;
              };
-             return NpmProtocolContractStatusV1{};
+             return NpmProtocolContractStatus{};
          }},
         {"dns",
          true,
          {"dns_transaction_ipv4", "dns_transaction_ipv6"},
-         [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModuleV1* out) {
-             NpmDnsConfigV1 config;
-             const auto parsed = ParseNpmDnsConfigV1(json, &config);
-             if (parsed.error != NpmDnsConfigErrorV1::kNone) {
+         [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModule* out) {
+             NpmDnsConfig config;
+             const auto parsed = ParseNpmDnsConfig(json, &config);
+             if (parsed.error != NpmDnsConfigError::kNone) {
                  const std::string prefix = "/dns/";
                  return Invalid(parsed.path == "/dns" ? "config" : parsed.path.substr(prefix.size()));
              }
-             out->plan = NpmDnsModulePlanV1(config);
+             out->plan = NpmDnsModulePlan(config);
              out->create = [config = std::move(config)](NpmProtocolContext&, std::shared_ptr<INpmTaskBudget> budget) {
-                 NpmModuleInstanceV1 result;
-                 auto module = std::make_unique<NpmDnsProtocolModuleV1>(config, std::move(budget));
+                 NpmModuleInstance result;
+                 auto module = std::make_unique<NpmDnsProtocolModule>(config, std::move(budget));
                  result.tcp_stream_consumer = module.get();
                  result.protocol = std::move(module);
                  return result;
              };
-             return NpmProtocolContractStatusV1{};
+             return NpmProtocolContractStatus{};
          }},
         {"http1",
          true,
          {"http1_transaction_ipv4", "http1_transaction_ipv6"},
-         [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModuleV1* out) {
-             NpmHttp1ConfigV1 config;
-             const auto parsed = ParseNpmHttp1ConfigV1(json, &config);
-             if (parsed.error != NpmHttp1ConfigErrorV1::kNone) {
+         [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModule* out) {
+             NpmHttp1Config config;
+             const auto parsed = ParseNpmHttp1Config(json, &config);
+             if (parsed.error != NpmHttp1ConfigError::kNone) {
                  const std::string prefix = "/http1/";
                  return Invalid(parsed.path == "/http1" ? "config" : parsed.path.substr(prefix.size()));
              }
-             out->plan = NpmHttp1ModulePlanV1(config);
+             out->plan = NpmHttp1ModulePlan(config);
              out->create = [config = std::move(config)](NpmProtocolContext&, std::shared_ptr<INpmTaskBudget> budget) {
-                 NpmModuleInstanceV1 result;
-                 auto module = std::make_unique<NpmHttp1ProtocolModuleV1>(config, std::move(budget));
+                 NpmModuleInstance result;
+                 auto module = std::make_unique<NpmHttp1ProtocolModule>(config, std::move(budget));
                  result.tcp_stream_consumer = module.get();
                  result.protocol = std::move(module);
                  return result;
              };
-             return NpmProtocolContractStatusV1{};
+             return NpmProtocolContractStatus{};
          }},
         {"tls",
          true,
          {"tls_handshake_ipv4", "tls_handshake_ipv6"},
-         [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModuleV1* out) {
-             NpmTlsConfigV1 config;
-             const auto parsed = ParseNpmTlsConfigV1(json, &config);
-             if (parsed.error != NpmTlsConfigErrorV1::kNone) {
+         [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModule* out) {
+             NpmTlsConfig config;
+             const auto parsed = ParseNpmTlsConfig(json, &config);
+             if (parsed.error != NpmTlsConfigError::kNone) {
                  const std::string prefix = "/tls/";
                  return Invalid(parsed.path == "/tls" ? "config" : parsed.path.substr(prefix.size()));
              }
-             out->plan = NpmTlsModulePlanV1(config);
+             out->plan = NpmTlsModulePlan(config);
              out->create = [config = std::move(config)](NpmProtocolContext&, std::shared_ptr<INpmTaskBudget> budget) {
-                 NpmModuleInstanceV1 result;
-                 auto module = std::make_unique<NpmTlsProtocolModuleV1>(config, std::move(budget));
+                 NpmModuleInstance result;
+                 auto module = std::make_unique<NpmTlsProtocolModule>(config, std::move(budget));
                  result.tcp_stream_consumer = module.get();
                  result.protocol = std::move(module);
                  return result;
              };
-             return NpmProtocolContractStatusV1{};
+             return NpmProtocolContractStatus{};
          }},
         {"icmp",
          true,
          {"icmp_event_ipv4", "icmp_event_ipv6"},
-         [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModuleV1* out) {
-             NpmIcmpConfigV1 config;
-             const auto parsed = ParseNpmIcmpConfigV1(json, &config);
-             if (parsed.error != NpmIcmpConfigErrorV1::kNone) {
+         [](const NpmBasicTaskConfig&, std::string_view json, NpmPreparedModule* out) {
+             NpmIcmpConfig config;
+             const auto parsed = ParseNpmIcmpConfig(json, &config);
+             if (parsed.error != NpmIcmpConfigError::kNone) {
                  const std::string prefix = "/icmp/";
                  return Invalid(parsed.path == "/icmp" ? "config" : parsed.path.substr(prefix.size()));
              }
-             out->plan = NpmIcmpModulePlanV1();
+             out->plan = NpmIcmpModulePlan();
              out->create = [config](NpmProtocolContext&, std::shared_ptr<INpmTaskBudget> budget) {
-                 NpmModuleInstanceV1 result;
-                 result.protocol = std::make_unique<NpmIcmpProtocolModuleV1>(config, std::move(budget));
+                 NpmModuleInstance result;
+                 result.protocol = std::make_unique<NpmIcmpProtocolModule>(config, std::move(budget));
                  return result;
              };
-             return NpmProtocolContractStatusV1{};
+             return NpmProtocolContractStatus{};
          }}};
     return catalog;
 }
 
-NpmProtocolContractStatusV1 ValidateNpmModuleCatalogV1(const NpmModuleCatalogV1& catalog) {
+NpmProtocolContractStatus ValidateNpmModuleCatalog(const NpmModuleCatalog& catalog) {
     std::set<std::string> modules, entities;
     for (const auto& entry : catalog) {
         if (entry.module_id.empty() || entry.module_id == "labeling" || !modules.insert(entry.module_id).second ||
@@ -167,10 +166,10 @@ NpmProtocolContractStatusV1 ValidateNpmModuleCatalogV1(const NpmModuleCatalogV1&
     return {};
 }
 
-NpmProtocolContractStatusV1 PrepareNpmModulesV1(const NpmBasicTaskConfig& config, const NpmModuleCatalogV1& catalog,
-                                                std::vector<NpmPreparedModuleV1>* output) {
-    auto status = ValidateNpmModuleCatalogV1(catalog);
-    if (status.error != NpmProtocolContractErrorV1::kNone) return status;
+NpmProtocolContractStatus PrepareNpmModules(const NpmBasicTaskConfig& config, const NpmModuleCatalog& catalog,
+                                            std::vector<NpmPreparedModule>* output) {
+    auto status = ValidateNpmModuleCatalog(catalog);
+    if (status.error != NpmProtocolContractError::kNone) return status;
     std::vector<std::string> ids = config.features.module_ids;
     if (ids.empty()) {
         if (config.features.basic_enabled) ids.push_back("basic");
@@ -188,7 +187,7 @@ NpmProtocolContractStatusV1 PrepareNpmModulesV1(const NpmBasicTaskConfig& config
         parameters.Parse(config.parameters_json.c_str());
         if (parameters.HasParseError() || !parameters.IsObject()) return Invalid("parameters");
     }
-    std::vector<NpmPreparedModuleV1> next;
+    std::vector<NpmPreparedModule> next;
     for (const auto& entry : catalog) {
         if (!enabled.count(entry.module_id)) continue;
         std::string json = "{}";
@@ -198,9 +197,9 @@ NpmProtocolContractStatusV1 PrepareNpmModulesV1(const NpmBasicTaskConfig& config
             parameters[entry.module_id.c_str()].Accept(writer);
             json.assign(buffer.GetString(), buffer.GetSize());
         }
-        NpmPreparedModuleV1 prepared;
+        NpmPreparedModule prepared;
         status = entry.prepare(config, json, &prepared);
-        if (status.error != NpmProtocolContractErrorV1::kNone) {
+        if (status.error != NpmProtocolContractError::kNone) {
             status.field = entry.module_id + "/" + status.field;
             return status;
         }
@@ -217,7 +216,7 @@ NpmProtocolContractStatusV1 PrepareNpmModulesV1(const NpmBasicTaskConfig& config
     return {};
 }
 
-NpmProtocolModuleAdapter::NpmProtocolModuleAdapter(NpmModulePlanV1 plan, std::unique_ptr<INpmProtocolModuleV1> module,
+NpmProtocolModuleAdapter::NpmProtocolModuleAdapter(NpmModulePlan plan, std::unique_ptr<INpmProtocolModule> module,
                                                    const std::atomic<bool>* cancellation_requested,
                                                    NpmResultRouter* router)
     : router_(router),
@@ -226,7 +225,7 @@ NpmProtocolModuleAdapter::NpmProtocolModuleAdapter(NpmModulePlanV1 plan, std::un
       cancellation_requested_(cancellation_requested) {}
 NpmProtocolModuleAdapter::~NpmProtocolModuleAdapter() { Abort(); }
 bool NpmProtocolModuleAdapter::AcceptsControl() const { return (plan_.input_mask & 4) != 0; }
-int NpmProtocolModuleAdapter::OnControl(const NpmInputEventV1& event) {
+int NpmProtocolModuleAdapter::OnControl(const NpmInputEvent& event) {
     if (!AcceptsControl()) return 0;
     if (cancellation_requested_->load(std::memory_order_acquire)) return ECANCELED;
     const int error = module_->OnInput(event, *this);
@@ -235,7 +234,7 @@ int NpmProtocolModuleAdapter::OnControl(const NpmInputEventV1& event) {
 std::optional<int64_t> NpmProtocolModuleAdapter::NextEventDeadlineNs() const {
     return finished_ || aborted_ ? std::nullopt : module_->NextEventDeadlineNs();
 }
-int NpmProtocolModuleAdapter::OnTime(const NpmModuleTimeV1& time) {
+int NpmProtocolModuleAdapter::OnTime(const NpmModuleTime& time) {
     if (finished_ || aborted_ || cancellation_requested_->load(std::memory_order_acquire)) return ECANCELED;
     const int error = module_->OnTime(time, *this);
     return error == 0 && cancellation_requested_->load(std::memory_order_acquire) ? ECANCELED : error;
@@ -264,8 +263,8 @@ bool NpmProtocolModuleAdapter::AcceptsSession(const NpmSessionView& session) con
 int NpmProtocolModuleAdapter::OnPacket(const NpmPacketView& packet, const NpmSessionView& session, INpmResultWriter&) {
     if (!AcceptsSession(session)) return 0;
     if (cancellation_requested_->load(std::memory_order_acquire)) return ECANCELED;
-    NpmInputEventV1 event;
-    event.kind = session.key->Protocol() == 6 ? NpmInputKindV1::kTcpPacket : NpmInputKindV1::kUdpDatagram;
+    NpmInputEvent event;
+    event.kind = session.key->Protocol() == 6 ? NpmInputKind::kTcpPacket : NpmInputKind::kUdpDatagram;
     event.observation_domain_id = session.key->Domain();
     event.packet = packet.packet;
     event.layer = packet.layer;

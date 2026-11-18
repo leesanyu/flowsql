@@ -8,7 +8,7 @@
 #include <iostream>
 using namespace flowsql;
 namespace {
-struct Source final : ICaptureBlockStreamReaderV2, IBlockStreamAcknowledgementV1 {
+struct Source final : ICaptureBlockStreamReader, IBlockStreamAcknowledgement {
     std::shared_ptr<arrow::RecordBatch> batch;
     std::vector<std::string> operations;
     int polls = 0, acknowledgements = 0, releases = 0;
@@ -23,16 +23,16 @@ struct Source final : ICaptureBlockStreamReaderV2, IBlockStreamAcknowledgementV1
     bool IsOpened() const override { return true; }
     bool IsFinished() const override { return polls > 1; }
     void Cancel() override {}
-    int DescribeSources(CaptureSourceSetV2*) const override { return ENOTSUP; }
-    int ReadInputCounters(uint32_t, CaptureCountersV1*) const override { return ENOTSUP; }
+    int DescribeSources(CaptureSourceSet*) const override { return ENOTSUP; }
+    int ReadInputCounters(uint32_t, CaptureCounters*) const override { return ENOTSUP; }
     BlockPollEvent PollBlock(int ms) override { return PollCapture(ms).block; }
-    CapturePollEventV2 PollCapture(int) override {
-        CapturePollEventV2 event;
+    CapturePollEvent PollCapture(int) override {
+        CapturePollEvent event;
         if (polls++)
             event.block.kind = BlockPollEvent::kEof;
         else {
             event.block = {BlockPollEvent::kData, batch, 0};
-            CaptureProgressV1 fact;
+            CaptureProgress fact;
             fact.source_id = 0;
             fact.capture_time_ns = bad_fact ? 200 : 100;
             fact.packet_observed = batch->num_rows() > 0;
@@ -54,13 +54,13 @@ struct Source final : ICaptureBlockStreamReaderV2, IBlockStreamAcknowledgementV1
         return 0;
     }
 };
-struct Task final : IBlockTransformTaskV2, IBlockTransformCaptureFactTaskV2 {
+struct Task final : IBlockTransformTask, IBlockTransformTimeDrivenTask, IBlockTransformCaptureFactTask {
     Source& source;
     int mode;
     bool pending = false;
     Task(Source& s, int m) : source(s), mode(m) {}
-    int BindCaptureSources(const CaptureSourceSetV2&) override { return 0; }
-    int AcceptCaptureFacts(const std::vector<CaptureProgressV1>& facts) override {
+    int BindCaptureSources(const CaptureSourceSet&) override { return 0; }
+    int AcceptCaptureFacts(const std::vector<CaptureProgress>& facts) override {
         assert(facts.size() == 1 && source.acknowledgements == 0 && source.releases == 0);
         source.operations.push_back("facts");
         pending = true;
@@ -71,24 +71,24 @@ struct Task final : IBlockTransformTaskV2, IBlockTransformCaptureFactTaskV2 {
         return 0;
     }
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t,
-                     std::vector<BlockTransformOutputV1>* outputs) override {
+                     std::vector<BlockTransformOutput>* outputs) override {
         source.operations.push_back("process");
         if (mode == 1) return EIO;
         outputs->push_back({input, 0});
         return 1;
     }
-    int Flush(std::vector<BlockTransformOutputV1>*) override {
+    int Flush(std::vector<BlockTransformOutput>*) override {
         source.operations.push_back("flush");
         return 0;
     }
     void Cancel() override {}
     std::string LastError() const override { return "fixture failure"; }
-    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override {
+    int GetTimeDriveState(BlockTransformTimeDriveState* state) override {
         state->armed = pending;
         state->deadline_ns = 0;
         return 0;
     }
-    int OnTime(const BlockTransformTimeEventV1&, std::vector<BlockTransformOutputV1>* outputs) override {
+    int OnTime(const BlockTransformTimeEvent&, std::vector<BlockTransformOutput>* outputs) override {
         source.operations.push_back("time");
         pending = false;
         if (mode == 4) return EIO;
@@ -116,7 +116,7 @@ int main() {
         config.transform = &task;
         config.time_transform = &task;
         config.capture_fact_task = &task;
-        config.output_consumer = [&](const BlockTransformOutputV1&) {
+        config.output_consumer = [&](const BlockTransformOutput&) {
             assert(source.acknowledgements == 0 && source.releases == 0);
             source.operations.push_back("deliver");
             return mode == 3 ? EIO : 0;

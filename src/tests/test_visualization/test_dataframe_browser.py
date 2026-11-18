@@ -48,6 +48,7 @@ def main():
         with (evidence / 'source.log').open('w+') as source_log, (evidence / 'service.log').open('w+') as log:
             source_process = subprocess.Popen(
                 [str(output / 'flowsql'), '--role', 'catalog', '--plugins',
+                 f'{output}/libflowsql_config_channel.so:db_path={directory}/semantics.db,'
                  f'{output}/libflowsql_builtin.so,{output}/libflowsql_catalog.so:{source_option},'
                  f'{output}/libflowsql_router.so:host=127.0.0.1;port={source_port}'],
                 cwd=directory, env=env, stdout=source_log, stderr=source_log)
@@ -59,8 +60,8 @@ def main():
                     deadline = time.monotonic() + 20
                     while True:
                         try:
-                            probe = '/api/visualization/v1/capabilities' if label == 'visualization' else \
-                                '/channels/dataframe/exploration/v1/sources'
+                            probe = '/api/visualization/capabilities' if label == 'visualization' else \
+                                '/channels/dataframe/exploration/sources'
                             with urllib.request.urlopen(base + probe, timeout=5) as response:
                                 if response.status == 200:
                                     break
@@ -77,18 +78,18 @@ def main():
                                f'upload_dir={directory}/uploads;visualization_upstream={visual};gateway=127.0.0.1:{source_port}')
                 with service(output, directory, 'web', web_options, web + '/api/version'):
                     # Missing/invalid bodies must reach the exploration service as JSON errors.
-                    acquire_url = web + '/api/visualization/v1/snapshots/acquire'
+                    acquire_url = web + '/api/visualization/snapshots/acquire'
                     with request(urllib.request.Request(acquire_url, data=b'{}',
                                  headers={'Content-Type': 'application/json'})) as response:
                         assert response.status == 400, (response.status, response.read().decode())
                         assert response.headers.get_content_type() == 'application/json'
                         assert json.load(response)['code'] == 'INVALID_WORKFLOW'
                     for operation in ('acquire', 'renew', 'release'):
-                        url = web + '/api/visualization/v1/snapshots/' + operation
+                        url = web + '/api/visualization/snapshots/' + operation
                         for method in ('GET', 'HEAD', 'DELETE'):
                             with request(urllib.request.Request(url, method=method)) as response:
                                 assert response.status == 405, (operation, method, response.status)
-                    with request(urllib.request.Request(web + '/api/visualization/v1/snapshots/unknown',
+                    with request(urllib.request.Request(web + '/api/visualization/snapshots/unknown',
                                                        data=b'{}')) as response:
                         assert response.status == 405, response.status
                     status, proxied = call(web, 'sources')

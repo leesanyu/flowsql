@@ -67,7 +67,7 @@ try {
     await send('Emulation.setPageScaleFactor',{pageScaleFactor:1.1});await layout();await send('Emulation.setPageScaleFactor',{pageScaleFactor:1})
     await send('Page.navigate',{url:base+'/channels'});await text('DataFrame 通道');await layout()
   }
-  await api('channels/config/publish',{name:'description-config',format:'json',schema_id:'example.v1',content_base64:Buffer.from('{"mode":"example"}').toString('base64'),expected_current_revision:0})
+  await api('channels/config/publish',{name:'description-config',format:'json',schema_id:'example.configuration',content_base64:Buffer.from('{"mode":"example"}').toString('base64'),expected_current_revision:0})
   await click('配置通道');await text('description-config')
   await click('预览',row('description-config'));await text('字段数据说明 unsupported')
   assert.ok(await ev('document.querySelector("[data-testid=config-description-status]").textContent.includes("config.description-config@1")'))

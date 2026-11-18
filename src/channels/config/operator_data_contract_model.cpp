@@ -148,7 +148,7 @@ bool Check(const V& schema, const V& v, const V& schema_root, const V& doc, std:
     }
     return true;
 }
-int SchemaDefinition(const V& schema, const V& scope, const V& doc, const std::string& path, DataSemanticsErrorV1* e,
+int SchemaDefinition(const V& schema, const V& scope, const V& doc, const std::string& path, DataSemanticsError* e,
                      unsigned depth = 0, std::set<const V*>* visited = nullptr) {
     std::set<const V*> owned_visited;
     if (!visited) visited = &owned_visited;
@@ -264,8 +264,8 @@ int SchemaDefinition(const V& schema, const V& scope, const V& doc, const std::s
     }
     return 0;
 }
-int Walk(const V& v, const V& root, const std::string& p, std::vector<SemanticsReference>* refs,
-         DataSemanticsErrorV1* e, const V* scope = nullptr) {
+int Walk(const V& v, const V& root, const std::string& p, std::vector<SemanticsReference>* refs, DataSemanticsError* e,
+         const V* scope = nullptr) {
     if (v.IsObject()) {
         if (v.HasMember("$defs")) scope = &v;
         for (const auto& m : v.GetObject()) {
@@ -300,7 +300,7 @@ int Walk(const V& v, const V& root, const std::string& p, std::vector<SemanticsR
     }
     return 0;
 }
-int ValidateInputTree(const V& value, DataSemanticsErrorV1* e) {
+int ValidateInputTree(const V& value, DataSemanticsError* e) {
     if (value.IsArray()) {
         for (const auto& child : value.GetArray())
             if (ValidateInputTree(child, e)) return -1;
@@ -345,7 +345,7 @@ int ValidateInputTree(const V& value, DataSemanticsErrorV1* e) {
     }
     return 0;
 }
-int Unique(const V& list, const char* key, DataSemanticsErrorV1* e) {
+int Unique(const V& list, const char* key, DataSemanticsError* e) {
     std::set<std::string> names;
     for (const auto& v : list.GetArray())
         if (!names.insert(S(v[key])).second)
@@ -353,7 +353,7 @@ int Unique(const V& list, const char* key, DataSemanticsErrorV1* e) {
     return 0;
 }
 }  // namespace
-int ValidateOperatorConfiguration(const V& schema, const V& instance, const V& contract, DataSemanticsErrorV1* e) {
+int ValidateOperatorConfiguration(const V& schema, const V& instance, const V& contract, DataSemanticsError* e) {
     unsigned budget = 100000;
     std::string path;
     if (Check(schema, instance, schema, contract, &path, &budget, 0) && budget) return 0;
@@ -362,7 +362,7 @@ int ValidateOperatorConfiguration(const V& schema, const V& instance, const V& c
         budget ? "configuration does not satisfy its declared schema" : "configuration validation budget exhausted",
         path);
 }
-int ValidateOperatorParameters(const V& contract, const V& parameters, DataSemanticsErrorV1* e) {
+int ValidateOperatorParameters(const V& contract, const V& parameters, DataSemanticsError* e) {
     const auto& configuration = contract["configuration"];
     if (ValidateOperatorConfiguration(configuration["invocation_schema"], parameters, contract, e)) return -1;
     if (!configuration.HasMember("decoded_parameters")) return 0;
@@ -389,7 +389,7 @@ int ValidateOperatorParameters(const V& contract, const V& parameters, DataSeman
     return 0;
 }
 int NormalizeOperatorDocument(const std::string& kind, rapidjson::Document* d, std::vector<SemanticsReference>* refs,
-                              DataSemanticsErrorV1* e) {
+                              DataSemanticsError* e) {
     if (kind == "operator_contract") {
         const auto& configuration = (*d)["configuration"];
         for (const char* key : {"invocation_schema", "normalized_config_schema"})

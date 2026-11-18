@@ -1,6 +1,7 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 #include <channels/config/metadata_description.h>
+#include <channels/config/metadata_description_time.h>
 #include <rapidjson/pointer.h>
 #include <unistd.h>
 #include <atomic>
@@ -13,12 +14,50 @@
 using namespace flowsql;
 using namespace flowsql::dataset;
 using namespace flowsql::channels::config;
+void SeedDictionary(DataSemanticsRegistry& registry, const Value& basis, const std::string& edits,
+                    const char* expected_error = nullptr) {
+    DataSemanticsError e;
+    DataSemanticsSnapshot snapshot;
+    assert(!registry.Resolve(Get(basis, "dictionary_ref").c_str(), &snapshot, &e));
+    Json document, changes;
+    document.Parse(snapshot.document_json->c_str());
+    changes.Parse(edits.c_str());
+    assert(!changes.HasParseError());
+    auto& a = document.GetAllocator();
+    if (changes.HasMember("fields"))
+        for (auto& field : document["fields"].GetArray()) {
+            const auto name = Get(field, "name");
+            if (changes["fields"].HasMember(name.c_str()))
+                for (const auto& item : changes["fields"][name.c_str()].GetObject())
+                    Set(field, item.name.GetString(), Copy(item.value, a), a);
+        }
+    if (changes.HasMember("entity"))
+        for (const auto& item : changes["entity"].GetObject())
+            Set(document["entity"], item.name.GetString(), Copy(item.value, a), a);
+    SemanticsIdentity identity;
+    assert(ParseSemanticsReference(snapshot.exact_reference, &identity));
+    SemanticsSaveRequest request{"dictionary", identity.name, Encode(document)};
+    request.expected_current_revision = identity.revision;
+    SemanticsSaveResult saved;
+    const auto rc = registry.Save(request, &saved, &e);
+    if (rc && !expected_error) std::cerr << e.code << ": " << e.message << '\n';
+    assert(expected_error ? rc != 0 && e.code == expected_error : rc == 0);
+    if (rc) return;
+    assert(!registry.Resolve(Get(basis, "binding_ref").c_str(), &snapshot, &e));
+    document.Parse(snapshot.document_json->c_str());
+    Set(document, "dictionary_ref", saved.snapshot.exact_reference, document.GetAllocator());
+    assert(ParseSemanticsReference(snapshot.exact_reference, &identity));
+    request = {"binding", identity.name, Encode(document)};
+    request.expected_current_revision = identity.revision;
+    request.source_observed = true;
+    assert(!registry.Save(request, &saved, &e));
+}
 void TestEditor() {
     char file[] = "/tmp/flowsql-editor-XXXXXX";
     close(mkstemp(file));
     DataSemanticsRegistry registry;
     ConfigChannelProvider configs;
-    DataSemanticsErrorV1 e;
+    DataSemanticsError e;
     std::string detail;
     assert(!registry.Open(file, &e) && !configs.Open(file, &detail));
     Json locator, fields, metadata(rapidjson::kObjectType);
@@ -39,13 +78,13 @@ void TestEditor() {
         d.Parse(out.c_str());
         return d;
     };
-    auto submit = [&](const Value& basis, const char* changes, bool editor = true, int expected = 0) {
+    auto submit = [&](const Value& basis, const char* changes, int expected = 0) {
         Json req, edit;
         req.SetObject();
         edit.Parse(changes);
         auto& a = req.GetAllocator();
         req.AddMember("locator", Copy(locator, a), a).AddMember("basis", Copy(basis, a), a);
-        Set(req, editor ? "editor_changes" : "changes", Copy(edit, a), a);
+        Set(req, "editor_changes", Copy(edit, a), a);
         std::string out;
         auto rc = service.SaveChannel(Encode(req).c_str(), &out);
         if (rc != expected) std::cerr << out << '\n';
@@ -67,15 +106,14 @@ void TestEditor() {
             "binding_ref") == Get(saved["data"], "binding_ref"));
     before = describe();
     const auto id = Get(before["data"]["description"]["document"]["fields"][0], "field_id");
-    submit(
-        before["data"]["basis"],
-        R"({"fields":{"value":{"definition":{"state":"declared","origin":"manual","value":"first"},"unit":{"state":"declared","origin":"imported","value":{"code":"ms","label":"milliseconds"}},"role":{"state":"unknown","origin":"derived","value":null},"null_meaning":{"state":"declared","origin":"producer","value":"not observed"},"measure_kind":{"state":"not_applicable","origin":"manual","value":null}}}})",
-        false);
-    // A single legacy dictionary contains every hidden semantic property and all four origins.
+    SeedDictionary(
+        registry, before["data"]["basis"],
+        R"({"fields":{"value":{"definition":{"state":"declared","origin":"manual","value":"first"},"unit":{"state":"declared","origin":"imported","value":{"code":"ms","label":"milliseconds"}},"role":{"state":"unknown","origin":"derived","value":null},"null_meaning":{"state":"declared","origin":"producer","value":"not observed"},"measure_kind":{"state":"not_applicable","origin":"manual","value":null}}}})");
+    // A complete dictionary contains every hidden semantic property and all four origins.
     SemanticsSaveResult standard, target;
     assert(!registry.Save(
-        {"standard", "preserved", R"({"schema_id":"flowsql.data-standard.v1","title":"Preserved standard"})"},
-        &standard, &e));
+        {"standard", "preserved", R"({"schema_id":"flowsql.data-standard","title":"Preserved standard"})"}, &standard,
+        &e));
     assert(!registry.Save({"dictionary", "preserved.target", Encode(before["data"]["description"]["document"])},
                           &target, &e));
     Json advanced;
@@ -96,7 +134,7 @@ void TestEditor() {
     Set(relation, "field_map", std::move(mapping), aa);
     advanced["entity"]["relations"]["value"].PushBack(std::move(relation), aa);
     before = describe();
-    submit(before["data"]["basis"], Encode(advanced).c_str(), false);
+    SeedDictionary(registry, before["data"]["basis"], Encode(advanced).c_str());
     before = describe();
     auto changed = submit(before["data"]["basis"], R"({"fields":{"value":{"definition":"second"}}})");
     auto current = describe();
@@ -104,11 +142,11 @@ void TestEditor() {
     Set(expected["fields"][0]["definition"], "value", "second", before.GetAllocator());
     assert(current["data"]["description"]["document"] == expected);
     assert(Get(current["data"]["description"]["document"]["fields"][0], "field_id") == id);
-    submit(before["data"]["basis"], R"({"description":"stale"})", true, error::CONFLICT);
-    submit(current["data"]["basis"], R"({"fields":{"absent":{"definition":"x"}}})", true, error::CONFLICT);
+    submit(before["data"]["basis"], R"({"description":"stale"})", error::CONFLICT);
+    submit(current["data"]["basis"], R"({"fields":{"absent":{"definition":"x"}}})", error::CONFLICT);
     for (const char* invalid :
          {R"({"fields":{"value":{"type":{}}}})", R"({"unknown":1})", R"({"fields":{"value":{"unit":{}}}})"})
-        submit(current["data"]["basis"], invalid, true, error::BAD_REQUEST);
+        submit(current["data"]["basis"], invalid, error::BAD_REQUEST);
     Json both;
     both.Parse(R"({"locator":{"kind":"dataframe","name":"editor"},"changes":{},"editor_changes":{}})");
     both.AddMember("basis", Copy(current["data"]["basis"], both.GetAllocator()), both.GetAllocator());
@@ -140,7 +178,7 @@ void TestTimeEditor() {
     close(mkstemp(file));
     DataSemanticsRegistry registry;
     ConfigChannelProvider configs;
-    DataSemanticsErrorV1 e;
+    DataSemanticsError e;
     std::string detail;
     assert(!registry.Open(file, &e) && !configs.Open(file, &detail));
     Json locator, fields(rapidjson::kArrayType), metadata;
@@ -174,14 +212,14 @@ void TestTimeEditor() {
         d.Parse(out.c_str());
         return d;
     };
-    auto save = [&](const Value& basis, const std::string& edits, bool editor = true, int expected = 0) {
+    auto save = [&](const Value& basis, const std::string& edits, int expected = 0) {
         Json req(rapidjson::kObjectType), edit;
         edit.Parse(edits.c_str());
         assert(!edit.HasParseError());
         auto& ra = req.GetAllocator();
         Set(req, "locator", Copy(locator, ra), ra);
         Set(req, "basis", Copy(basis, ra), ra);
-        Set(req, editor ? "editor_changes" : "changes", Copy(edit, ra), ra);
+        Set(req, "editor_changes", Copy(edit, ra), ra);
         std::string out;
         const auto rc = service.SaveChannel(Encode(req).c_str(), &out);
         if (rc != expected) std::cerr << out << '\n';
@@ -233,23 +271,26 @@ void TestTimeEditor() {
           R"({"fields":{"date":{"time":{"mode":"duration","unit":"s"}}}})",
           R"({"fields":{"s":{"time":{"mode":"unix_timestamp","unit":"s","timezone":"UTC"}}}})",
           R"({"fields":{"date":{"time":{"mode":"datetime","unit":"ms"}}}})"})
-        save(current["data"]["basis"], invalid, true, error::BAD_REQUEST);
-    save(
-        current["data"]["basis"],
-        R"({"fields":{"legacy":{"time_semantics":{"state":"declared","origin":"imported","value":{"kind":"instant","unit":{"state":"declared","origin":"imported","value":{"code":"minute","label":"minute"}},"epoch":{"state":"declared","origin":"imported","value":"custom epoch"}}}}}})",
-        false);
+        save(current["data"]["basis"], invalid, error::BAD_REQUEST);
+    SeedDictionary(
+        registry, current["data"]["basis"],
+        R"({"fields":{"legacy":{"time_semantics":{"state":"declared","origin":"imported","value":{"kind":"instant","unit":{"state":"declared","origin":"imported","value":{"code":"minute","label":"minute"}},"epoch":{"state":"declared","origin":"imported","value":"custom epoch"}}}}}})");
     current = describe();
     const auto legacy = Canonical(field(current, "legacy")["time_semantics"]);
     save(current["data"]["basis"], R"({"fields":{"legacy":{"definition":"text only"}}})");
     current = describe();
     assert(Canonical(field(current, "legacy")["time_semantics"]) == legacy);
-    // Existing immutable dictionaries can use the former explicit Unix epoch spelling.
-    save(
-        current["data"]["basis"],
-        R"({"fields":{"producer":{"time_semantics":{"state":"declared","origin":"imported","value":{"kind":"instant","unit":{"state":"declared","origin":"producer","value":{"code":"ms","label":"ms"}},"epoch":{"state":"declared","origin":"producer","value":"Unix epoch"}}}}}})",
-        false);
+    // Canonical Unix declarations agree with producer facts.
+    SeedDictionary(
+        registry, current["data"]["basis"],
+        R"({"fields":{"producer":{"time_semantics":{"state":"declared","origin":"imported","value":{"kind":"instant","unit":{"state":"declared","origin":"producer","value":{"code":"ms","label":"ms"}},"epoch":{"state":"declared","origin":"producer","value":"1970-01-01T00:00:00Z"}}}}}})");
     current = describe();
     assert(!current["data"]["context"]["editor_fields"]["producer"]["conflict"].GetBool());
+    Json old_epoch;
+    old_epoch.CopyFrom(field(current, "producer"), old_epoch.GetAllocator());
+    Set(old_epoch["time_semantics"]["value"]["epoch"], "value", "Unix epoch", old_epoch.GetAllocator());
+    auto facts = description_time::Facts(source["fields"][6], source, "producer");
+    assert(description_time::Conflict(old_epoch, facts));
     const auto previous_unix = Canonical(field(current, "producer")["time_semantics"]);
     save(current["data"]["basis"], R"({"fields":{"producer":{"definition":"text-only Unix update"}}})");
     current = describe();
@@ -263,7 +304,7 @@ void TestTimeEditor() {
     Json edit(rapidjson::kObjectType);
     Set(edit, "entity", Value(rapidjson::kObjectType), edit.GetAllocator());
     Set(edit["entity"], "time_fields", Copy(summary, edit.GetAllocator()), edit.GetAllocator());
-    save(current["data"]["basis"], Encode(edit), false);
+    SeedDictionary(registry, current["data"]["basis"], Encode(edit));
     current = describe();
     save(current["data"]["basis"],
          R"({"fields":{"s":{"time":null},"native":{"time":{"mode":"datetime","timezone":"Europe/Paris"}}}})");
@@ -298,12 +339,12 @@ void TestRelationEditor() {
     close(mkstemp(file));
     DataSemanticsRegistry registry;
     ConfigChannelProvider configs;
-    DataSemanticsErrorV1 e;
+    DataSemanticsError e;
     std::string detail;
     assert(!registry.Open(file, &e) && !configs.Open(file, &detail));
     Json target;
     target.Parse(
-        R"({"schema_id":"flowsql.data-dictionary.v1","title":"Target entity","entity":{},"fields":[{"field_id":"a","name":"target_a","title":"A","type":{"system":"arrow","name":"int64","parameters":{}},"nullable":true},{"field_id":"b","name":"target_b","title":"B","type":{"system":"arrow","name":"int64","parameters":{}},"nullable":true}]})");
+        R"({"schema_id":"flowsql.data-dictionary","title":"Target entity","entity":{},"fields":[{"field_id":"a","name":"target_a","title":"A","type":{"system":"arrow","name":"int64","parameters":{}},"nullable":true},{"field_id":"b","name":"target_b","title":"B","type":{"system":"arrow","name":"int64","parameters":{}},"nullable":true}]})");
     SemanticsSaveResult saved_target;
     assert(!registry.Save({"dictionary", "target", Encode(target)}, &saved_target, &e));
     const auto exact = saved_target.snapshot.exact_reference;
@@ -373,7 +414,7 @@ void TestRelationEditor() {
     submit(current["data"]["basis"],
            R"({"relations":[{"dictionary_ref":"dictionary.absent@1","field_map":{"first":"a"}}]})", error::NOT_FOUND);
     assert(Canonical(describe()["data"]["description"]["document"]["entity"]["relations"]) == original_relations);
-    DataSemanticsSnapshotV1 historical;
+    DataSemanticsSnapshot historical;
     assert(!registry.Resolve(exact.c_str(), &historical, &e));
     Json old;
     old.Parse(historical.document_json->c_str());
@@ -405,7 +446,7 @@ void TestUsage() {
     close(mkstemp(file));
     DataSemanticsRegistry registry;
     ConfigChannelProvider configs;
-    DataSemanticsErrorV1 e;
+    DataSemanticsError e;
     std::string detail;
     assert(!registry.Open(file, &e) && !configs.Open(file, &detail));
     auto cases = read("config/semantics/examples/operator-usage.json");
@@ -415,12 +456,12 @@ void TestUsage() {
         SemanticsSaveResult saved;
         const auto name = Get(document["operator"], "category") + "." + Get(document["operator"], "name");
         assert(!registry.Save({"operator_contract", name, Encode(document)}, &saved, &e));
-        OperatorComponentContractV1 association{Get(document["operator"], "category"),
-                                                Get(document["operator"], "name"),
-                                                "component-one",
-                                                "1",
-                                                saved.snapshot.exact_reference,
-                                                "declared"};
+        OperatorComponentContract association{Get(document["operator"], "category"),
+                                              Get(document["operator"], "name"),
+                                              "component-one",
+                                              "1",
+                                              saved.snapshot.exact_reference,
+                                              "declared"};
         bool changed = false, slow = false;
         int calls = 0;
         MetadataDescriptionService service(registry, configs, {}, [&](const auto&, auto ms, auto* out, auto*) {
@@ -532,7 +573,7 @@ int main() {
     close(fd);
     DataSemanticsRegistry registry;
     ConfigChannelProvider configs;
-    DataSemanticsErrorV1 e;
+    DataSemanticsError e;
     std::string detail;
     assert(!registry.Open(file, &e));
     assert(!configs.Open(file, &detail));
@@ -574,7 +615,7 @@ int main() {
     assert(d["data"]["structure"]["fields"].Size() == 1);
     assert(Get(d["data"]["description"], "state") == "missing");
     assert(Get(d["data"]["checks"], "state") == "unbound");
-    DataSemanticsSnapshotV1 absent;
+    DataSemanticsSnapshot absent;
     assert(registry.BindingLookup("dataframe", "identity", &absent, &e) != 0);
     assert(calls == 2);
     Set(source, "schema_state", "pending", source.GetAllocator());
@@ -596,24 +637,16 @@ int main() {
          error::BAD_REQUEST);
 
     // Object-local editing, durable storage, stable identities and exact retry behavior.
-    auto semantic = [](const std::string& value) {
-        Json v(rapidjson::kObjectType);
-        auto& a = v.GetAllocator();
-        Set(v, "state", "declared", a);
-        Set(v, "origin", "manual", a);
-        Set(v, "value", value, a);
-        return v;
-    };
     auto command = [&](const Value& basis, const std::string& value) {
         Json r(rapidjson::kObjectType);
         auto& a = r.GetAllocator();
         r.AddMember("locator", Copy(locator, a), a)
             .AddMember("basis", Copy(basis, a), a)
-            .AddMember("changes", Value(rapidjson::kObjectType), a);
-        r["changes"].AddMember("fields", Value(rapidjson::kObjectType), a);
+            .AddMember("editor_changes", Value(rapidjson::kObjectType), a);
+        r["editor_changes"].AddMember("fields", Value(rapidjson::kObjectType), a);
         Value f(rapidjson::kObjectType);
-        f.AddMember("definition", Copy(semantic(value), a), a);
-        r["changes"]["fields"].AddMember("value", f, a);
+        f.AddMember("definition", Value(value.c_str(), a), a);
+        r["editor_changes"]["fields"].AddMember("value", f, a);
         return r;
     };
     auto save = [&](const Json& r, int status = 0) {
@@ -639,7 +672,7 @@ int main() {
     assert(Get(d["data"]["description"]["document"]["fields"][0]["definition"], "value") == "first meaning");
     const auto field_id = Get(d["data"]["description"]["document"]["fields"][0], "field_id");
     // Two objects intentionally share one dictionary; saving the first cannot revise that shared definition.
-    DataSemanticsSnapshotV1 binding_snapshot;
+    DataSemanticsSnapshot binding_snapshot;
     assert(!registry.Resolve(first_binding.c_str(), &binding_snapshot, &e));
     Json shared;
     shared.Parse(binding_snapshot.document_json->c_str());
@@ -650,10 +683,6 @@ int main() {
     SemanticsSaveResult shared_result;
     assert(!registry.Save(share, &shared_result, &e));
     request = command(d["data"]["basis"], "new meaning");
-    request.RemoveMember("changes");
-    Json local_edit;
-    local_edit.Parse(R"({"fields":{"value":{"definition":"new meaning"}}})");
-    request.AddMember("editor_changes", Copy(local_edit, request.GetAllocator()), request.GetAllocator());
     saved = save(request);
     assert(Get(saved["data"], "dictionary_ref") != first_ref);
     d = call(input);
@@ -671,20 +700,19 @@ int main() {
     auto partial = save(request);
     assert(Get(partial["data"], "status") == "definition_saved_not_applied");
     const auto partial_ref = Get(partial["data"], "dictionary_ref");
-    DataSemanticsSnapshotV1 persisted;
+    DataSemanticsSnapshot persisted;
     assert(!registry.Resolve(partial_ref.c_str(), &persisted, &e));
     fail_on_call = 0;
     assert(Get(save(request)["data"], "dictionary_ref") == partial_ref);
     d = call(input);
     auto invalid = command(d["data"]["basis"], "must not save");
-    invalid["changes"]["fields"]["value"].AddMember("type", Value(rapidjson::kObjectType), invalid.GetAllocator());
+    invalid["editor_changes"]["fields"]["value"].AddMember("type", Value(rapidjson::kObjectType),
+                                                           invalid.GetAllocator());
     save(invalid, error::BAD_REQUEST);
-    invalid = command(d["data"]["basis"], "must not save");
-    Json missing_ref;
-    missing_ref.Parse(R"({"state":"declared","origin":"manual","value":["standard.absent@1"]})");
-    invalid["changes"]["fields"]["value"].AddMember("standard_refs", Copy(missing_ref, invalid.GetAllocator()),
-                                                    invalid.GetAllocator());
-    save(invalid, error::NOT_FOUND);
+    SeedDictionary(
+        registry, d["data"]["basis"],
+        R"({"fields":{"value":{"standard_refs":{"state":"declared","origin":"manual","value":["standard.absent@1"]}}}})",
+        "NOT_FOUND");
     assert(Get(call(input)["data"]["basis"], "binding_ref") == Get(d["data"]["basis"], "binding_ref"));
     // Concurrent different submissions cannot both replace the captured binding.
     auto one = command(d["data"]["basis"], "concurrent one"), two = command(d["data"]["basis"], "concurrent two");
@@ -725,13 +753,13 @@ int main() {
     fields.Erase(fields.Begin());
     d = call(input);
     request = command(d["data"]["basis"], "removed field");
-    request["changes"].SetObject();
+    request["editor_changes"].SetObject();
     save(request, error::CONFLICT);
     request.AddMember("confirmations", Copy(d["data"]["checks"]["required_confirmations"], request.GetAllocator()),
                       request.GetAllocator());
     assert(Get(save(request)["data"], "status") == "applied");
     assert(call(input)["data"]["description"]["document"]["fields"].Size() == 1);
-    OperatorComponentContractV1 association{"test", "operator", "component-one", "1", "", "missing"};
+    OperatorComponentContract association{"test", "operator", "component-one", "1", "", "missing"};
     bool replace_component = false;
     int lookups = 0;
     MetadataDescriptionService operators(registry, configs, {}, [&](const auto&, uint32_t ms, auto* out, auto*) {
@@ -822,7 +850,7 @@ int main() {
     ConfigChannelSnapshot prior;
     assert(!configs.Resolve(note_ref.c_str(), &prior, &detail));
     damaged.expected_current_revision = 3;
-    damaged.schema_id = "flowsql.operator-description.v1";
+    damaged.schema_id = "flowsql.operator-description";
     damaged.content = *prior.content;
     assert(!configs.Publish(damaged, &damaged_result, &detail));
     lookups = 0;

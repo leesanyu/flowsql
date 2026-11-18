@@ -32,11 +32,11 @@ struct Environment {
         plugin.Unload();
     }
 };
-std::shared_ptr<IBaselineCheckpointV1> Bind(Environment& env, std::shared_ptr<IBaselineTask> task,
-                                            uint64_t max_bytes = 1 << 24, BaselineStateLimitsV1 limits = {8, 8, 2}) {
+std::shared_ptr<IBaselineCheckpoint> Bind(Environment& env, std::shared_ptr<IBaselineTask> task,
+                                          uint64_t max_bytes = 1 << 24, BaselineStateLimits limits = {8, 8, 2}) {
     auto controlled = env.plugin.Bind(task, limits);
     assert(controlled.first == BaselineStatus::kOk);
-    BaselineCheckpointBindingV1 binding;
+    BaselineCheckpointBinding binding;
     binding.max_payload_bytes = max_bytes;
     auto checkpoint = env.plugin.Bind(task, controlled.second, binding);
     assert(checkpoint.first == BaselineStatus::kOk && checkpoint.second);
@@ -68,9 +68,9 @@ void Roundtrip(bool ratio) {
     auto checkpoint = Bind(source, task);
     for (int64_t t = 0; t < 80; ++t) {
         if (ratio)
-            rate->SubmitObservation({"series", t, t == 70 ? 1. : 800., 1000}, {});
+            rate->SubmitObservation({"series", t, t == 70 ? 1. : 800., 1000}, {}).result;
         else
-            value->SubmitObservation({"series", t, t == 70 ? 1e100 : 100. + t % 3, 1}, {});
+            value->SubmitObservation({"series", t, t == 70 ? 1e100 : 100. + t % 3, 1}, {}).result;
     }
     const auto exported = checkpoint->ExportCheckpoint(BaselineSerializationFormat::kJson);
     assert(exported.first == BaselineStatus::kOk && !exported.second.empty());
@@ -81,7 +81,7 @@ void Roundtrip(bool ratio) {
     auto restored_task = ratio ? std::static_pointer_cast<IBaselineTask>(restored_rate)
                                : std::static_pointer_cast<IBaselineTask>(restored_value);
     auto restored = Bind(target, restored_task);
-    BaselineCheckpointRestoreV1 restore;
+    BaselineCheckpointRestore restore;
     restore.content = exported.second;
     assert(restored->RestoreCheckpoint(restore) == BaselineStatus::kOk);
     assert(Snapshot(task) == Snapshot(restored_task));
@@ -99,10 +99,10 @@ void Roundtrip(bool ratio) {
     assert(exported == checkpoint->ExportCheckpoint(BaselineSerializationFormat::kJson));
     assert(restored->RestoreCheckpoint(restore) != BaselineStatus::kOk);
     for (int64_t t = 80; t < 100; ++t) {
-        Equal(ratio ? rate->SubmitObservation({"series", t, 800, 1000}, {})
-                    : value->SubmitObservation({"series", t, 100, 1}, {}),
-              ratio ? restored_rate->SubmitObservation({"series", t, 800, 1000}, {})
-                    : restored_value->SubmitObservation({"series", t, 100, 1}, {}));
+        Equal(ratio ? rate->SubmitObservation({"series", t, 800, 1000}, {}).result
+                    : value->SubmitObservation({"series", t, 100, 1}, {}).result,
+              ratio ? restored_rate->SubmitObservation({"series", t, 800, 1000}, {}).result
+                    : restored_value->SubmitObservation({"series", t, 100, 1}, {}).result);
         assert(Snapshot(task) == Snapshot(restored_task));
     }
 }
@@ -137,7 +137,7 @@ void RejectAndRetry() {
     auto v = source.plugin.CreateValueTask(value_config, BaselineSerializationFormat::kJson).second;
     auto cp = Bind(source, v);
     for (int64_t t = 0; t < 12; ++t)
-        assert(v->SubmitObservation({"series", t, 100, 1}, {}).status == BaselineStatus::kOk);
+        assert(v->SubmitObservation({"series", t, 100, 1}, {}).result.status == BaselineStatus::kOk);
     auto exported = cp->ExportCheckpoint(BaselineSerializationFormat::kJson);
     assert(exported.first == BaselineStatus::kOk);
     auto recovered = target.plugin.CreateValueTask(value_config, BaselineSerializationFormat::kJson).second;
@@ -165,12 +165,12 @@ void RejectAndRetry() {
         [](auto& d) { d["payload"].AddMember("rolling", rapidjson::Value(rapidjson::kArrayType), d.GetAllocator()); },
         true));
     for (const auto& content : invalid) {
-        BaselineCheckpointRestoreV1 request;
+        BaselineCheckpointRestore request;
         request.content = content;
         assert(dest->RestoreCheckpoint(request) != BaselineStatus::kOk);
         assert(before == dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
     }
-    BaselineCheckpointRestoreV1 request;
+    BaselineCheckpointRestore request;
     request.content = exported.second;
     request.payload_version = 2;
     assert(dest->RestoreCheckpoint(request) != BaselineStatus::kOk);
@@ -194,7 +194,7 @@ void CapacityAndBinding() {
     auto r = source.plugin.CreateRatioTask(ratio_config, BaselineSerializationFormat::kJson).second;
     auto c1 = source.plugin.Bind(v, {8, 8, 2}).second;
     auto c2 = source.plugin.Bind(r, {8, 8, 2}).second;
-    BaselineCheckpointBindingV1 binding;
+    BaselineCheckpointBinding binding;
     assert(source.plugin.Bind(v, c2, binding).first != BaselineStatus::kOk);
     assert(target.plugin.Bind(v, c1, binding).first != BaselineStatus::kOk);
     binding.max_payload_bytes = 0;
@@ -208,13 +208,13 @@ void CapacityAndBinding() {
     assert(!source.plugin.Bind(v, c1, binding).second);
     const auto empty = cp->ExportCheckpoint(BaselineSerializationFormat::kJson);
     assert(empty.first == BaselineStatus::kOk);
-    for (const char* id : {"first", "second"}) v->SubmitObservation({id, 0, 100, 1}, {});
+    for (const char* id : {"first", "second"}) v->SubmitObservation({id, 0, 100, 1}, {}).result;
     const auto full = cp->ExportCheckpoint(BaselineSerializationFormat::kJson);
     assert(full.first == BaselineStatus::kOk);
     auto dest_task = target.plugin.CreateValueTask(value_config, BaselineSerializationFormat::kJson).second;
     auto dest = Bind(target, dest_task, 1 << 24, {1, 1, 2});
     const auto before = dest->ExportCheckpoint(BaselineSerializationFormat::kJson);
-    BaselineCheckpointRestoreV1 request;
+    BaselineCheckpointRestore request;
     request.content = full.second;
     assert(dest->RestoreCheckpoint(request) != BaselineStatus::kOk);
     assert(before == dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
@@ -234,8 +234,8 @@ void EligibilityAndCompatibility() {
     Environment source, target;
     auto task = source.plugin.CreateValueTask(value_config, BaselineSerializationFormat::kJson).second;
     auto cp = Bind(source, task);
-    task->SubmitObservation({"series", 0, 100, 1}, {});
-    BaselineCheckpointRestoreV1 request;
+    task->SubmitObservation({"series", 0, 100, 1}, {}).result;
+    BaselineCheckpointRestore request;
     const auto exported = cp->ExportCheckpoint(BaselineSerializationFormat::kJson);
     request.content = exported.second;
     for (const auto& edit :
@@ -259,12 +259,12 @@ void EligibilityAndCompatibility() {
     auto dest_task = target.plugin.CreateValueTask(value_config, BaselineSerializationFormat::kJson).second;
     auto control = target.plugin.Bind(dest_task, {8, 8, 2}).second;
     assert(control);
-    assert(control->ReleaseIdentity("absent", BaselineStateReleaseScopeV1::kAllState) == BaselineStatus::kOk);
+    assert(control->ReleaseIdentity("absent", BaselineStateReleaseScope::kAllState) == BaselineStatus::kOk);
     assert(target.plugin.Bind(dest_task, control, {}).first != BaselineStatus::kOk);
     dest_task->Close();
     dest_task = target.plugin.CreateValueTask(value_config, BaselineSerializationFormat::kJson).second;
     auto dest = Bind(target, dest_task);
-    dest_task->SubmitObservation({"series", 0, 100, 1}, {});
+    dest_task->SubmitObservation({"series", 0, 100, 1}, {}).result;
     const auto before = dest->ExportCheckpoint(BaselineSerializationFormat::kJson);
     assert(dest->RestoreCheckpoint(request) != BaselineStatus::kOk);
     assert(before == dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
@@ -277,23 +277,24 @@ void LowSupportRoundtrip(bool ratio) {
     auto cp = Bind(source, task);
     for (int64_t t = 0; t < 6; ++t) {
         if (ratio)
-            r->SubmitObservation({"series", t, 1, t == 0 ? 1000. : 1.}, {});
+            r->SubmitObservation({"series", t, 1, t == 0 ? 1000. : 1.}, {}).result;
         else
-            v->SubmitObservation({"series", t, 100, t == 0 ? 1u : 0u}, {});
+            v->SubmitObservation({"series", t, 100, t == 0 ? 1u : 0u}, {}).result;
     }
     auto dv = ratio ? nullptr : target.plugin.CreateValueTask(value_config, BaselineSerializationFormat::kJson).second;
     auto dr = ratio ? target.plugin.CreateRatioTask(ratio_config, BaselineSerializationFormat::kJson).second : nullptr;
     auto dt = ratio ? std::static_pointer_cast<IBaselineTask>(dr) : std::static_pointer_cast<IBaselineTask>(dv);
     auto dest = Bind(target, dt);
     auto payload = cp->ExportCheckpoint(BaselineSerializationFormat::kJson);
-    BaselineCheckpointRestoreV1 request;
+    BaselineCheckpointRestore request;
     request.content = payload.second;
     assert(dest->RestoreCheckpoint(request) == BaselineStatus::kOk);
     assert(payload == dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
     for (int64_t t : {5, 4, 6}) {
-        Equal(
-            ratio ? r->SubmitObservation({"series", t, 1, 1}, {}) : v->SubmitObservation({"series", t, 100, 0}, {}),
-            ratio ? dr->SubmitObservation({"series", t, 1, 1}, {}) : dv->SubmitObservation({"series", t, 100, 0}, {}));
+        Equal(ratio ? r->SubmitObservation({"series", t, 1, 1}, {}).result
+                    : v->SubmitObservation({"series", t, 100, 0}, {}).result,
+              ratio ? dr->SubmitObservation({"series", t, 1, 1}, {}).result
+                    : dv->SubmitObservation({"series", t, 100, 0}, {}).result);
         assert(cp->ExportCheckpoint(BaselineSerializationFormat::kJson) ==
                dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
     }
@@ -339,7 +340,7 @@ void RelationRoundtrip() {
     RelationRollingResult last;
     const std::string key("binary::source\0tail", 19);
     for (int64_t t = 0; t < 16; ++t) {
-        const auto result = task->SubmitObservation(RelationObservation(t, key), {});
+        const auto result = task->SubmitObservation(RelationObservation(t, key), {}).result;
         assert(result.status == BaselineStatus::kOk);
         handover |= result.handover_active;
         last = result;
@@ -351,7 +352,7 @@ void RelationRoundtrip() {
     assert(exported.first == BaselineStatus::kOk);
     auto dt = target.plugin.CreateRelationTask(relation_config, BaselineSerializationFormat::kJson).second;
     auto dest = Bind(target, dt);
-    BaselineCheckpointRestoreV1 request;
+    BaselineCheckpointRestore request;
     request.content = exported.second;
     assert(dest->RestoreCheckpoint(request) == BaselineStatus::kOk);
     assert(exported == dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
@@ -367,8 +368,8 @@ void RelationRoundtrip() {
     assert(exported == cp->ExportCheckpoint(BaselineSerializationFormat::kJson));
     assert(exported == dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
     for (int64_t t : {15, 14, 16, 17, 18, 19, 20, 21, 22, 23}) {
-        auto a = task->SubmitObservation(RelationObservation(t, key), {});
-        auto b = dt->SubmitObservation(RelationObservation(t, key), {});
+        auto a = task->SubmitObservation(RelationObservation(t, key), {}).result;
+        auto b = dt->SubmitObservation(RelationObservation(t, key), {}).result;
         assert(baseline::checkpoint::Encode(a, 1 << 24) == baseline::checkpoint::Encode(b, 1 << 24));
         assert(cp->ExportCheckpoint(BaselineSerializationFormat::kJson) ==
                dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
@@ -377,7 +378,7 @@ void RelationRoundtrip() {
 void EqualRelation(const RelationRollingResult& a, const RelationRollingResult& b) {
     assert(baseline::checkpoint::Encode(a, 1 << 24) == baseline::checkpoint::Encode(b, 1 << 24));
 }
-void RelationModelsAndRelease(std::optional<BaselineStateReleaseScopeV1> scope) {
+void RelationModelsAndRelease(std::optional<BaselineStateReleaseScope> scope) {
     Environment source, target;
     auto task = source.plugin.CreateRelationTask(relation_config, BaselineSerializationFormat::kJson).second;
     auto control = source.plugin.Bind(task, {8, 8, 2}).second;
@@ -397,7 +398,7 @@ void RelationModelsAndRelease(std::optional<BaselineStateReleaseScopeV1> scope) 
         auto observation = RelationObservation(t, "history");
         observation.group_idx = {1, 2, 3};
         observation.metrics = {{"m2", 100, 2, {80, 20, 0}}, {"m", 200, 2, {160, 40, 0}}};
-        assert(task->SubmitObservation(observation, {}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(observation, {}).result.status == BaselineStatus::kOk);
     }
     if (scope) assert(control->ReleaseIdentity("history", *scope) == BaselineStatus::kOk);
     const auto exported = cp->ExportCheckpoint(BaselineSerializationFormat::kJson);
@@ -405,7 +406,7 @@ void RelationModelsAndRelease(std::optional<BaselineStateReleaseScopeV1> scope) 
     auto dt = target.plugin.CreateRelationTask(relation_config, BaselineSerializationFormat::kJson).second;
     auto dc = target.plugin.Bind(dt, {8, 8, 2}).second;
     auto dest = target.plugin.Bind(dt, dc, {}).second;
-    BaselineCheckpointRestoreV1 request;
+    BaselineCheckpointRestore request;
     request.content = exported.second;
     if (!scope) {
         const auto before = dest->ExportCheckpoint(BaselineSerializationFormat::kJson);
@@ -430,7 +431,7 @@ void RelationModelsAndRelease(std::optional<BaselineStateReleaseScopeV1> scope) 
                          .SetArray();
                  }}) {
             auto text = Mutate(exported.second, mutate, true);
-            BaselineCheckpointRestoreV1 bad;
+            BaselineCheckpointRestore bad;
             bad.content = text;
             assert(dest->RestoreCheckpoint(bad) != BaselineStatus::kOk);
             assert(before == dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
@@ -451,11 +452,11 @@ void RelationModelsAndRelease(std::optional<BaselineStateReleaseScopeV1> scope) 
         auto obs = RelationObservation(t, "history");
         obs.group_idx = {1, 2, 3};
         obs.metrics = {{"m2", 100, 2, {80, 20, 0}}, {"m", 200, 2, {160, 40, 0}}};
-        EqualRelation(task->SubmitObservation(obs, {}), dt->SubmitObservation(obs, {}));
+        EqualRelation(task->SubmitObservation(obs, {}).result, dt->SubmitObservation(obs, {}).result);
         assert(cp->ExportCheckpoint(BaselineSerializationFormat::kJson) ==
                dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
     }
-    for (auto released : {BaselineStateReleaseScopeV1::kRuntimeOnly, BaselineStateReleaseScopeV1::kAllState}) {
+    for (auto released : {BaselineStateReleaseScope::kRuntimeOnly, BaselineStateReleaseScope::kAllState}) {
         assert(control->ReleaseIdentity("history", released) == BaselineStatus::kOk &&
                dc->ReleaseIdentity("history", released) == BaselineStatus::kOk);
         assert(cp->ExportCheckpoint(BaselineSerializationFormat::kJson) ==
@@ -468,7 +469,7 @@ void RelationRejectAndRetry() {
     auto task = source.plugin.CreateRelationTask(relation_config, BaselineSerializationFormat::kJson).second;
     auto cp = Bind(source, task);
     for (int64_t t = 0; t < 16; ++t)
-        assert(task->SubmitObservation(RelationObservation(t), {}).status == BaselineStatus::kOk);
+        assert(task->SubmitObservation(RelationObservation(t), {}).result.status == BaselineStatus::kOk);
     const auto exported = cp->ExportCheckpoint(BaselineSerializationFormat::kJson);
     assert(exported.first == BaselineStatus::kOk);
     auto dt = target.plugin.CreateRelationTask(relation_config, BaselineSerializationFormat::kJson).second;
@@ -506,18 +507,18 @@ void RelationRejectAndRetry() {
     invalid.push_back(
         Mutate(exported.second, [](auto& d) { d["payload"]["fusion_layout"]["buckets"].SetUint64(1ull << 40); }, true));
     for (const auto& text : invalid) {
-        BaselineCheckpointRestoreV1 request;
+        BaselineCheckpointRestore request;
         request.content = text;
         assert(dest->RestoreCheckpoint(request) != BaselineStatus::kOk);
         assert(empty == dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
     }
-    BaselineCheckpointRestoreV1 request;
+    BaselineCheckpointRestore request;
     request.content = exported.second;
     assert(dest->RestoreCheckpoint(request) == BaselineStatus::kOk);
     assert(dest->RestoreCheckpoint(request) != BaselineStatus::kOk);
     assert(exported == dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
-    EqualRelation(task->SubmitObservation(RelationObservation(16), {}),
-                  dt->SubmitObservation(RelationObservation(16), {}));
+    EqualRelation(task->SubmitObservation(RelationObservation(16), {}).result,
+                  dt->SubmitObservation(RelationObservation(16), {}).result);
 }
 void RelationCapacityAndEmpty() {
     const auto options = RelationOptions();
@@ -531,10 +532,10 @@ void RelationCapacityAndEmpty() {
     const auto before = dest->ExportCheckpoint(BaselineSerializationFormat::kJson);
     for (int64_t t = 0; t < 6; ++t)
         for (const char* key : {"a", "b"})
-            assert(task->SubmitObservation(RelationObservation(t, key), {}).status == BaselineStatus::kOk);
+            assert(task->SubmitObservation(RelationObservation(t, key), {}).result.status == BaselineStatus::kOk);
     const auto full = cp->ExportCheckpoint(BaselineSerializationFormat::kJson);
     assert(full.first == BaselineStatus::kOk);
-    BaselineCheckpointRestoreV1 request;
+    BaselineCheckpointRestore request;
     request.content = full.second;
     assert(dest->RestoreCheckpoint(request) != BaselineStatus::kOk);
     assert(before == dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
@@ -598,18 +599,19 @@ void RelationFusionCleanup() {
     Environment source(options.c_str()), target(options.c_str());
     auto task = source.plugin.CreateRelationTask(relation_config, BaselineSerializationFormat::kJson).second;
     auto cp = Bind(source, task);
-    for (int64_t t = 0; t < 20; ++t) task->SubmitObservation(RelationObservation(t, "s" + std::to_string(t % 5)), {});
+    for (int64_t t = 0; t < 20; ++t)
+        task->SubmitObservation(RelationObservation(t, "s" + std::to_string(t % 5)), {}).result;
     auto exported = cp->ExportCheckpoint(BaselineSerializationFormat::kJson);
     assert(exported.first == BaselineStatus::kOk);
     auto dt = target.plugin.CreateRelationTask(relation_config, BaselineSerializationFormat::kJson).second;
     auto dest = Bind(target, dt);
-    BaselineCheckpointRestoreV1 request;
+    BaselineCheckpointRestore request;
     request.content = exported.second;
     assert(dest->RestoreCheckpoint(request) == BaselineStatus::kOk);
     assert(exported == dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
     for (int64_t t = 20; t < 50; ++t) {
         const auto obs = RelationObservation(t, "s" + std::to_string(t % 5));
-        EqualRelation(task->SubmitObservation(obs, {}), dt->SubmitObservation(obs, {}));
+        EqualRelation(task->SubmitObservation(obs, {}).result, dt->SubmitObservation(obs, {}).result);
         assert(cp->ExportCheckpoint(BaselineSerializationFormat::kJson) ==
                dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
     }
@@ -644,14 +646,14 @@ void DynamicDiscovery() {
         }
     } library;
     auto* service = static_cast<IBaselineService*>(library.First(IID_BASELINE_SERVICE));
-    auto* control = static_cast<IBaselineStateControlServiceV1*>(library.First(IID_BASELINE_STATE_CONTROL_SERVICE_V1));
-    auto* checkpoint = static_cast<IBaselineCheckpointServiceV1*>(library.First(IID_BASELINE_CHECKPOINT_SERVICE_V1));
+    auto* control = static_cast<IBaselineStateControlService*>(library.First(IID_BASELINE_STATE_CONTROL_SERVICE));
+    auto* checkpoint = static_cast<IBaselineCheckpointService*>(library.First(IID_BASELINE_CHECKPOINT_SERVICE));
     assert(service && control && checkpoint);
     auto task = service->CreateValueTask(value_config, BaselineSerializationFormat::kJson).second;
     auto bound = control->Bind(task, {8, 8, 2});
     auto cp = checkpoint->Bind(task, bound.second, {});
     assert(cp.first == BaselineStatus::kOk);
-    task->SubmitObservation({"series", 0, 100, 1}, {});
+    task->SubmitObservation({"series", 0, 100, 1}, {}).result;
     task.reset();
     bound.second.reset();
     assert(cp.second->ExportCheckpoint(BaselineSerializationFormat::kJson).first == BaselineStatus::kOk);
@@ -673,9 +675,9 @@ void BootstrapRoundtrip(bool ratio) {
     assert((ratio ? r->Bootstrap(ri) : v->Bootstrap(vi)).status == BaselineStatus::kOk);
     for (int64_t t = 200; t < 220; ++t) {
         if (ratio)
-            r->SubmitObservation({"history", t, 800, 1000}, {});
+            r->SubmitObservation({"history", t, 800, 1000}, {}).result;
         else
-            v->SubmitObservation({"history", t, 100, 1}, {});
+            v->SubmitObservation({"history", t, 100, 1}, {}).result;
     }
     const auto exported = cp->ExportCheckpoint(BaselineSerializationFormat::kJson);
     assert(exported.first == BaselineStatus::kOk);
@@ -684,7 +686,7 @@ void BootstrapRoundtrip(bool ratio) {
     auto restored_task =
         ratio ? std::static_pointer_cast<IBaselineTask>(dr) : std::static_pointer_cast<IBaselineTask>(dv);
     auto dest = Bind(target, restored_task);
-    BaselineCheckpointRestoreV1 request;
+    BaselineCheckpointRestore request;
     request.content = exported.second;
     assert(dest->RestoreCheckpoint(request) == BaselineStatus::kOk);
     assert(exported == dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
@@ -696,10 +698,10 @@ void BootstrapRoundtrip(bool ratio) {
                   : v->ExportBootstrapSeed(BaselineSerializationFormat::kJson)) ==
            (ratio ? dr->ExportBootstrapSeed(BaselineSerializationFormat::kJson)
                   : dv->ExportBootstrapSeed(BaselineSerializationFormat::kJson)));
-    Equal(ratio ? r->SubmitObservation({"history", 220, 1, 1000}, {})
-                : v->SubmitObservation({"history", 220, 1e100, 1}, {}),
-          ratio ? dr->SubmitObservation({"history", 220, 1, 1000}, {})
-                : dv->SubmitObservation({"history", 220, 1e100, 1}, {}));
+    Equal(ratio ? r->SubmitObservation({"history", 220, 1, 1000}, {}).result
+                : v->SubmitObservation({"history", 220, 1e100, 1}, {}).result,
+          ratio ? dr->SubmitObservation({"history", 220, 1, 1000}, {}).result
+                : dv->SubmitObservation({"history", 220, 1e100, 1}, {}).result);
     assert(cp->ExportCheckpoint(BaselineSerializationFormat::kJson) ==
            dest->ExportCheckpoint(BaselineSerializationFormat::kJson));
 }
@@ -716,8 +718,8 @@ int main() {
     BootstrapRoundtrip(true);
     RelationRoundtrip();
     RelationModelsAndRelease(std::nullopt);
-    RelationModelsAndRelease(BaselineStateReleaseScopeV1::kRuntimeOnly);
-    RelationModelsAndRelease(BaselineStateReleaseScopeV1::kAllState);
+    RelationModelsAndRelease(BaselineStateReleaseScope::kRuntimeOnly);
+    RelationModelsAndRelease(BaselineStateReleaseScope::kAllState);
     RelationRejectAndRetry();
     RelationCapacityAndEmpty();
     RelationFusionCleanup();

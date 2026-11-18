@@ -13,7 +13,7 @@ namespace flowsql::channels::kafka {
 namespace {
 std::atomic<uint64_t> next_generation{0};
 }
-PacketReader::PacketReader(std::string name, PacketSourceConfig config, std::shared_ptr<IKafkaClientSessionV1> session,
+PacketReader::PacketReader(std::string name, PacketSourceConfig config, std::shared_ptr<IKafkaClientSession> session,
                            IProtocol* protocol)
     : name_(std::move(name)), config_(std::move(config)), session_(std::move(session)), protocol_(protocol) {
     schema_text_ = ArrowSchema()->ToString(true);
@@ -26,7 +26,7 @@ PacketReader::PacketReader(std::string name, PacketSourceConfig config, std::sha
     sources_.max_poll_work_ms = config_.max_wait_ms;
     const auto generation = ++next_generation;
     for (const auto& input : config_.inputs) {
-        CaptureQueueIdentityV1 identity;
+        CaptureQueueIdentity identity;
         identity.observation_domain_id = config_.observation_domain_id;
         identity.source_name = input.source_name.c_str();
         identity.source_id = input.source_id;
@@ -45,7 +45,7 @@ PacketReader::~PacketReader() {
     std::fprintf(stderr, "kafka_packet %s\n", Diagnostics().c_str());
 }
 std::shared_ptr<arrow::Schema> PacketReader::ArrowSchema() const { return packet::PacketFamilySchema(); }
-int PacketReader::DescribeSources(CaptureSourceSetV2* output) const {
+int PacketReader::DescribeSources(CaptureSourceSet* output) const {
     if (!output || output->struct_size < sizeof(*output) || output->contract_version != 2) return EINVAL;
     *output = sources_;
     return 0;
@@ -55,9 +55,9 @@ int PacketReader::Open() {
     if (opened_) return EALREADY;
     if (cancelled_ || !session_) return ECANCELED;
     void* capability = nullptr;
-    const int query = session_->QueryInterface(IID_KAFKA_CONSUMER_SESSION_V1, &capability);
+    const int query = session_->QueryInterface(IID_KAFKA_CONSUMER_SESSION, &capability);
     if (query || !capability) return query ? query : ENOTSUP;
-    consumer_ = static_cast<IKafkaConsumerSessionV1*>(capability);
+    consumer_ = static_cast<IKafkaConsumerSession*>(capability);
     const int rc = consumer_->StartConsumer(config_.offset_reset.c_str(), config_.max_message_bytes);
     if (rc)
         Error(rc, "consumer_open");
@@ -84,9 +84,9 @@ BlockPollEvent PacketReader::Error(int error, const char* stage) {
     terminal_ = true;
     return {BlockPollEvent::kError, nullptr, error};
 }
-CapturePollEventV2 PacketReader::PollCapture(int timeout_ms) {
+CapturePollEvent PacketReader::PollCapture(int timeout_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
-    CapturePollEventV2 event;
+    CapturePollEvent event;
     if (cancelled_)
         event.block = {BlockPollEvent::kCancelled, nullptr, ECANCELED};
     else if (terminal_)
@@ -96,7 +96,7 @@ CapturePollEventV2 PacketReader::PollCapture(int timeout_ms) {
     else if (outstanding_)
         event.block = {BlockPollEvent::kError, nullptr, EBUSY};
     else {
-        KafkaMessageV1 message;
+        KafkaMessage message;
         const int rc = consumer_->PollMessage(std::min<uint32_t>(timeout_ms, config_.max_wait_ms), &message);
         if (rc == EAGAIN) return event;  // kTimeout, no invented progress.
         if (rc == ECANCELED) {
@@ -205,7 +205,7 @@ int PacketReader::ReleaseBlock(const std::shared_ptr<arrow::RecordBatch>& batch)
     outstanding_.reset();
     return 0;
 }
-int PacketReader::ReadInputCounters(uint32_t source, CaptureCountersV1* output) const {
+int PacketReader::ReadInputCounters(uint32_t source, CaptureCounters* output) const {
     if (!output || output->struct_size < sizeof(*output) || output->contract_version != 1) return EINVAL;
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = counters_.find(source);

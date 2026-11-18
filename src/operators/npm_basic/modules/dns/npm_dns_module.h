@@ -14,30 +14,30 @@
 namespace flowsql::npm {
 
 /** Task-private DNS module; the caller owns protocol and borrows its stream interface. */
-class NpmDnsProtocolModuleV1 final : public INpmProtocolModuleV1, public INpmTcpStreamConsumerV1 {
+class NpmDnsProtocolModule final : public INpmProtocolModule, public INpmTcpStreamConsumer {
  public:
-    NpmDnsProtocolModuleV1(NpmDnsConfigV1 config, std::shared_ptr<INpmTaskBudget> budget);
-    ~NpmDnsProtocolModuleV1() override;
+    NpmDnsProtocolModule(NpmDnsConfig config, std::shared_ptr<INpmTaskBudget> budget);
+    ~NpmDnsProtocolModule() override;
 
-    int OnInput(const NpmInputEventV1& input, INpmResultEmitterV1& emitter) override;
-    int OnSessionSnapshot(const NpmSessionView& session, int64_t observed_at_ns, INpmResultEmitterV1& emitter) override;
+    int OnInput(const NpmInputEvent& input, INpmResultEmitter& emitter) override;
+    int OnSessionSnapshot(const NpmSessionView& session, int64_t observed_at_ns, INpmResultEmitter& emitter) override;
     int OnSessionEnd(const NpmSessionView& session, NpmSessionEndReason reason, int64_t observed_at_ns,
-                     INpmResultEmitterV1& emitter) override;
+                     INpmResultEmitter& emitter) override;
     std::optional<int64_t> NextEventDeadlineNs() const override;
-    int OnTime(const NpmModuleTimeV1& time, INpmResultEmitterV1& emitter) override;
-    int Finish(int64_t observed_at_ns, INpmResultEmitterV1& emitter) override;
+    int OnTime(const NpmModuleTime& time, INpmResultEmitter& emitter) override;
+    int Finish(int64_t observed_at_ns, INpmResultEmitter& emitter) override;
     void Abort() noexcept override;
-    int OnTcpStreamReadable(const NpmTcpStreamContextV1& context, INpmTcpStreamCursorV1& cursor,
-                            INpmResultEmitterV1& emitter) override;
+    int OnTcpStreamReadable(const NpmTcpStreamContext& context, INpmTcpStreamCursor& cursor,
+                            INpmResultEmitter& emitter) override;
 
  private:
     int RememberSession(const NpmSessionView& session);
-    int EmitRows(std::vector<NpmDnsUdpResultV1>* rows, INpmResultEmitterV1& emitter);
+    int EmitRows(std::vector<NpmDnsUdpResult>* rows, INpmResultEmitter& emitter);
     void ForgetSession(uint64_t session_id) noexcept;
 
     std::shared_ptr<INpmTaskBudget> budget_;
-    NpmDnsUdpTrackerV1 transactions_;
-    NpmDnsTcpFramerV1 framer_;
+    NpmDnsUdpTracker transactions_;
+    NpmDnsTcpFramer framer_;
     std::map<uint64_t, NpmTransactionIdentity> identities_;
     bool finished_ = false;
     bool aborted_ = false;

@@ -57,30 +57,30 @@ int main() {
                                      .c_str()) >= 0);
         setup.reset();
         auto create = [&](uint32_t timeout = 5000) {
-            DatabaseSnapshotOptionsV1 options;
+            DatabaseSnapshotOptions options;
             options.operation_timeout_ms = timeout;
             options.consistent_transaction = dialect != "clickhouse";
-            std::shared_ptr<IDatabaseExplorationSessionV1> query;
+            std::shared_ptr<IDatabaseExplorationSession> query;
             auto session = driver.CreateSession();
             auto* snapshot = dynamic_cast<IDbSnapshotSession*>(session.get());
-            query = std::dynamic_pointer_cast<IDatabaseExplorationSessionV1>(session);
+            query = std::dynamic_pointer_cast<IDatabaseExplorationSession>(session);
             assert(snapshot && query && snapshot->BeginSnapshot(options) == 0);
             return query;
         };
         {
             auto query = create();
-            SourceSchemaV1 source{table,
-                                  {{"a", "a", "string", "VARCHAR"},
-                                   {"b", "b", "string", "VARCHAR"},
-                                   {"n", "n", "number", "DOUBLE"},
-                                   {"allnull", "allnull", "number", "DOUBLE"}},
-                                  dialect};
+            SourceSchema source{table,
+                                {{"a", "a", "string", "VARCHAR"},
+                                 {"b", "b", "string", "VARCHAR"},
+                                 {"n", "n", "number", "DOUBLE"},
+                                 {"allnull", "allnull", "number", "DOUBLE"}},
+                                dialect};
             auto run = [&](const char* json) {
                 rapidjson::Document input;
                 input.Parse(json);
                 auto plan = CompileWorkflow(source, input, "complete", 100);
                 auto parameters = BindValues(plan.parameters);
-                ExplorationResultV1 result;
+                ExplorationResult result;
                 if (query->Query(plan.sql.c_str(), parameters.data(), parameters.size(), 100, 65536, &result)) {
                     std::cerr << query->QueryError() << std::endl;
                     assert(false);
@@ -93,7 +93,7 @@ int main() {
                       << std::get<int64_t>(mean.rows[0][1]) << "/" << std::get<int64_t>(mean.rows[0][2]) << std::endl;
             assert(std::get<double>(mean.rows[0][0]) == 15 && std::get<int64_t>(mean.rows[0][1]) == 2 &&
                    std::get<int64_t>(mean.rows[0][2]) == 5);
-            ExplorationResultV1 quoted_alias;
+            ExplorationResult quoted_alias;
             const std::string alias = "alias\\`\"";
             const auto alias_sql = "SELECT 1 AS " + QuoteIdentifier(alias, dialect);
             assert(query->Query(alias_sql.c_str(), nullptr, 0, 10, 4096, &quoted_alias) == 0 &&
@@ -107,17 +107,17 @@ int main() {
             auto bound = run(
                 R"({"workflow":[{"type":"filter","filters":[{"fid":"a","rule":{"type":"one of","value":["' OR 1=1 --"]}}]},{"type":"view","query":[{"op":"raw","fields":["a"]}]}]})");
             assert(bound.rows.empty());
-            ExplorationResultV1 result;
+            ExplorationResult result;
             assert(query->Query(("SELECT wide,d FROM " + quoted + " WHERE wide=9007199254740993").c_str(), nullptr, 0,
                                 10, 65536, &result) == 0);
             assert(std::get<int64_t>(result.rows[0][0]) == 9007199254740993LL);
-            assert(std::holds_alternative<ExplorationDecimalV1>(result.rows[0][1]));
+            assert(std::holds_alternative<ExplorationDecimal>(result.rows[0][1]));
             assert(query->Query(("SELECT a FROM " + quoted).c_str(), nullptr, 0, 1, 65536, &result) != 0 &&
                    result.rows.empty() && query->QueryError() == "RESULT_LIMIT");
         }
         {
             auto query = create();
-            ExplorationResultV1 result;
+            ExplorationResult result;
             assert(query->Query(("DELETE FROM " + quoted).c_str(), nullptr, 0, 10, 1024, &result) != 0);
             assert(query->Query("SELECT 1; SELECT 2", nullptr, 0, 10, 1024, &result) != 0);
             assert(query->Query("SELECT 1 INTO OUTFILE '/tmp/flowsql-invalid'", nullptr, 0, 10, 1024, &result) != 0);
@@ -128,14 +128,14 @@ int main() {
         }
         {
             auto query = create(), second = create();
-            ExplorationResultV1 identity;
+            ExplorationResult identity;
             assert(query->Query(dialect == "clickhouse" ? "SELECT 1"
                                 : dialect == "postgres" ? "SELECT pg_backend_pid()"
                                                         : "SELECT CONNECTION_ID()",
                                 nullptr, 0, 10, 1024, &identity) == 0);
             const auto connection_id = std::get<int64_t>(identity.rows[0][0]);
             auto future = std::async(std::launch::async, [&] {
-                ExplorationResultV1 result;
+                ExplorationResult result;
                 return query->Query(slow_query, nullptr, 0, 10, 1024, &result);
             });
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -143,7 +143,7 @@ int main() {
             query->Cancel();
             assert(future.wait_for(std::chrono::seconds(2)) == std::future_status::ready && future.get() != 0);
             assert(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
-            ExplorationResultV1 result;
+            ExplorationResult result;
             assert(second->Query("SELECT 1", nullptr, 0, 10, 1024, &result) == 0);
             const auto active =
                 dialect == "clickhouse"
@@ -158,25 +158,25 @@ int main() {
         }
         {
             auto query = create(50);
-            ExplorationResultV1 result;
+            ExplorationResult result;
             const auto start = std::chrono::steady_clock::now();
             assert(query->Query(timeout_query, nullptr, 0, 10, 1024, &result) != 0 && query->QueryError() == "TIMEOUT");
             assert(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
         }
         if (dialect == "clickhouse") {
             auto query = create();
-            ExplorationResultV1 result;
+            ExplorationResult result;
             assert(query->Query("SELECT toFloat64('nan')", nullptr, 0, 10, 4096, &result) == 0 &&
                    std::isnan(std::get<double>(result.rows[0][0])));
             const std::string special("x&database=system%00=\0tail", 26);
-            DatabaseParameterV1 parameter;
-            parameter.kind = DatabaseParameterKindV1::kString;
+            DatabaseParameter parameter;
+            parameter.kind = DatabaseParameterKind::kString;
             parameter.data = special.data();
             parameter.size = special.size();
             assert(query->Query("SELECT ?", &parameter, 1, 10, 4096, &result) == 0 &&
                    std::get<std::string>(result.rows[0][0]) == special);
             assert(query->Query("SELECT toUInt64('18446744073709551615')", nullptr, 0, 10, 4096, &result) == 0 &&
-                   std::get<ExplorationDecimalV1>(result.rows[0][0]).text == "18446744073709551615");
+                   std::get<ExplorationDecimal>(result.rows[0][0]).text == "18446744073709551615");
             assert(query->Query("SELECT [1,2,3]", nullptr, 0, 10, 4096, &result) != 0 && result.rows.empty() &&
                    query->QueryError() == "UNSUPPORTED_TYPE");
         }
@@ -192,14 +192,14 @@ int main() {
                            .c_str()) >= 0);
             {
                 auto query = create();
-                ExplorationResultV1 result;
-                SourceSchemaV1 source{table, {{"n", "n", "number", "INTEGER"}}, dialect, schema};
+                ExplorationResult result;
+                SourceSchema source{table, {{"n", "n", "number", "INTEGER"}}, dialect, schema};
                 rapidjson::Document input;
                 input.Parse(
                     R"({"workflow":[{"type":"view","query":[{"op":"aggregate","groupBy":[],"measures":[{"field":"n","agg":"mean","asFieldKey":"avg"}]}]}]})");
                 auto plan = CompileWorkflow(source, input, "complete", 10);
                 assert(query->Query(plan.sql.c_str(), nullptr, 0, 10, 1024, &result) == 0 &&
-                       std::stold(std::get<ExplorationDecimalV1>(result.rows[0][0]).text) == 15);
+                       std::stold(std::get<ExplorationDecimal>(result.rows[0][0]).text) == 15);
                 assert(query->Query("SELECT true,false", nullptr, 0, 10, 1024, &result) == 0 &&
                        std::get<int64_t>(result.rows[0][0]) == 1 && std::get<int64_t>(result.rows[0][1]) == 0);
             }
@@ -222,15 +222,15 @@ int main() {
         }
         {
             auto query = create();
-            SourceSchemaV1 source{table + "_hist",
-                                  {{"n", "n", "number", "DOUBLE"},
-                                   {"d", "d", "number", "DECIMAL(30,10)"},
-                                   {"allnull", "allnull", "number", "DOUBLE"}},
-                                  dialect};
-            auto number = [](const ExplorationValueV1& value) {
+            SourceSchema source{table + "_hist",
+                                {{"n", "n", "number", "DOUBLE"},
+                                 {"d", "d", "number", "DECIMAL(30,10)"},
+                                 {"allnull", "allnull", "number", "DOUBLE"}},
+                                dialect};
+            auto number = [](const ExplorationValue& value) {
                 if (auto p = std::get_if<int64_t>(&value)) return double(*p);
                 if (auto p = std::get_if<double>(&value)) return *p;
-                return std::stod(std::get<ExplorationDecimalV1>(value).text);
+                return std::stod(std::get<ExplorationDecimal>(value).text);
             };
             auto histogram = [&](const std::string& field, const std::string& filter = "") {
                 rapidjson::Document input;
@@ -240,7 +240,7 @@ int main() {
                                 .c_str());
                 auto plan = CompileWorkflow(source, input, "complete", 100);
                 auto parameters = BindValues(plan.parameters);
-                ExplorationResultV1 result;
+                ExplorationResult result;
                 if (query->Query(plan.sql.c_str(), parameters.data(), parameters.size(), 101, 65536, &result)) {
                     std::cerr << "histogram: " << query->QueryError() << std::endl;
                     assert(false);
@@ -272,7 +272,7 @@ int main() {
             double total = 0;
             for (const auto& row : filtered.rows) total += number(row[3]);
             assert(total == 3);
-            ExplorationResultV1 baseline;
+            ExplorationResult baseline;
             assert(query->Query(("SELECT COUNT(*) FROM " + hist_table + " WHERE n IS NOT NULL").c_str(), nullptr, 0, 10,
                                 4096, &baseline) == 0);
             total = 0;

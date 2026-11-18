@@ -387,12 +387,12 @@ void test_sql_parser() {
     {
         auto stmt = parser.Parse("SELECT * FROM test.data USING explore.chisquare WITH threshold=0.05 INTO result");
         assert(stmt.error.empty());
-        assert(stmt.source == "test.data");
+        assert(stmt.sources.front() == "test.data");
         assert(stmt.sources.size() == 1);
         assert(stmt.sources[0] == "test.data");
-        assert(stmt.op_category == "explore");
-        assert(stmt.op_name == "chisquare");
-        assert(stmt.with_params["threshold"] == "0.05");
+        assert(stmt.operators.front().category == "explore");
+        assert(stmt.operators.front().name == "chisquare");
+        assert(stmt.operator_with_params.front()["threshold"] == "0.05");
         assert(stmt.dest == "result");
         assert(stmt.columns.empty());
         assert(stmt.HasOperator());
@@ -401,7 +401,7 @@ void test_sql_parser() {
     {
         auto stmt = parser.Parse("SELECT * FROM memory_data INTO clickhouse.my_table");
         assert(stmt.error.empty());
-        assert(stmt.source == "memory_data");
+        assert(stmt.sources.front() == "memory_data");
         assert(stmt.sources.size() == 1);
         assert(stmt.sources[0] == "memory_data");
         assert(!stmt.HasOperator());
@@ -411,7 +411,7 @@ void test_sql_parser() {
     {
         auto stmt = parser.Parse("SELECT * FROM test.data");
         assert(stmt.error.empty());
-        assert(stmt.source == "test.data");
+        assert(stmt.sources.front() == "test.data");
         assert(stmt.sources.size() == 1);
         assert(stmt.sources[0] == "test.data");
         assert(!stmt.HasOperator());
@@ -429,7 +429,7 @@ void test_sql_parser() {
     {
         auto stmt = parser.Parse("select * from test.data into result");
         assert(stmt.error.empty());
-        assert(stmt.source == "test.data");
+        assert(stmt.sources.front() == "test.data");
         assert(stmt.sources.size() == 1);
         assert(stmt.sources[0] == "test.data");
         assert(stmt.dest == "result");
@@ -439,12 +439,12 @@ void test_sql_parser() {
     {
         auto stmt = parser.Parse("SELECT * FROM dataframe.d1, dataframe.d2 USING builtin.concat INTO dataframe.dd");
         assert(stmt.error.empty());
-        assert(stmt.source == "dataframe.d1");
+        assert(stmt.sources.front() == "dataframe.d1");
         assert(stmt.sources.size() == 2);
         assert(stmt.sources[0] == "dataframe.d1");
         assert(stmt.sources[1] == "dataframe.d2");
-        assert(stmt.op_category == "builtin");
-        assert(stmt.op_name == "concat");
+        assert(stmt.operators.front().category == "builtin");
+        assert(stmt.operators.front().name == "concat");
         assert(stmt.dest == "dataframe.dd");
         assert(stmt.sql_part == "SELECT * FROM dataframe.d1, dataframe.d2");
     }
@@ -466,8 +466,8 @@ void test_sql_parser() {
         auto stmt = parser.Parse("SELECT a, COUNT(*) FROM source GROUP BY a ORDER BY COUNT(*) DESC USING ml.predict");
         assert(stmt.error.empty());
         assert(stmt.sql_part == "SELECT a, COUNT(*) FROM source GROUP BY a ORDER BY COUNT(*) DESC");
-        assert(stmt.op_category == "ml");
-        assert(stmt.op_name == "predict");
+        assert(stmt.operators.front().category == "ml");
+        assert(stmt.operators.front().name == "predict");
         assert(stmt.HasOperator());
     }
 
@@ -479,13 +479,22 @@ void test_sql_parser() {
         assert(!stmt.HasOperator());
     }
 
-    // Test sql_part extraction with WITH clause
+    // WITH belongs to an operator; a transfer has neither operators nor parameter entries.
     {
-        auto stmt = parser.Parse("SELECT a, b FROM source WHERE x>1 WITH threshold=0.5 INTO dest");
-        assert(stmt.error.empty());
-        assert(stmt.sql_part == "SELECT a, b FROM source WHERE x>1");
-        assert(stmt.with_params["threshold"] == "0.5");
-        assert(stmt.dest == "dest");
+        auto invalid = parser.Parse("SELECT a, b FROM source WHERE x>1 WITH threshold=0.5 INTO dest");
+        assert(!invalid.error.empty());
+        auto transfer = parser.Parse("SELECT a, b FROM source WHERE x>1 INTO dest");
+        assert(transfer.error.empty());
+        assert(transfer.sql_part == "SELECT a, b FROM source WHERE x>1");
+        assert(transfer.operators.empty());
+        assert(transfer.operator_with_params.empty());
+        assert(transfer.dest == "dest");
+        auto chain = parser.Parse("SELECT * FROM source USING builtin.first THEN builtin.second");
+        assert(chain.error.empty());
+        assert(chain.operators.size() == 2);
+        assert(chain.operator_with_params.size() == chain.operators.size());
+        assert(chain.operator_with_params[0].empty());
+        assert(chain.operator_with_params[1].empty());
     }
 
     // Test sql_part extraction with all clauses
@@ -496,9 +505,9 @@ void test_sql_parser() {
         assert(stmt.error.empty());
         assert(stmt.sql_part ==
                "SELECT a, COUNT(*) FROM source WHERE x>1 GROUP BY a HAVING COUNT(*)>5 ORDER BY a LIMIT 10");
-        assert(stmt.op_category == "ml");
-        assert(stmt.op_name == "train");
-        assert(stmt.with_params["epochs"] == "100");
+        assert(stmt.operators.front().category == "ml");
+        assert(stmt.operators.front().name == "train");
+        assert(stmt.operator_with_params.front()["epochs"] == "100");
         assert(stmt.dest == "result");
     }
 
@@ -1224,7 +1233,7 @@ void test_block_filter_stage() {
     };
 
     BlockFilterStage filtered(bind("id >= 2 AND enabled"));
-    BlockTransformOutputV1 output{batch, 999};
+    BlockTransformOutput output{batch, 999};
     std::string error = "stale";
     assert(filtered.ProcessBlock(batch, 123, &output, &error) == FilterEvalError::kInvalidArgument);
     assert(!output.batch && output.ts_ms == 0 && !error.empty());
@@ -1340,11 +1349,11 @@ class ScriptedBlockSource final : public IBlockStreamChannel {
     bool opened_ = true;
 };
 
-class ScriptedBlockTransformTask final : public IBlockTransformTaskV1 {
+class ScriptedBlockTransformTask final : public IBlockTransformTask {
  public:
     struct ProcessStep {
-        int return_code = e2i(BlockTransformStatusV1::kContinue);
-        std::vector<BlockTransformOutputV1> outputs;
+        int return_code = e2i(BlockTransformStatus::kContinue);
+        std::vector<BlockTransformOutput> outputs;
     };
 
     explicit ScriptedBlockTransformTask(std::shared_ptr<arrow::Schema> output_schema,
@@ -1364,7 +1373,7 @@ class ScriptedBlockTransformTask final : public IBlockTransformTaskV1 {
     }
 
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
-                     std::vector<BlockTransformOutputV1>* outputs) override {
+                     std::vector<BlockTransformOutput>* outputs) override {
         ++process_calls;
         if (log_) log_->push_back("process-" + std::to_string(process_calls));
         assert(outputs && outputs->empty());
@@ -1378,7 +1387,7 @@ class ScriptedBlockTransformTask final : public IBlockTransformTaskV1 {
         return step.return_code;
     }
 
-    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+    int Flush(std::vector<BlockTransformOutput>* outputs) override {
         ++flush_calls;
         if (log_) log_->push_back("flush");
         assert(outputs && outputs->empty());
@@ -1394,7 +1403,7 @@ class ScriptedBlockTransformTask final : public IBlockTransformTaskV1 {
     std::string LastError() const override { return last_error; }
 
     std::vector<ProcessStep> process_steps;
-    std::vector<BlockTransformOutputV1> flush_outputs;
+    std::vector<BlockTransformOutput> flush_outputs;
     int open_return_code = 0;
     int flush_return_code = 0;
     bool throw_on_open = false;
@@ -1416,16 +1425,16 @@ class ScriptedBlockTransformTask final : public IBlockTransformTaskV1 {
     std::vector<std::string>* log_ = nullptr;
 };
 
-class ScriptedTimeDrivenBlockTransformTask final : public IBlockTransformTaskV2 {
+class ScriptedTimeDrivenBlockTransformTask final : public IBlockTransformTask, public IBlockTransformTimeDrivenTask {
  public:
     struct ProcessStep {
-        int return_code = e2i(BlockTransformStatusV1::kContinue);
-        std::vector<BlockTransformOutputV1> outputs;
+        int return_code = e2i(BlockTransformStatus::kContinue);
+        std::vector<BlockTransformOutput> outputs;
     };
 
     struct TimeStep {
-        int return_code = e2i(BlockTransformStatusV1::kContinue);
-        std::vector<BlockTransformOutputV1> outputs;
+        int return_code = e2i(BlockTransformStatus::kContinue);
+        std::vector<BlockTransformOutput> outputs;
         uint8_t armed_after = 0;
         int64_t deadline_after_ns = 0;
     };
@@ -1444,7 +1453,7 @@ class ScriptedTimeDrivenBlockTransformTask final : public IBlockTransformTaskV2 
     }
 
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
-                     std::vector<BlockTransformOutputV1>* outputs) override {
+                     std::vector<BlockTransformOutput>* outputs) override {
         ++process_calls;
         if (log_) log_->push_back("process-" + std::to_string(process_calls));
         assert(outputs && outputs->empty());
@@ -1457,7 +1466,7 @@ class ScriptedTimeDrivenBlockTransformTask final : public IBlockTransformTaskV2 
         return step.return_code;
     }
 
-    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+    int Flush(std::vector<BlockTransformOutput>* outputs) override {
         ++flush_calls;
         if (log_) log_->push_back("flush");
         assert(outputs && outputs->empty());
@@ -1472,24 +1481,24 @@ class ScriptedTimeDrivenBlockTransformTask final : public IBlockTransformTaskV2 
 
     std::string LastError() const override { return last_error; }
 
-    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override {
+    int GetTimeDriveState(BlockTransformTimeDriveState* state) override {
         ++state_calls;
         if (log_) log_->push_back("state-" + std::to_string(state_calls));
-        if (!state || state->struct_size < kBlockTransformTimeDriveStateV1Size ||
-            state->contract_version != kBlockTransformTimeDriveVersionV1) {
+        if (!state || state->struct_size < kBlockTransformTimeDriveStateSize ||
+            state->contract_version != kBlockTransformTimeDriveVersion) {
             return EINVAL;
         }
         if (throw_on_state) throw std::runtime_error("scripted time state exception");
         if (state_return_code != 0) return state_return_code;
 
-        BlockTransformTimeDriveStateV1 next{};
-        next.struct_size = kBlockTransformTimeDriveStateV1Size;
-        next.contract_version = kBlockTransformTimeDriveVersionV1;
+        BlockTransformTimeDriveState next{};
+        next.struct_size = kBlockTransformTimeDriveStateSize;
+        next.contract_version = kBlockTransformTimeDriveVersion;
         next.armed = armed;
         next.deadline_ns = deadline_ns;
         if (state_calls == invalid_state_call) {
-            if (invalid_state_mode == 1) next.struct_size = kBlockTransformTimeDriveStateV1Size - 1;
-            if (invalid_state_mode == 2) next.contract_version = kBlockTransformTimeDriveVersionV1 + 1;
+            if (invalid_state_mode == 1) next.struct_size = kBlockTransformTimeDriveStateSize - 1;
+            if (invalid_state_mode == 2) next.contract_version = kBlockTransformTimeDriveVersion + 1;
             if (invalid_state_mode == 3) next.armed = 2;
             if (invalid_state_mode == 4) next.reserved[0] = 1;
             if (invalid_state_mode == 5) next.deadline_ns = -1;
@@ -1498,7 +1507,7 @@ class ScriptedTimeDrivenBlockTransformTask final : public IBlockTransformTaskV2 
         return 0;
     }
 
-    int OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* outputs) override {
+    int OnTime(const BlockTransformTimeEvent& event, std::vector<BlockTransformOutput>* outputs) override {
         ++time_calls;
         if (log_) log_->push_back("time-" + std::to_string(time_calls));
         assert(outputs && outputs->empty());
@@ -1515,10 +1524,10 @@ class ScriptedTimeDrivenBlockTransformTask final : public IBlockTransformTaskV2 
 
     std::vector<ProcessStep> process_steps;
     std::vector<TimeStep> time_steps;
-    std::vector<BlockTransformOutputV1> flush_outputs;
+    std::vector<BlockTransformOutput> flush_outputs;
     std::vector<std::shared_ptr<arrow::RecordBatch>> process_inputs;
     std::vector<int64_t> process_timestamps;
-    std::vector<BlockTransformTimeEventV1> time_events;
+    std::vector<BlockTransformTimeEvent> time_events;
     uint8_t armed = 0;
     int64_t deadline_ns = 0;
     int state_return_code = 0;
@@ -1560,7 +1569,7 @@ void test_block_transform_pipeline_runner() {
         config.source_schema = schema;
         config.transform = &task;
         config.control = control;
-        config.output_consumer = [](const BlockTransformOutputV1&) { return 0; };
+        config.output_consumer = [](const BlockTransformOutput&) { return 0; };
         config.opened_callback = [control]() { control->Publish("{\"run_id\":\"test-run\"}"); };
         BlockTransformPipelineRunner runner(std::move(config));
         BlockTransformPipelineResult result;
@@ -1609,11 +1618,11 @@ void test_block_transform_pipeline_runner() {
         &log);
     ScriptedBlockTransformTask transform(schema, &log);
     transform.process_steps = {
-        {e2i(BlockTransformStatusV1::kContinue), {}},
-        {e2i(BlockTransformStatusV1::kContinue), {{output_three, 201}, {output_two, 202}}},
+        {e2i(BlockTransformStatus::kContinue), {}},
+        {e2i(BlockTransformStatus::kContinue), {{output_three, 201}, {output_two, 202}}},
     };
     transform.flush_outputs = {{output_four, 300}};
-    std::vector<BlockTransformOutputV1> delivered;
+    std::vector<BlockTransformOutput> delivered;
     BlockTransformPipelineConfig config;
     config.source = &source;
     config.source_schema = schema;
@@ -1621,7 +1630,7 @@ void test_block_transform_pipeline_runner() {
     config.source_residual = bind("id >= 2");
     config.transform_residual = bind("id >= 3");
     config.poll_timeout_ms = 17;
-    config.output_consumer = [&](const BlockTransformOutputV1& output) {
+    config.output_consumer = [&](const BlockTransformOutput& output) {
         log.push_back("consume-" + std::to_string(output.ts_ms));
         delivered.push_back(output);
         return 0;
@@ -1666,7 +1675,7 @@ void test_block_transform_pipeline_runner() {
             &log);
         ScriptedBlockTransformTask stop_transform(schema, &log);
         stop_transform.process_steps = {
-            {e2i(BlockTransformStatusV1::kStop), {{output_three, 401}}},
+            {e2i(BlockTransformStatus::kStop), {{output_three, 401}}},
         };
         stop_transform.flush_outputs = {{output_four, 402}};
         std::vector<int64_t> timestamps;
@@ -1674,7 +1683,7 @@ void test_block_transform_pipeline_runner() {
         stop_config.source = &stop_source;
         stop_config.source_schema = schema;
         stop_config.transform = &stop_transform;
-        stop_config.output_consumer = [&](const BlockTransformOutputV1& output) {
+        stop_config.output_consumer = [&](const BlockTransformOutput& output) {
             log.push_back("consume-" + std::to_string(output.ts_ms));
             timestamps.push_back(output.ts_ms);
             return 0;
@@ -1700,7 +1709,7 @@ void test_block_transform_pipeline_runner() {
         cancelled_config.source = &cancelled_source;
         cancelled_config.source_schema = schema;
         cancelled_config.transform = &cancelled_transform;
-        cancelled_config.output_consumer = [](const BlockTransformOutputV1&) { return 0; };
+        cancelled_config.output_consumer = [](const BlockTransformOutput&) { return 0; };
         BlockTransformPipelineRunner cancelled_runner(std::move(cancelled_config));
         assert(cancelled_runner.Run(&result, &error) == BlockTransformPipelineError::kCancelled);
         assert(result.terminal == BlockTransformPipelineTerminal::kCancelled);
@@ -1717,7 +1726,7 @@ void test_block_transform_pipeline_runner() {
         cancelled_config.source = &cancelled_source;
         cancelled_config.source_schema = schema;
         cancelled_config.transform = &cancelled_transform;
-        cancelled_config.output_consumer = [](const BlockTransformOutputV1&) { return 0; };
+        cancelled_config.output_consumer = [](const BlockTransformOutput&) { return 0; };
         BlockTransformPipelineRunner cancelled_runner(std::move(cancelled_config));
         cancelled_runner.Cancel();
         cancelled_runner.Cancel();
@@ -1738,7 +1747,7 @@ void test_block_transform_pipeline_runner() {
         failure_config.source = &failure_source;
         failure_config.source_schema = schema;
         failure_config.transform = failure_transform;
-        failure_config.output_consumer = [consumer_return_code](const BlockTransformOutputV1&) {
+        failure_config.output_consumer = [consumer_return_code](const BlockTransformOutput&) {
             return consumer_return_code;
         };
         BlockTransformPipelineRunner failure_runner(std::move(failure_config));
@@ -1762,7 +1771,7 @@ void test_block_transform_pipeline_runner() {
     {
         ScriptedBlockTransformTask invalid_output(schema);
         invalid_output.process_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {{nullptr, 0}}},
+            {e2i(BlockTransformStatus::kContinue), {{nullptr, 0}}},
         };
         run_failure({BlockPollEvent::kEof, nullptr, 0}, &invalid_output, 0, 0,
                     BlockTransformPipelineError::kTransformContractViolation);
@@ -1771,7 +1780,7 @@ void test_block_transform_pipeline_runner() {
     {
         ScriptedBlockTransformTask consumer_failure(schema);
         consumer_failure.process_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {{output_three, 601}}},
+            {e2i(BlockTransformStatus::kContinue), {{output_three, 601}}},
         };
         run_failure({BlockPollEvent::kEof, nullptr, 0}, &consumer_failure, 0, EIO,
                     BlockTransformPipelineError::kOutputConsumerFailed);
@@ -1780,7 +1789,7 @@ void test_block_transform_pipeline_runner() {
     {
         ScriptedBlockTransformTask release_failure(schema);
         release_failure.process_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {}},
+            {e2i(BlockTransformStatus::kContinue), {}},
         };
         run_failure({BlockPollEvent::kEof, nullptr, 0}, &release_failure, EIO, 0,
                     BlockTransformPipelineError::kSourceReleaseFailed);
@@ -1795,7 +1804,7 @@ void test_block_transform_pipeline_runner() {
         failure_config.source = &poll_failure;
         failure_config.source_schema = schema;
         failure_config.transform = &idle_transform;
-        failure_config.output_consumer = [](const BlockTransformOutputV1&) { return 0; };
+        failure_config.output_consumer = [](const BlockTransformOutput&) { return 0; };
         BlockTransformPipelineRunner failure_runner(std::move(failure_config));
         assert(failure_runner.Run(&result, &error) == BlockTransformPipelineError::kSourcePollFailed);
         assert(result.terminal == BlockTransformPipelineTerminal::kFailed);
@@ -1815,7 +1824,7 @@ void test_block_transform_pipeline_runner() {
         failure_config.source = &flush_source;
         failure_config.source_schema = schema;
         failure_config.transform = &flush_failure;
-        failure_config.output_consumer = [&](const BlockTransformOutputV1&) {
+        failure_config.output_consumer = [&](const BlockTransformOutput&) {
             ++consumed;
             return 0;
         };
@@ -1877,9 +1886,9 @@ void test_block_transform_time_driven_pipeline_runner() {
         transform.armed = 1;
         transform.deadline_ns = 25 * 1000 * 1000;
         transform.time_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {{three, 701}}, 0, 0},
+            {e2i(BlockTransformStatus::kContinue), {{three, 701}}, 0, 0},
         };
-        std::vector<BlockTransformOutputV1> delivered;
+        std::vector<BlockTransformOutput> delivered;
         BlockTransformPipelineConfig config;
         config.source = &source;
         config.source_schema = schema;
@@ -1889,7 +1898,7 @@ void test_block_transform_time_driven_pipeline_runner() {
         config.poll_timeout_ms = 10;
         config.monotonic_clock_ns = [&]() { return monotonic_now_ns; };
         config.wall_clock_ns = []() { return int64_t(2 * 1000 * 1000); };
-        config.output_consumer = [&](const BlockTransformOutputV1& output) {
+        config.output_consumer = [&](const BlockTransformOutput& output) {
             log.push_back("consume-" + std::to_string(output.ts_ms));
             delivered.push_back(output);
             return 0;
@@ -1928,12 +1937,12 @@ void test_block_transform_time_driven_pipeline_runner() {
         transform.armed = 1;
         transform.deadline_ns = 0;
         transform.time_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {{three, 801}}, 1, 10 * 1000 * 1000},
-            {e2i(BlockTransformStatusV1::kContinue), {{four, 803}}, 0, 0},
+            {e2i(BlockTransformStatus::kContinue), {{three, 801}}, 1, 10 * 1000 * 1000},
+            {e2i(BlockTransformStatus::kContinue), {{four, 803}}, 0, 0},
         };
         transform.process_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {{two, 802}}},
-            {e2i(BlockTransformStatusV1::kContinue), {}},
+            {e2i(BlockTransformStatus::kContinue), {{two, 802}}},
+            {e2i(BlockTransformStatus::kContinue), {}},
         };
         std::vector<int64_t> delivered_timestamps;
         BlockTransformPipelineConfig config;
@@ -1944,7 +1953,7 @@ void test_block_transform_time_driven_pipeline_runner() {
         config.poll_timeout_ms = 50;
         config.monotonic_clock_ns = [&]() { return monotonic_now_ns; };
         config.wall_clock_ns = [&]() { return wall_times[next_wall_time++]; };
-        config.output_consumer = [&](const BlockTransformOutputV1& output) {
+        config.output_consumer = [&](const BlockTransformOutput& output) {
             log.push_back("consume-" + std::to_string(output.ts_ms));
             delivered_timestamps.push_back(output.ts_ms);
             if (output.ts_ms == 802) monotonic_now_ns = 10 * 1000 * 1000;
@@ -1975,7 +1984,7 @@ void test_block_transform_time_driven_pipeline_runner() {
         transform.armed = 1;
         transform.deadline_ns = 0;
         transform.time_steps = {
-            {e2i(BlockTransformStatusV1::kStop), {{three, 901}}, 1, 0},
+            {e2i(BlockTransformStatus::kStop), {{three, 901}}, 1, 0},
         };
         transform.flush_outputs = {{four, 902}};
         std::vector<int64_t> delivered_timestamps;
@@ -1986,7 +1995,7 @@ void test_block_transform_time_driven_pipeline_runner() {
         config.time_transform = &transform;
         config.monotonic_clock_ns = []() { return int64_t(0); };
         config.wall_clock_ns = []() { return int64_t(100); };
-        config.output_consumer = [&](const BlockTransformOutputV1& output) {
+        config.output_consumer = [&](const BlockTransformOutput& output) {
             delivered_timestamps.push_back(output.ts_ms);
             return 0;
         };
@@ -2007,7 +2016,7 @@ void test_block_transform_time_driven_pipeline_runner() {
         config.time_transform = transform;
         config.monotonic_clock_ns = std::move(monotonic_clock);
         config.wall_clock_ns = []() { return int64_t(100); };
-        config.output_consumer = [&](const BlockTransformOutputV1&) {
+        config.output_consumer = [&](const BlockTransformOutput&) {
             if (consumed) ++*consumed;
             return consumer_return_code;
         };
@@ -2036,7 +2045,7 @@ void test_block_transform_time_driven_pipeline_runner() {
         transform.armed = 1;
         transform.deadline_ns = 0;
         transform.time_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {{three, 1001}}, 1, 0},
+            {e2i(BlockTransformStatus::kContinue), {{three, 1001}}, 1, 0},
         };
         int consumed = 0;
         run_time_failure(
@@ -2104,7 +2113,7 @@ void test_block_transform_time_driven_pipeline_runner() {
         transform.armed = 1;
         transform.deadline_ns = 0;
         transform.time_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {{three, 1003}}, 0, 0},
+            {e2i(BlockTransformStatus::kContinue), {{three, 1003}}, 0, 0},
         };
         int consumed = 0;
         run_time_failure(
@@ -2157,29 +2166,29 @@ void test_synchronous_block_transform_time_driven_chain() {
         stage1.armed = 1;
         stage1.deadline_ns = 5;
         stage1.time_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {{one_two_three, 101}}, 0, 0},
+            {e2i(BlockTransformStatus::kContinue), {{one_two_three, 101}}, 0, 0},
         };
         stage1.time_hook = [&](int) { order.push_back("stage1-time"); };
         stage2.process_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {{two_three_four, 102}}},
+            {e2i(BlockTransformStatus::kContinue), {{two_three_four, 102}}},
         };
         stage2.process_hook = [&](int) { order.push_back("stage2-process"); };
         stage3.armed = 1;
         stage3.deadline_ns = 7;
         stage3.process_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {{three_four_five, 103}}},
+            {e2i(BlockTransformStatus::kContinue), {{three_four_five, 103}}},
         };
         stage3.process_hook = [&](int) {
             order.push_back("stage3-process");
             stage3.deadline_ns = 5;
         };
         stage3.time_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {{four_five_six, 104}}, 0, 0},
+            {e2i(BlockTransformStatus::kContinue), {{four_five_six, 104}}, 0, 0},
         };
         stage3.time_hook = [&](int) { order.push_back("stage3-time"); };
 
-        std::vector<IBlockTransformTaskV1*> tasks = {&stage1, &stage2, &stage3};
-        std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks = {&stage1, nullptr, &stage3};
+        std::vector<IBlockTransformTask*> tasks = {&stage1, &stage2, &stage3};
+        std::vector<IBlockTransformTimeDrivenTask*> time_tasks = {&stage1, nullptr, &stage3};
         std::vector<std::shared_ptr<arrow::Schema>> expected_schemas = {schema, schema, schema};
         std::vector<std::shared_ptr<const BoundFilterExpr>> residuals = {bind("id >= 2"), bind("id >= 3"),
                                                                          bind("id <= 4")};
@@ -2190,19 +2199,19 @@ void test_synchronous_block_transform_time_driven_chain() {
         assert(chain.Open(schema, &output_schema) == 0);
         assert(output_schema && output_schema->Equals(*schema, true));
 
-        BlockTransformTimeDriveStateV1 state{};
-        state.struct_size = kBlockTransformTimeDriveStateV1Size;
-        state.contract_version = kBlockTransformTimeDriveVersionV1;
+        BlockTransformTimeDriveState state{};
+        state.struct_size = kBlockTransformTimeDriveStateSize;
+        state.contract_version = kBlockTransformTimeDriveVersion;
         assert(chain.GetTimeDriveState(&state) == 0);
         assert(state.armed == 1 && state.deadline_ns == 5);
 
-        BlockTransformTimeEventV1 event{};
-        event.struct_size = kBlockTransformTimeEventV1Size;
-        event.contract_version = kBlockTransformTimeDriveVersionV1;
+        BlockTransformTimeEvent event{};
+        event.struct_size = kBlockTransformTimeEventSize;
+        event.contract_version = kBlockTransformTimeDriveVersion;
         event.monotonic_now_ns = 5;
         event.wall_now_ns = 50;
-        std::vector<BlockTransformOutputV1> outputs;
-        assert(chain.OnTime(event, &outputs) == e2i(BlockTransformStatusV1::kContinue));
+        std::vector<BlockTransformOutput> outputs;
+        assert(chain.OnTime(event, &outputs) == e2i(BlockTransformStatus::kContinue));
         const std::vector<std::string> expected_order = {"stage1-time", "stage2-process", "stage3-process",
                                                          "stage3-time"};
         assert(order == expected_order);
@@ -2219,10 +2228,10 @@ void test_synchronous_block_transform_time_driven_chain() {
         assert(values(outputs[1].batch) == std::vector<int32_t>({4}));
 
         state = {};
-        state.struct_size = kBlockTransformTimeDriveStateV1Size;
-        state.contract_version = kBlockTransformTimeDriveVersionV1;
+        state.struct_size = kBlockTransformTimeDriveStateSize;
+        state.contract_version = kBlockTransformTimeDriveVersion;
         assert(chain.GetTimeDriveState(&state) == 0 && state.armed == 0);
-        std::vector<BlockTransformOutputV1> flush_outputs;
+        std::vector<BlockTransformOutput> flush_outputs;
         assert(chain.Flush(&flush_outputs) == 0 && flush_outputs.empty());
         assert(stage1.flush_calls == 1 && stage2.flush_calls == 1 && stage3.flush_calls == 1);
     }
@@ -2235,21 +2244,21 @@ void test_synchronous_block_transform_time_driven_chain() {
         stage1.armed = 1;
         stage1.deadline_ns = 0;
         stage1.time_steps = {
-            {e2i(BlockTransformStatusV1::kStop), {{one_two_three, 201}}, 0, 0},
+            {e2i(BlockTransformStatus::kStop), {{one_two_three, 201}}, 0, 0},
         };
         stage2.process_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {{two_three_four, 202}}},
+            {e2i(BlockTransformStatus::kContinue), {{two_three_four, 202}}},
         };
         stage3.process_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {{three_four_five, 203}}},
+            {e2i(BlockTransformStatus::kContinue), {{three_four_five, 203}}},
         };
-        std::vector<IBlockTransformTaskV1*> tasks = {&stage1, &stage2, &stage3};
-        std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks = {&stage1, nullptr, &stage3};
+        std::vector<IBlockTransformTask*> tasks = {&stage1, &stage2, &stage3};
+        std::vector<IBlockTransformTimeDrivenTask*> time_tasks = {&stage1, nullptr, &stage3};
         std::vector<std::shared_ptr<arrow::Schema>> expected_schemas = {schema, schema, schema};
         std::vector<std::shared_ptr<const BoundFilterExpr>> residuals(3);
         SynchronousBlockTransformChainTask chain(std::move(tasks), std::move(time_tasks), std::move(expected_schemas),
                                                  residuals);
-        std::vector<BlockTransformOutputV1> delivered;
+        std::vector<BlockTransformOutput> delivered;
         BlockTransformPipelineConfig config;
         config.source = &source;
         config.source_schema = schema;
@@ -2257,7 +2266,7 @@ void test_synchronous_block_transform_time_driven_chain() {
         config.time_transform = &chain;
         config.monotonic_clock_ns = []() { return int64_t(0); };
         config.wall_clock_ns = []() { return int64_t(100); };
-        config.output_consumer = [&](const BlockTransformOutputV1& output) {
+        config.output_consumer = [&](const BlockTransformOutput& output) {
             delivered.push_back(output);
             return 0;
         };
@@ -2277,8 +2286,8 @@ void test_synchronous_block_transform_time_driven_chain() {
     auto run_failure = [&](ScriptedTimeDrivenBlockTransformTask* stage1, ScriptedBlockTransformTask* stage2,
                            bool expect_process) {
         ScriptedBlockSource source({{BlockPollEvent::kEof, nullptr, 0}});
-        std::vector<IBlockTransformTaskV1*> tasks = {stage1, stage2};
-        std::vector<IBlockTransformTimeDrivenTaskV1*> time_tasks = {stage1, nullptr};
+        std::vector<IBlockTransformTask*> tasks = {stage1, stage2};
+        std::vector<IBlockTransformTimeDrivenTask*> time_tasks = {stage1, nullptr};
         std::vector<std::shared_ptr<arrow::Schema>> expected_schemas = {schema, schema};
         std::vector<std::shared_ptr<const BoundFilterExpr>> residuals(2);
         SynchronousBlockTransformChainTask chain(std::move(tasks), std::move(time_tasks), std::move(expected_schemas),
@@ -2291,7 +2300,7 @@ void test_synchronous_block_transform_time_driven_chain() {
         config.time_transform = &chain;
         config.monotonic_clock_ns = []() { return int64_t(0); };
         config.wall_clock_ns = []() { return int64_t(100); };
-        config.output_consumer = [&](const BlockTransformOutputV1&) {
+        config.output_consumer = [&](const BlockTransformOutput&) {
             ++consumed;
             return 0;
         };
@@ -2338,7 +2347,7 @@ void test_synchronous_block_transform_time_driven_chain() {
         stage1.armed = 1;
         stage1.deadline_ns = 0;
         stage1.time_steps = {
-            {e2i(BlockTransformStatusV1::kContinue), {{one_two_three, 302}}, 0, 0},
+            {e2i(BlockTransformStatus::kContinue), {{one_two_three, 302}}, 0, 0},
         };
         stage2.process_steps = {{-EIO, {}}};
         run_failure(&stage1, &stage2, true);
@@ -2453,9 +2462,9 @@ void test_filter_pushdown_split() {
     printf("[PASS] filter pushed/residual split\n");
 }
 
-class RecordingFilterPushdownProvider final : public IFilterPushdownV1 {
+class RecordingFilterPushdownProvider final : public IFilterPushdown {
  public:
-    int EvaluatePushdown(const FilterPushdownRequestV1& request, FilterPushdownResultV1* result) const override {
+    int EvaluatePushdown(const FilterPushdownRequest& request, FilterPushdownResult* result) const override {
         ++call_count;
         observed_contract_version = request.contract_version;
         observed_target_kind = request.target_kind;
@@ -2475,7 +2484,7 @@ class RecordingFilterPushdownProvider final : public IFilterPushdownV1 {
     std::string diagnostic;
     mutable int call_count = 0;
     mutable uint32_t observed_contract_version = 0;
-    mutable FilterPushdownTargetKindV1 observed_target_kind = FilterPushdownTargetKindV1::kSource;
+    mutable FilterPushdownTargetKind observed_target_kind = FilterPushdownTargetKind::kSource;
     mutable std::string observed_category;
     mutable std::string observed_name;
     mutable std::shared_ptr<arrow::Schema> observed_schema;
@@ -2559,7 +2568,7 @@ void test_filter_pushdown_negotiation() {
     assert(std::string(enabled["field_name"].GetString()) == "enabled");
 
     FilterPushdownTarget target;
-    target.kind = FilterPushdownTargetKindV1::kTransform;
+    target.kind = FilterPushdownTargetKind::kTransform;
     target.category = "npm";
     target.name = "basic";
     target.output_schema = schema;
@@ -2590,9 +2599,9 @@ void test_filter_pushdown_negotiation() {
     assert(unsupported.call_count == 1 && owner.call_count == 1 && after_owner.call_count == 0);
     assert(querier.traverse_call_count == 1 && querier.callback_call_count == 2);
     assert(querier.first_call_count == 0);
-    assert(std::memcmp(&querier.observed_iid, &IID_FILTER_PUSHDOWN_V1, sizeof(Guid)) == 0);
-    assert(owner.observed_contract_version == kFilterPushdownContractVersionV1);
-    assert(owner.observed_target_kind == FilterPushdownTargetKindV1::kTransform);
+    assert(std::memcmp(&querier.observed_iid, &IID_FILTER_PUSHDOWN, sizeof(Guid)) == 0);
+    assert(owner.observed_contract_version == kFilterPushdownContractVersion);
+    assert(owner.observed_target_kind == FilterPushdownTargetKind::kTransform);
     assert(owner.observed_category == "npm" && owner.observed_name == "basic");
     assert(owner.observed_schema == schema && owner.observed_plan == canonical);
     assert(owner.observed_candidates == std::vector<uint32_t>({2, 5}));
@@ -2861,10 +2870,10 @@ void test_statement_stage_filters() {
     printf("[PASS] statement stage filters\n");
 }
 
-class TestFilterPushdown final : public IFilterPushdownV1 {
+class TestFilterPushdown final : public IFilterPushdown {
  public:
-    int EvaluatePushdown(const FilterPushdownRequestV1& request, FilterPushdownResultV1* result) const override {
-        if (!result || request.contract_version != kFilterPushdownContractVersionV1 || !request.canonical_plan_json ||
+    int EvaluatePushdown(const FilterPushdownRequest& request, FilterPushdownResult* result) const override {
+        if (!result || request.contract_version != kFilterPushdownContractVersion || !request.canonical_plan_json ||
             !request.output_schema) {
             return -1;
         }
@@ -2888,11 +2897,11 @@ class LegacyBlockOperatorAbiFixture final : public IBlockStreamOperator {
     int Flush() override { return 0; }
 };
 
-class TestFilterDomainResolver final : public IFilterDomainResolverV1 {
+class TestFilterDomainResolver final : public IFilterDomainResolver {
  public:
-    int Resolve(const FilterDomainResolveRequestV1& request, FilterDomainResolveResultV1* result) const override {
-        if (result) *result = FilterDomainResolveResultV1{};
-        if (!result || request.contract_version != kFilterDomainResolverContractVersionV1 || !request.target_category ||
+    int Resolve(const FilterDomainResolveRequest& request, FilterDomainResolveResult* result) const override {
+        if (result) *result = FilterDomainResolveResult{};
+        if (!result || request.contract_version != kFilterDomainResolverContractVersion || !request.target_category ||
             !request.target_name || !request.output_schema || !request.expression) {
             return EINVAL;
         }
@@ -2911,7 +2920,7 @@ class LegacyBlockStreamFactoryAbiFixture final : public IBlockStreamFactory {
 
 class TestExclusiveBlockStreamReader final : public IBlockStreamChannel {
  public:
-    explicit TestExclusiveBlockStreamReader(const BlockStreamReaderConfigV1& config)
+    explicit TestExclusiveBlockStreamReader(const BlockStreamReaderConfig& config)
         : task_id_(config.task_id),
           source_category_(config.source_category),
           source_name_(config.source_name),
@@ -2951,12 +2960,12 @@ class TestExclusiveBlockStreamReader final : public IBlockStreamChannel {
     bool cancelled_ = false;
 };
 
-class TestBlockStreamReaderFactory final : public IBlockStreamReaderFactoryV1 {
+class TestBlockStreamReaderFactory final : public IBlockStreamReaderFactory {
  public:
-    int CreateReader(const BlockStreamReaderConfigV1& config, IBlockStreamChannel** reader) override {
+    int CreateReader(const BlockStreamReaderConfig& config, IBlockStreamChannel** reader) override {
         if (!reader) return EINVAL;
         *reader = nullptr;
-        if (config.contract_version != kBlockStreamReaderContractVersionV1 || !config.task_id ||
+        if (config.contract_version != kBlockStreamReaderContractVersion || !config.task_id ||
             !config.source_category || !config.source_name || !config.pushed_filter_plan_json) {
             return EINVAL;
         }
@@ -2984,36 +2993,36 @@ void test_offline_filter_public_contracts() {
     printf("[TEST] offline filter public contracts...\n");
 
     using ResolveMethod =
-        int (IFilterDomainResolverV1::*)(const FilterDomainResolveRequestV1&, FilterDomainResolveResultV1*) const;
-    const ResolveMethod resolve_method = &IFilterDomainResolverV1::Resolve;
+        int (IFilterDomainResolver::*)(const FilterDomainResolveRequest&, FilterDomainResolveResult*) const;
+    const ResolveMethod resolve_method = &IFilterDomainResolver::Resolve;
     using CreateReaderMethod =
-        int (IBlockStreamReaderFactoryV1::*)(const BlockStreamReaderConfigV1&, IBlockStreamChannel**);
-    const CreateReaderMethod create_reader_method = &IBlockStreamReaderFactoryV1::CreateReader;
-    using ReleaseReaderMethod = void (IBlockStreamReaderFactoryV1::*)(IBlockStreamChannel*);
-    const ReleaseReaderMethod release_reader_method = &IBlockStreamReaderFactoryV1::ReleaseReader;
+        int (IBlockStreamReaderFactory::*)(const BlockStreamReaderConfig&, IBlockStreamChannel**);
+    const CreateReaderMethod create_reader_method = &IBlockStreamReaderFactory::CreateReader;
+    using ReleaseReaderMethod = void (IBlockStreamReaderFactory::*)(IBlockStreamChannel*);
+    const ReleaseReaderMethod release_reader_method = &IBlockStreamReaderFactory::ReleaseReader;
     assert(resolve_method && create_reader_method && release_reader_method);
 
-    assert(sizeof(IID_FILTER_DOMAIN_RESOLVER_V1) == sizeof(Guid));
-    assert(sizeof(IID_BLOCK_STREAM_READER_FACTORY_V1) == sizeof(Guid));
-    assert(memcmp(&IID_FILTER_DOMAIN_RESOLVER_V1, &IID_BLOCK_STREAM_READER_FACTORY_V1, sizeof(Guid)) != 0);
-    assert(memcmp(&IID_FILTER_DOMAIN_RESOLVER_V1, &IID_FILTER_PUSHDOWN_V1, sizeof(Guid)) != 0);
-    assert(memcmp(&IID_BLOCK_STREAM_READER_FACTORY_V1, &IID_BLOCK_STREAM_FACTORY, sizeof(Guid)) != 0);
-    assert(kFilterDomainSyntheticNodeIdBaseV1 == 0x80000000u);
+    assert(sizeof(IID_FILTER_DOMAIN_RESOLVER) == sizeof(Guid));
+    assert(sizeof(IID_BLOCK_STREAM_READER_FACTORY) == sizeof(Guid));
+    assert(memcmp(&IID_FILTER_DOMAIN_RESOLVER, &IID_BLOCK_STREAM_READER_FACTORY, sizeof(Guid)) != 0);
+    assert(memcmp(&IID_FILTER_DOMAIN_RESOLVER, &IID_FILTER_PUSHDOWN, sizeof(Guid)) != 0);
+    assert(memcmp(&IID_BLOCK_STREAM_READER_FACTORY, &IID_BLOCK_STREAM_FACTORY, sizeof(Guid)) != 0);
+    assert(kFilterDomainSyntheticNodeIdBase == 0x80000000u);
 
     auto input = std::make_shared<FilterExpr>();
     input->kind = FilterExprKind::kField;
     input->node_id = 7;
     input->field_name = "ports_valid";
-    FilterDomainResolveRequestV1 resolve_request;
-    assert(resolve_request.contract_version == kFilterDomainResolverContractVersionV1);
-    assert(resolve_request.target_kind == FilterDomainTargetKindV1::kSource);
+    FilterDomainResolveRequest resolve_request;
+    assert(resolve_request.contract_version == kFilterDomainResolverContractVersion);
+    assert(resolve_request.target_kind == FilterDomainTargetKind::kSource);
     resolve_request.target_category = "pcapfile";
     resolve_request.target_name = "rdp";
     resolve_request.output_schema = packet::PacketSchema();
     resolve_request.expression = input;
 
     TestFilterDomainResolver resolver;
-    FilterDomainResolveResultV1 resolved;
+    FilterDomainResolveResult resolved;
     assert(resolver.Resolve(resolve_request, &resolved) == 0);
     assert(resolved.lowered_expression && resolved.lowered_expression.get() != input.get());
     assert(resolved.lowered_expression->node_id == input->node_id);
@@ -3025,8 +3034,8 @@ void test_offline_filter_public_contracts() {
     assert(resolver.Resolve(resolve_request, &resolved) == ENOTSUP);
     assert(!resolved.lowered_expression && resolved.diagnostic.empty());
 
-    BlockStreamReaderConfigV1 reader_config;
-    assert(reader_config.contract_version == kBlockStreamReaderContractVersionV1);
+    BlockStreamReaderConfig reader_config;
+    assert(reader_config.contract_version == kBlockStreamReaderContractVersion);
     assert(!reader_config.task_id && !reader_config.source_category && !reader_config.source_name);
     assert(!reader_config.pushed_filter_plan_json);
 
@@ -3107,8 +3116,8 @@ void test_offline_filter_reader_factory_contracts() {
     const LegacyGetMethod legacy_get = &IBlockStreamFactory::Get;
     const LegacyListMethod legacy_list = &IBlockStreamFactory::List;
     assert(legacy_get && legacy_list);
-    static_assert(!std::is_base_of_v<IBlockStreamFactory, IBlockStreamReaderFactoryV1>);
-    static_assert(!std::is_base_of_v<IBlockStreamReaderFactoryV1, IBlockStreamFactory>);
+    static_assert(!std::is_base_of_v<IBlockStreamFactory, IBlockStreamReaderFactory>);
+    static_assert(!std::is_base_of_v<IBlockStreamReaderFactory, IBlockStreamFactory>);
     LegacyBlockStreamFactoryAbiFixture legacy_factory;
     assert(!legacy_factory.Get("pcapfile", "rdp"));
     legacy_factory.List(nullptr);
@@ -3119,7 +3128,7 @@ void test_offline_filter_reader_factory_contracts() {
     std::string source_one = "rdp";
     std::string plan_one = "{\"version\":1,\"root\":{\"node_id\":7}}";
     const std::string expected_plan_one = plan_one;
-    BlockStreamReaderConfigV1 config_one;
+    BlockStreamReaderConfig config_one;
     config_one.task_id = task_one.c_str();
     config_one.source_category = category_one.c_str();
     config_one.source_name = source_one.c_str();
@@ -3145,7 +3154,7 @@ void test_offline_filter_reader_factory_contracts() {
         std::string category_two = "pcapfile";
         std::string source_two = "dns";
         std::string plan_two = "{\"version\":1,\"root\":null}";
-        BlockStreamReaderConfigV1 config_two;
+        BlockStreamReaderConfig config_two;
         config_two.task_id = task_two.c_str();
         config_two.source_category = category_two.c_str();
         config_two.source_name = source_two.c_str();
@@ -3166,7 +3175,7 @@ void test_offline_filter_reader_factory_contracts() {
     assert(reader_one->PollBlock(0).kind == BlockPollEvent::kCancelled);
     assert(reader_two->PollBlock(0).kind == BlockPollEvent::kEof);
 
-    BlockStreamReaderConfigV1 rejected_config;
+    BlockStreamReaderConfig rejected_config;
     rejected_config.task_id = "task-rejected";
     rejected_config.source_category = "other";
     rejected_config.source_name = "rdp";
@@ -3176,11 +3185,11 @@ void test_offline_filter_reader_factory_contracts() {
     assert(!rejected && provider.live_readers == 2);
 
     rejected_config.source_category = "pcapfile";
-    rejected_config.contract_version = kBlockStreamReaderContractVersionV1 + 1;
+    rejected_config.contract_version = kBlockStreamReaderContractVersion + 1;
     rejected = reinterpret_cast<IBlockStreamChannel*>(1);
     assert(provider.CreateReader(rejected_config, &rejected) == EINVAL);
     assert(!rejected && provider.live_readers == 2);
-    rejected_config.contract_version = kBlockStreamReaderContractVersionV1;
+    rejected_config.contract_version = kBlockStreamReaderContractVersion;
     assert(provider.CreateReader(rejected_config, nullptr) == EINVAL);
     assert(provider.live_readers == 2);
 
@@ -3191,9 +3200,9 @@ void test_offline_filter_reader_factory_contracts() {
     printf("[PASS] offline filter reader factory contracts\n");
 }
 
-class TestBlockTransformTask final : public IBlockTransformTaskV1 {
+class TestBlockTransformTask final : public IBlockTransformTask {
  public:
-    explicit TestBlockTransformTask(const BlockTransformTaskConfigV1& config)
+    explicit TestBlockTransformTask(const BlockTransformTaskConfig& config)
         : contract_version_(config.contract_version),
           task_id_(config.task_id),
           with_params_json_(config.with_params_json),
@@ -3212,13 +3221,13 @@ class TestBlockTransformTask final : public IBlockTransformTaskV1 {
     }
 
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
-                     std::vector<BlockTransformOutputV1>* outputs) override {
+                     std::vector<BlockTransformOutput>* outputs) override {
         if (!input || !outputs || !outputs->empty() || cancelled_) return -1;
         outputs->push_back({input, ts_ms});
         return 0;
     }
 
-    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+    int Flush(std::vector<BlockTransformOutput>* outputs) override {
         return outputs && outputs->empty() && !cancelled_ ? 0 : -1;
     }
 
@@ -3234,15 +3243,15 @@ class TestBlockTransformTask final : public IBlockTransformTaskV1 {
     std::shared_ptr<arrow::Schema> schema_;
 };
 
-class TestBlockTransformProvider final : public IBlockTransformOperatorV1 {
+class TestBlockTransformProvider final : public IBlockTransformOperator {
  public:
     std::string Category() const override { return "test"; }
     std::string Name() const override { return "transform"; }
     std::string Description() const override { return "interface fixture"; }
 
-    int CreateTask(const BlockTransformTaskConfigV1& config, IBlockTransformTaskV1** task) override {
+    int CreateTask(const BlockTransformTaskConfig& config, IBlockTransformTask** task) override {
         if (!task || !config.task_id || !config.with_params_json || !config.pushed_filter_plan_json ||
-            config.contract_version != kBlockTransformContractVersionV1) {
+            config.contract_version != kBlockTransformContractVersion) {
             return -1;
         }
         *task = nullptr;
@@ -3253,7 +3262,7 @@ class TestBlockTransformProvider final : public IBlockTransformOperatorV1 {
         return 0;
     }
 
-    void ReleaseTask(IBlockTransformTaskV1* task) override {
+    void ReleaseTask(IBlockTransformTask* task) override {
         delete task;
         --live_tasks;
     }
@@ -3263,9 +3272,9 @@ class TestBlockTransformProvider final : public IBlockTransformOperatorV1 {
     bool return_null_task = false;
 };
 
-class TestTimeDrivenBlockTransformTask final : public IBlockTransformTaskV2 {
+class TestTimeDrivenBlockTransformTask final : public IBlockTransformTask, public IBlockTransformTimeDrivenTask {
  public:
-    explicit TestTimeDrivenBlockTransformTask(const BlockTransformTaskConfigV2& config)
+    explicit TestTimeDrivenBlockTransformTask(const BlockTransformTaskConfig& config)
         : task_id_(config.task_id),
           with_params_json_(config.with_params_json),
           pushed_filter_plan_json_(config.pushed_filter_plan_json) {}
@@ -3279,45 +3288,45 @@ class TestTimeDrivenBlockTransformTask final : public IBlockTransformTaskV2 {
     }
 
     int ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
-                     std::vector<BlockTransformOutputV1>* outputs) override {
+                     std::vector<BlockTransformOutput>* outputs) override {
         if (!opened_ || cancelled_ || !input || !outputs || !outputs->empty()) return -EINVAL;
         last_batch_ = input;
         outputs->push_back({input, ts_ms});
-        return e2i(BlockTransformStatusV1::kContinue);
+        return e2i(BlockTransformStatus::kContinue);
     }
 
-    int Flush(std::vector<BlockTransformOutputV1>* outputs) override {
+    int Flush(std::vector<BlockTransformOutput>* outputs) override {
         return opened_ && !cancelled_ && outputs && outputs->empty() ? 0 : -EINVAL;
     }
 
     void Cancel() override { cancelled_ = true; }
     std::string LastError() const override { return ""; }
 
-    int GetTimeDriveState(BlockTransformTimeDriveStateV1* state) override {
-        if (!opened_ || cancelled_ || !state || state->struct_size < kBlockTransformTimeDriveStateV1Size ||
-            state->contract_version != kBlockTransformTimeDriveVersionV1) {
+    int GetTimeDriveState(BlockTransformTimeDriveState* state) override {
+        if (!opened_ || cancelled_ || !state || state->struct_size < kBlockTransformTimeDriveStateSize ||
+            state->contract_version != kBlockTransformTimeDriveVersion) {
             return -EINVAL;
         }
-        BlockTransformTimeDriveStateV1 next{};
-        next.struct_size = kBlockTransformTimeDriveStateV1Size;
-        next.contract_version = kBlockTransformTimeDriveVersionV1;
+        BlockTransformTimeDriveState next{};
+        next.struct_size = kBlockTransformTimeDriveStateSize;
+        next.contract_version = kBlockTransformTimeDriveVersion;
         next.armed = 1;
         next.deadline_ns = next_deadline_ns_;
         *state = next;
         return 0;
     }
 
-    int OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* outputs) override {
+    int OnTime(const BlockTransformTimeEvent& event, std::vector<BlockTransformOutput>* outputs) override {
         if (!opened_ || cancelled_ || !outputs || !outputs->empty() ||
-            event.struct_size < kBlockTransformTimeEventV1Size ||
-            event.contract_version != kBlockTransformTimeDriveVersionV1) {
+            event.struct_size < kBlockTransformTimeEventSize ||
+            event.contract_version != kBlockTransformTimeDriveVersion) {
             return -EINVAL;
         }
         last_monotonic_now_ns_ = event.monotonic_now_ns;
         last_wall_now_ns_ = event.wall_now_ns;
         next_deadline_ns_ = event.monotonic_now_ns + 100;
         if (last_batch_) outputs->push_back({last_batch_, event.wall_now_ns / 1000 / 1000});
-        return e2i(BlockTransformStatusV1::kContinue);
+        return e2i(BlockTransformStatus::kContinue);
     }
 
     const std::string& TaskId() const { return task_id_; }
@@ -3339,18 +3348,18 @@ class TestTimeDrivenBlockTransformTask final : public IBlockTransformTaskV2 {
     std::shared_ptr<arrow::RecordBatch> last_batch_;
 };
 
-class TestTimeDrivenBlockTransformProvider final : public IBlockTransformOperatorV2 {
+class TestTimeDrivenBlockTransformProvider final : public IBlockTransformOperator {
  public:
     std::string Category() const override { return "test"; }
     std::string Name() const override { return "time_driven_transform"; }
     std::string Description() const override { return "time drive interface fixture"; }
 
-    int CreateTask(const BlockTransformTaskConfigV2& config, IBlockTransformTaskV2** task) override {
+    int CreateTask(const BlockTransformTaskConfig& config, IBlockTransformTask** task) override {
         if (!task) return -EINVAL;
         *task = nullptr;
-        if (config.struct_size < kBlockTransformTaskConfigV2Size ||
-            config.contract_version != kBlockTransformContractVersionV2 || !config.task_id ||
-            !config.with_params_json || !config.pushed_filter_plan_json) {
+        if (config.struct_size < kBlockTransformTaskConfigSize ||
+            config.contract_version != kBlockTransformContractVersion || !config.task_id || !config.with_params_json ||
+            !config.pushed_filter_plan_json) {
             return -EINVAL;
         }
         *task = new TestTimeDrivenBlockTransformTask(config);
@@ -3358,7 +3367,7 @@ class TestTimeDrivenBlockTransformProvider final : public IBlockTransformOperato
         return 0;
     }
 
-    void ReleaseTask(IBlockTransformTaskV2* task) override {
+    void ReleaseTask(IBlockTransformTask* task) override {
         if (!task) return;
         delete task;
         --live_tasks;
@@ -3368,52 +3377,49 @@ class TestTimeDrivenBlockTransformProvider final : public IBlockTransformOperato
 };
 
 // ============================================================
-// Test 7.2a: versioned block transform time-drive contracts
+// Test 7.2a: block transform time-drive contracts
 // ============================================================
 void test_block_transform_time_drive_interfaces() {
     printf("[TEST] block transform time-drive interfaces...\n");
 
-    static_assert(std::is_standard_layout_v<BlockTransformTaskConfigV2>);
-    static_assert(std::is_standard_layout_v<BlockTransformTimeDriveStateV1>);
-    static_assert(std::is_standard_layout_v<BlockTransformTimeEventV1>);
-    static_assert(std::is_base_of_v<IBlockTransformTaskV1, IBlockTransformTaskV2>);
-    static_assert(std::is_base_of_v<IBlockTransformTimeDrivenTaskV1, IBlockTransformTaskV2>);
-    static_assert(!std::is_base_of_v<IBlockTransformTimeDrivenTaskV1, IBlockTransformTaskV1>);
+    static_assert(std::is_standard_layout_v<BlockTransformTaskConfig>);
+    static_assert(std::is_standard_layout_v<BlockTransformTimeDriveState>);
+    static_assert(std::is_standard_layout_v<BlockTransformTimeEvent>);
+    static_assert(!std::is_base_of_v<IBlockTransformTimeDrivenTask, IBlockTransformTask>);
 
-    assert(sizeof(IID_BLOCK_TRANSFORM_OPERATOR_V2) == sizeof(Guid));
-    assert(std::memcmp(&IID_BLOCK_TRANSFORM_OPERATOR_V1, &IID_BLOCK_TRANSFORM_OPERATOR_V2, sizeof(Guid)) != 0);
-    assert(kBlockTransformTaskConfigV2Size == sizeof(BlockTransformTaskConfigV2));
-    assert(kBlockTransformTimeDriveStateV1Size == sizeof(BlockTransformTimeDriveStateV1));
-    assert(kBlockTransformTimeEventV1Size == sizeof(BlockTransformTimeEventV1));
+    assert(sizeof(IID_BLOCK_TRANSFORM_OPERATOR) == sizeof(Guid));
+    assert(kBlockTransformTaskConfigSize == sizeof(BlockTransformTaskConfig));
+    assert(kBlockTransformTimeDriveStateSize == sizeof(BlockTransformTimeDriveState));
+    assert(kBlockTransformTimeEventSize == sizeof(BlockTransformTimeEvent));
 
     std::string task_id = "time-task";
     std::string with_params = "{\"mode\":\"realtime\"}";
     std::string filter_plan = "{\"version\":1}";
-    BlockTransformTaskConfigV2 config{};
-    config.struct_size = kBlockTransformTaskConfigV2Size;
-    config.contract_version = kBlockTransformContractVersionV2;
+    BlockTransformTaskConfig config{};
+    config.struct_size = kBlockTransformTaskConfigSize;
+    config.contract_version = kBlockTransformContractVersion;
     config.task_id = task_id.c_str();
     config.with_params_json = with_params.c_str();
     config.pushed_filter_plan_json = filter_plan.c_str();
 
     TestTimeDrivenBlockTransformProvider provider;
-    IBlockTransformTaskV2* task = reinterpret_cast<IBlockTransformTaskV2*>(1);
+    IBlockTransformTask* task = reinterpret_cast<IBlockTransformTask*>(1);
     auto rejected = config;
-    rejected.struct_size = kBlockTransformTaskConfigV2Size - 1;
+    rejected.struct_size = kBlockTransformTaskConfigSize - 1;
     assert(provider.CreateTask(rejected, &task) == -EINVAL && task == nullptr);
-    task = reinterpret_cast<IBlockTransformTaskV2*>(1);
+    task = reinterpret_cast<IBlockTransformTask*>(1);
     rejected = config;
-    rejected.contract_version = kBlockTransformContractVersionV2 + 1;
+    rejected.contract_version = kBlockTransformContractVersion + 1;
     assert(provider.CreateTask(rejected, &task) == -EINVAL && task == nullptr);
-    task = reinterpret_cast<IBlockTransformTaskV2*>(1);
+    task = reinterpret_cast<IBlockTransformTask*>(1);
     rejected = config;
     rejected.task_id = nullptr;
     assert(provider.CreateTask(rejected, &task) == -EINVAL && task == nullptr);
-    task = reinterpret_cast<IBlockTransformTaskV2*>(1);
+    task = reinterpret_cast<IBlockTransformTask*>(1);
     rejected = config;
     rejected.with_params_json = nullptr;
     assert(provider.CreateTask(rejected, &task) == -EINVAL && task == nullptr);
-    task = reinterpret_cast<IBlockTransformTaskV2*>(1);
+    task = reinterpret_cast<IBlockTransformTask*>(1);
     rejected = config;
     rejected.pushed_filter_plan_json = nullptr;
     assert(provider.CreateTask(rejected, &task) == -EINVAL && task == nullptr);
@@ -3429,49 +3435,50 @@ void test_block_transform_time_drive_interfaces() {
     assert(concrete->WithParamsJson() == "{\"mode\":\"realtime\"}");
     assert(concrete->PushedFilterPlanJson() == "{\"version\":1}");
 
-    IBlockTransformTaskV1* data_task = task;
-    IBlockTransformTimeDrivenTaskV1* time_task = task;
+    IBlockTransformTask* data_task = task;
+    auto* time_task = dynamic_cast<IBlockTransformTimeDrivenTask*>(task);
+    assert(time_task);
     auto schema = arrow::schema({arrow::field("value", arrow::int64())});
     std::shared_ptr<arrow::Schema> output_schema;
     assert(data_task->Open(schema, &output_schema) == 0);
     assert(output_schema && output_schema->Equals(schema));
 
     auto batch = arrow::RecordBatch::Make(schema, 0, {std::make_shared<arrow::Int64Array>(0, nullptr)});
-    std::vector<BlockTransformOutputV1> outputs;
-    assert(data_task->ProcessBlock(batch, 17, &outputs) == e2i(BlockTransformStatusV1::kContinue));
+    std::vector<BlockTransformOutput> outputs;
+    assert(data_task->ProcessBlock(batch, 17, &outputs) == e2i(BlockTransformStatus::kContinue));
     assert(outputs.size() == 1 && outputs[0].batch == batch && outputs[0].ts_ms == 17);
 
-    BlockTransformTimeDriveStateV1 state{};
-    state.struct_size = kBlockTransformTimeDriveStateV1Size - 1;
-    state.contract_version = kBlockTransformTimeDriveVersionV1;
+    BlockTransformTimeDriveState state{};
+    state.struct_size = kBlockTransformTimeDriveStateSize - 1;
+    state.contract_version = kBlockTransformTimeDriveVersion;
     assert(time_task->GetTimeDriveState(&state) == -EINVAL);
-    state.struct_size = kBlockTransformTimeDriveStateV1Size;
-    state.contract_version = kBlockTransformTimeDriveVersionV1 + 1;
+    state.struct_size = kBlockTransformTimeDriveStateSize;
+    state.contract_version = kBlockTransformTimeDriveVersion + 1;
     assert(time_task->GetTimeDriveState(&state) == -EINVAL);
-    state.contract_version = kBlockTransformTimeDriveVersionV1;
+    state.contract_version = kBlockTransformTimeDriveVersion;
     assert(time_task->GetTimeDriveState(&state) == 0);
     assert(state.armed == 1 && state.deadline_ns == 0);
     for (const uint8_t byte : state.reserved) assert(byte == 0);
 
     outputs.clear();
-    BlockTransformTimeEventV1 event{};
-    event.struct_size = kBlockTransformTimeEventV1Size;
-    event.contract_version = kBlockTransformTimeDriveVersionV1;
+    BlockTransformTimeEvent event{};
+    event.struct_size = kBlockTransformTimeEventSize;
+    event.contract_version = kBlockTransformTimeDriveVersion;
     event.monotonic_now_ns = 1000;
     event.wall_now_ns = 5 * 1000 * 1000;
     auto rejected_event = event;
-    rejected_event.struct_size = kBlockTransformTimeEventV1Size - 1;
+    rejected_event.struct_size = kBlockTransformTimeEventSize - 1;
     assert(time_task->OnTime(rejected_event, &outputs) == -EINVAL && outputs.empty());
     rejected_event = event;
-    rejected_event.contract_version = kBlockTransformTimeDriveVersionV1 + 1;
+    rejected_event.contract_version = kBlockTransformTimeDriveVersion + 1;
     assert(time_task->OnTime(rejected_event, &outputs) == -EINVAL && outputs.empty());
     assert(concrete->LastMonotonicNowNs() == 0 && concrete->LastWallNowNs() == 0);
-    assert(time_task->OnTime(event, &outputs) == e2i(BlockTransformStatusV1::kContinue));
+    assert(time_task->OnTime(event, &outputs) == e2i(BlockTransformStatus::kContinue));
     assert(outputs.size() == 1 && outputs[0].batch == batch && outputs[0].ts_ms == 5);
     assert(concrete->LastMonotonicNowNs() == 1000 && concrete->LastWallNowNs() == 5 * 1000 * 1000);
 
-    state.struct_size = kBlockTransformTimeDriveStateV1Size;
-    state.contract_version = kBlockTransformTimeDriveVersionV1;
+    state.struct_size = kBlockTransformTimeDriveStateSize;
+    state.contract_version = kBlockTransformTimeDriveVersion;
     assert(time_task->GetTimeDriveState(&state) == 0);
     assert(state.armed == 1 && state.deadline_ns == 1100);
 
@@ -3490,33 +3497,33 @@ void test_stage_filter_interfaces() {
 
     LegacyBlockOperatorAbiFixture legacy_operator;
     assert(legacy_operator.Name() == "legacy_abi");
-    using PushdownMethod = int (IFilterPushdownV1::*)(const FilterPushdownRequestV1&, FilterPushdownResultV1*) const;
-    const PushdownMethod pushdown_method = &IFilterPushdownV1::EvaluatePushdown;
+    using PushdownMethod = int (IFilterPushdown::*)(const FilterPushdownRequest&, FilterPushdownResult*) const;
+    const PushdownMethod pushdown_method = &IFilterPushdown::EvaluatePushdown;
     assert(pushdown_method != nullptr);
-    assert(sizeof(IID_FILTER_PUSHDOWN_V1) == sizeof(Guid));
-    assert(sizeof(IID_BLOCK_TRANSFORM_OPERATOR_V1) == sizeof(Guid));
-    assert(memcmp(&IID_FILTER_PUSHDOWN_V1, &IID_BLOCK_TRANSFORM_OPERATOR_V1, sizeof(Guid)) != 0);
+    assert(sizeof(IID_FILTER_PUSHDOWN) == sizeof(Guid));
+    assert(sizeof(IID_BLOCK_TRANSFORM_OPERATOR) == sizeof(Guid));
+    assert(memcmp(&IID_FILTER_PUSHDOWN, &IID_BLOCK_TRANSFORM_OPERATOR, sizeof(Guid)) != 0);
 
     auto schema = arrow::schema({arrow::field("value", arrow::int64())});
     TestFilterPushdown pushdown;
-    FilterPushdownRequestV1 request;
-    request.target_kind = FilterPushdownTargetKindV1::kTransform;
+    FilterPushdownRequest request;
+    request.target_kind = FilterPushdownTargetKind::kTransform;
     request.target_category = "test";
     request.target_name = "transform";
     request.output_schema = schema;
     request.canonical_plan_json = "{\"version\":1}";
     request.candidate_node_ids = {2, 5};
-    FilterPushdownResultV1 result;
+    FilterPushdownResult result;
     assert(pushdown.EvaluatePushdown(request, &result) == 0);
     assert(result.accepted_node_ids == std::vector<uint32_t>({2}));
 
     TestBlockTransformProvider provider;
-    BlockTransformTaskConfigV1 config;
+    BlockTransformTaskConfig config;
     config.task_id = "task-1";
     config.with_params_json = "{}";
     config.pushed_filter_plan_json = "{\"version\":1}";
-    IBlockTransformTaskV1* task1 = nullptr;
-    IBlockTransformTaskV1* task2 = nullptr;
+    IBlockTransformTask* task1 = nullptr;
+    IBlockTransformTask* task2 = nullptr;
     assert(provider.CreateTask(config, &task1) == 0);
     config.task_id = "task-2";
     assert(provider.CreateTask(config, &task2) == 0);
@@ -3526,7 +3533,7 @@ void test_stage_filter_interfaces() {
     assert(task1->Open(schema, &output_schema) == 0);
     assert(output_schema && output_schema->Equals(schema));
     auto batch = arrow::RecordBatch::Make(schema, 0, {std::make_shared<arrow::Int64Array>(0, nullptr)});
-    std::vector<BlockTransformOutputV1> outputs;
+    std::vector<BlockTransformOutput> outputs;
     assert(task1->ProcessBlock(batch, 123, &outputs) == 0);
     assert(outputs.size() == 1 && outputs[0].batch == batch && outputs[0].ts_ms == 123);
     outputs.clear();
@@ -3562,7 +3569,7 @@ void test_filter_task_session_isolation() {
 
     const auto original = bind("id >= 42 AND enabled");
     FilterPushdownTarget target;
-    target.kind = FilterPushdownTargetKindV1::kTransform;
+    target.kind = FilterPushdownTargetKind::kTransform;
     target.category = "test";
     target.name = "transform";
     target.output_schema = schema;
@@ -3604,7 +3611,7 @@ void test_filter_task_session_isolation() {
     assert(empty_exclusive.accepted_node_ids.empty());
     assert(!empty_exclusive.pushed_expression);
     assert(empty_exclusive.residual_expression == original);
-    assert(empty_exclusive.pushed_filter_plan_json == kEmptyCanonicalFilterPlanV1);
+    assert(empty_exclusive.pushed_filter_plan_json == kEmptyCanonicalFilterPlan);
     rapidjson::Document empty_plan;
     empty_plan.Parse(empty_exclusive.pushed_filter_plan_json.c_str());
     assert(!empty_plan.HasParseError() && empty_plan["root"].IsNull());
@@ -3614,7 +3621,7 @@ void test_filter_task_session_isolation() {
                                             &shared_first, &error) == FilterPlanError::kNone);
     assert(!shared_first.pushdown_enabled && shared_first.accepted_node_ids.empty());
     assert(!shared_first.pushed_expression && shared_first.residual_expression == original);
-    assert(shared_first.pushed_filter_plan_json == kEmptyCanonicalFilterPlanV1);
+    assert(shared_first.pushed_filter_plan_json == kEmptyCanonicalFilterPlan);
 
     const auto other_original = bind("id < 10");
     RecordingFilterPushdownProvider other_owner;
@@ -3664,25 +3671,25 @@ void test_filter_task_session_isolation() {
 
     TestBlockTransformProvider transform_provider;
     const std::string exact_json = exclusive.pushed_filter_plan_json;
-    IBlockTransformTaskV1* task_one = nullptr;
+    IBlockTransformTask* task_one = nullptr;
     assert(CreateBlockTransformTaskSession(&transform_provider, "task-one", "{\"mode\":\"fast\"}", exclusive, &task_one,
                                            &error) == FilterPlanError::kNone);
     assert(task_one && transform_provider.live_tasks == 1);
     exclusive.pushed_filter_plan_json = "caller storage changed";
     auto* copied_one = dynamic_cast<TestBlockTransformTask*>(task_one);
     assert(copied_one);
-    assert(copied_one->ContractVersion() == kBlockTransformContractVersionV1);
+    assert(copied_one->ContractVersion() == kBlockTransformContractVersion);
     assert(copied_one->TaskId() == "task-one");
     assert(copied_one->WithParamsJson() == "{\"mode\":\"fast\"}");
     assert(copied_one->PushedFilterPlanJson() == exact_json);
 
-    IBlockTransformTaskV1* task_two = nullptr;
+    IBlockTransformTask* task_two = nullptr;
     assert(CreateBlockTransformTaskSession(&transform_provider, "task-two", "{}", shared_first, &task_two, &error) ==
            FilterPlanError::kNone);
     auto* copied_two = dynamic_cast<TestBlockTransformTask*>(task_two);
     assert(copied_two && task_two != task_one && transform_provider.live_tasks == 2);
     assert(copied_two->TaskId() == "task-two");
-    assert(copied_two->PushedFilterPlanJson() == kEmptyCanonicalFilterPlanV1);
+    assert(copied_two->PushedFilterPlanJson() == kEmptyCanonicalFilterPlan);
     assert(copied_one->TaskId() == "task-one" && copied_one->PushedFilterPlanJson() == exact_json);
 
     transform_provider.ReleaseTask(task_one);
@@ -3690,7 +3697,7 @@ void test_filter_task_session_isolation() {
     assert(transform_provider.live_tasks == 0);
 
     transform_provider.create_return_code = EIO;
-    task_one = reinterpret_cast<IBlockTransformTaskV1*>(1);
+    task_one = reinterpret_cast<IBlockTransformTask*>(1);
     assert(CreateBlockTransformTaskSession(&transform_provider, "task-failed", "{}", shared_first, &task_one, &error) ==
            FilterPlanError::kTaskSessionCreationFailed);
     assert(!task_one && !error.empty() && transform_provider.live_tasks == 0);
@@ -3966,9 +3973,9 @@ void test_build_query_integration() {
         assert(
             stmt.sql_part ==
             "SELECT a, COUNT(*) FROM catalog.db.table WHERE x > 1 GROUP BY a HAVING COUNT(*) > 5 ORDER BY a LIMIT 10");
-        assert(stmt.op_category == "ml");
-        assert(stmt.op_name == "train");
-        assert(stmt.with_params["epochs"] == "100");
+        assert(stmt.operators.front().category == "ml");
+        assert(stmt.operators.front().name == "train");
+        assert(stmt.operator_with_params.front()["epochs"] == "100");
         assert(stmt.dest == "result");
 
         std::string query = BuildQuery_Test("catalog.db.table", stmt);
@@ -4151,11 +4158,11 @@ void test_json_error_builder() {
 void test_config_channel_public_contract() {
     printf("[TEST] config channel public snapshot contract...\n");
 
-    using ResolveMethod = int (IConfigChannelRegistryV1::*)(const char*, ConfigChannelSnapshot*, std::string*);
-    static_assert(std::is_same_v<decltype(&IConfigChannelRegistryV1::Resolve), ResolveMethod>);
+    using ResolveMethod = int (IConfigChannelRegistry::*)(const char*, ConfigChannelSnapshot*, std::string*);
+    static_assert(std::is_same_v<decltype(&IConfigChannelRegistry::Resolve), ResolveMethod>);
     static_assert(std::is_same_v<decltype(ConfigChannelSnapshot{}.content), std::shared_ptr<const std::string>>);
-    assert(sizeof(IID_CONFIG_CHANNEL_REGISTRY_V1) == sizeof(Guid));
-    assert(memcmp(&IID_CONFIG_CHANNEL_REGISTRY_V1, &IID_CHANNEL_REGISTRY, sizeof(Guid)) != 0);
+    assert(sizeof(IID_CONFIG_CHANNEL_REGISTRY) == sizeof(Guid));
+    assert(memcmp(&IID_CONFIG_CHANNEL_REGISTRY, &IID_CHANNEL_REGISTRY, sizeof(Guid)) != 0);
 
     ConfigChannelSnapshot held;
     {
@@ -4182,16 +4189,16 @@ void test_config_channel_public_contract() {
 // ============================================================
 // Flow-labeling public ABI and mock lifecycle contract
 // ============================================================
-class MockFlowLabelMatcher final : public IFlowLabelMatcherV1 {
+class MockFlowLabelMatcher final : public IFlowLabelMatcher {
  public:
     explicit MockFlowLabelMatcher(bool* released) : released_(released) {}
 
-    int ClassifyBatch(const FlowLabelFactsV1* facts, uint32_t count, uint32_t* primary_label_ids) const override {
+    int ClassifyBatch(const FlowLabelFacts* facts, uint32_t count, uint32_t* primary_label_ids) const override {
         if (facts == nullptr || count == 0 || primary_label_ids == nullptr) return EINVAL;
         ++classify_calls;
         for (uint32_t index = 0; index < count; ++index) {
             const auto& current = facts[index];
-            if (current.struct_size != kFlowLabelFactsV1Size) return EINVAL;
+            if (current.struct_size != kFlowLabelFactsSize) return EINVAL;
             const bool https = (current.source.port_valid != 0 && current.source.port == 443) ||
                                (current.destination.port_valid != 0 && current.destination.port == 443);
             primary_label_ids[index] = https ? 1001 : 0;
@@ -4199,7 +4206,7 @@ class MockFlowLabelMatcher final : public IFlowLabelMatcherV1 {
         return 0;
     }
 
-    bool FindLabel(uint32_t label_id, FlowPrimaryLabelViewV1* output) const override {
+    bool FindLabel(uint32_t label_id, FlowPrimaryLabelView* output) const override {
         if (label_id != 1001 || output == nullptr) return false;
         output->label_id = 1001;
         output->priority = 3000;
@@ -4223,31 +4230,31 @@ class MockFlowLabelMatcher final : public IFlowLabelMatcherV1 {
     const std::string description_ = "Corporate HTTPS traffic.";
 };
 
-class MockFlowLabelingProvider final : public IFlowLabelingProviderV1 {
+class MockFlowLabelingProvider final : public IFlowLabelingProvider {
  public:
-    FlowLabelingErrorV1 RuntimeStatus(FlowLabelingDiagnosticV1* diagnostic) const override {
+    FlowLabelingError RuntimeStatus(FlowLabelingDiagnostic* diagnostic) const override {
         if (ready) {
             if (diagnostic != nullptr) *diagnostic = {};
-            return FlowLabelingErrorV1::kNone;
+            return FlowLabelingError::kNone;
         }
-        SetDiagnostic(FlowLabelingErrorV1::kUnavailable, "/runtime", "mock runtime unavailable", diagnostic);
-        return FlowLabelingErrorV1::kUnavailable;
+        SetDiagnostic(FlowLabelingError::kUnavailable, "/runtime", "mock runtime unavailable", diagnostic);
+        return FlowLabelingError::kUnavailable;
     }
 
-    FlowLabelingErrorV1 CreateMatcher(const FlowLabelingCompileRequestV1& request, IFlowLabelMatcherV1** output,
-                                      FlowLabelingDiagnosticV1* diagnostic) override {
+    FlowLabelingError CreateMatcher(const FlowLabelingCompileRequest& request, IFlowLabelMatcher** output,
+                                    FlowLabelingDiagnostic* diagnostic) override {
         if (!ready) {
-            SetDiagnostic(FlowLabelingErrorV1::kUnavailable, "/runtime", "mock runtime unavailable", diagnostic);
-            return FlowLabelingErrorV1::kUnavailable;
+            SetDiagnostic(FlowLabelingError::kUnavailable, "/runtime", "mock runtime unavailable", diagnostic);
+            return FlowLabelingError::kUnavailable;
         }
-        if (request.struct_size != kFlowLabelingCompileRequestV1Size || request.snapshot == nullptr ||
+        if (request.struct_size != kFlowLabelingCompileRequestSize || request.snapshot == nullptr ||
             request.snapshot->content == nullptr) {
-            SetDiagnostic(FlowLabelingErrorV1::kInvalidSnapshot, "/snapshot", "mock snapshot invalid", diagnostic);
-            return FlowLabelingErrorV1::kInvalidSnapshot;
+            SetDiagnostic(FlowLabelingError::kInvalidSnapshot, "/snapshot", "mock snapshot invalid", diagnostic);
+            return FlowLabelingError::kInvalidSnapshot;
         }
         if (output == nullptr) {
-            SetDiagnostic(FlowLabelingErrorV1::kInvalidConfig, "/output", "mock output missing", diagnostic);
-            return FlowLabelingErrorV1::kInvalidConfig;
+            SetDiagnostic(FlowLabelingError::kInvalidConfig, "/output", "mock output missing", diagnostic);
+            return FlowLabelingError::kInvalidConfig;
         }
 
         captured_revision = request.snapshot->revision;
@@ -4258,7 +4265,7 @@ class MockFlowLabelingProvider final : public IFlowLabelingProviderV1 {
         captured_max_compiled_rules = request.max_compiled_rules;
         *output = new MockFlowLabelMatcher(&matcher_released);
         if (diagnostic != nullptr) *diagnostic = {};
-        return FlowLabelingErrorV1::kNone;
+        return FlowLabelingError::kNone;
     }
 
     bool ready = true;
@@ -4271,8 +4278,8 @@ class MockFlowLabelingProvider final : public IFlowLabelingProviderV1 {
     uint32_t captured_max_compiled_rules = 0;
 
  private:
-    static void SetDiagnostic(FlowLabelingErrorV1 error, const char* path, const char* detail,
-                              FlowLabelingDiagnosticV1* diagnostic) {
+    static void SetDiagnostic(FlowLabelingError error, const char* path, const char* detail,
+                              FlowLabelingDiagnostic* diagnostic) {
         if (diagnostic == nullptr) return;
         diagnostic->error = error;
         diagnostic->path = path;
@@ -4283,34 +4290,34 @@ class MockFlowLabelingProvider final : public IFlowLabelingProviderV1 {
 void test_flow_labeling_public_contract() {
     printf("[TEST] flow-labeling public ABI and mock lifecycle contract...\n");
 
-    using RuntimeStatusMethod = FlowLabelingErrorV1 (IFlowLabelingProviderV1::*)(FlowLabelingDiagnosticV1*) const;
-    using CreateMatcherMethod = FlowLabelingErrorV1 (IFlowLabelingProviderV1::*)(
-        const FlowLabelingCompileRequestV1&, IFlowLabelMatcherV1**, FlowLabelingDiagnosticV1*);
-    using ClassifyBatchMethod = int (IFlowLabelMatcherV1::*)(const FlowLabelFactsV1*, uint32_t, uint32_t*) const;
-    using FindLabelMethod = bool (IFlowLabelMatcherV1::*)(uint32_t, FlowPrimaryLabelViewV1*) const;
-    using ReleaseMethod = void (IFlowLabelMatcherV1::*)() noexcept;
-    static_assert(std::is_same_v<decltype(&IFlowLabelingProviderV1::RuntimeStatus), RuntimeStatusMethod>);
-    static_assert(std::is_same_v<decltype(&IFlowLabelingProviderV1::CreateMatcher), CreateMatcherMethod>);
-    static_assert(std::is_same_v<decltype(&IFlowLabelMatcherV1::ClassifyBatch), ClassifyBatchMethod>);
-    static_assert(std::is_same_v<decltype(&IFlowLabelMatcherV1::FindLabel), FindLabelMethod>);
-    static_assert(std::is_same_v<decltype(&IFlowLabelMatcherV1::Release), ReleaseMethod>);
-    static_assert(std::is_same_v<std::underlying_type_t<FlowLabelingErrorV1>, uint8_t>);
-    static_assert(std::is_standard_layout_v<FlowLabelEndpointFactsV1>);
-    static_assert(std::is_standard_layout_v<FlowLabelVlanFactsV1>);
-    static_assert(std::is_standard_layout_v<FlowLabelFactsV1>);
-    static_assert(std::is_standard_layout_v<FlowLabelingCompileRequestV1>);
-    static_assert(std::is_standard_layout_v<FlowPrimaryLabelViewV1>);
-    static_assert(std::is_standard_layout_v<FlowLabelingDiagnosticV1>);
-    static_assert(std::is_abstract_v<IFlowLabelMatcherV1>);
-    static_assert(std::is_abstract_v<IFlowLabelingProviderV1>);
+    using RuntimeStatusMethod = FlowLabelingError (IFlowLabelingProvider::*)(FlowLabelingDiagnostic*) const;
+    using CreateMatcherMethod = FlowLabelingError (IFlowLabelingProvider::*)(
+        const FlowLabelingCompileRequest&, IFlowLabelMatcher**, FlowLabelingDiagnostic*);
+    using ClassifyBatchMethod = int (IFlowLabelMatcher::*)(const FlowLabelFacts*, uint32_t, uint32_t*) const;
+    using FindLabelMethod = bool (IFlowLabelMatcher::*)(uint32_t, FlowPrimaryLabelView*) const;
+    using ReleaseMethod = void (IFlowLabelMatcher::*)() noexcept;
+    static_assert(std::is_same_v<decltype(&IFlowLabelingProvider::RuntimeStatus), RuntimeStatusMethod>);
+    static_assert(std::is_same_v<decltype(&IFlowLabelingProvider::CreateMatcher), CreateMatcherMethod>);
+    static_assert(std::is_same_v<decltype(&IFlowLabelMatcher::ClassifyBatch), ClassifyBatchMethod>);
+    static_assert(std::is_same_v<decltype(&IFlowLabelMatcher::FindLabel), FindLabelMethod>);
+    static_assert(std::is_same_v<decltype(&IFlowLabelMatcher::Release), ReleaseMethod>);
+    static_assert(std::is_same_v<std::underlying_type_t<FlowLabelingError>, uint8_t>);
+    static_assert(std::is_standard_layout_v<FlowLabelEndpointFacts>);
+    static_assert(std::is_standard_layout_v<FlowLabelVlanFacts>);
+    static_assert(std::is_standard_layout_v<FlowLabelFacts>);
+    static_assert(std::is_standard_layout_v<FlowLabelingCompileRequest>);
+    static_assert(std::is_standard_layout_v<FlowPrimaryLabelView>);
+    static_assert(std::is_standard_layout_v<FlowLabelingDiagnostic>);
+    static_assert(std::is_abstract_v<IFlowLabelMatcher>);
+    static_assert(std::is_abstract_v<IFlowLabelingProvider>);
 
-    assert(IID_FLOW_LABELING_PROVIDER_V1.d1_ == 0xe2451331);
-    assert(IID_FLOW_LABELING_PROVIDER_V1.d2_ == 0xa639);
-    assert(IID_FLOW_LABELING_PROVIDER_V1.d3_ == 0x4c4b);
-    assert(memcmp(&IID_FLOW_LABELING_PROVIDER_V1, &IID_CONFIG_CHANNEL_REGISTRY_V1, sizeof(Guid)) != 0);
+    assert(IID_FLOW_LABELING_PROVIDER.d1_ == 0xe2451331);
+    assert(IID_FLOW_LABELING_PROVIDER.d2_ == 0xa639);
+    assert(IID_FLOW_LABELING_PROVIDER.d3_ == 0x4c4b);
+    assert(memcmp(&IID_FLOW_LABELING_PROVIDER, &IID_CONFIG_CHANNEL_REGISTRY, sizeof(Guid)) != 0);
 
-    FlowLabelFactsV1 defaults;
-    assert(defaults.struct_size == kFlowLabelFactsV1Size);
+    FlowLabelFacts defaults;
+    assert(defaults.struct_size == kFlowLabelFactsSize);
     assert(defaults.observation_domain_id == 0 && defaults.ip_family == 0);
     assert(defaults.transport_protocol == 0 && defaults.transport_valid == 0);
     assert(defaults.source.mac_valid == 0 && defaults.source.ip_valid == 0 && defaults.source.port_valid == 0);
@@ -4319,21 +4326,20 @@ void test_flow_labeling_public_contract() {
     assert(defaults.vlan[0].valid == 0 && defaults.vlan[1].valid == 0);
 
     MockFlowLabelingProvider provider;
-    FlowLabelingDiagnosticV1 diagnostic;
-    assert(provider.RuntimeStatus(&diagnostic) == FlowLabelingErrorV1::kNone);
-    assert(diagnostic.error == FlowLabelingErrorV1::kNone && diagnostic.path == nullptr &&
-           diagnostic.detail == nullptr);
+    FlowLabelingDiagnostic diagnostic;
+    assert(provider.RuntimeStatus(&diagnostic) == FlowLabelingError::kNone);
+    assert(diagnostic.error == FlowLabelingError::kNone && diagnostic.path == nullptr && diagnostic.detail == nullptr);
 
     ConfigChannelSnapshot snapshot;
     snapshot.channel_name = "corp-labels";
     snapshot.revision = 7;
     snapshot.format = "yaml";
-    snapshot.schema_id = "flowsql.io/flow-labeling/v1alpha1";
+    snapshot.schema_id = "flowsql.io/flow-labeling";
     snapshot.content = std::make_shared<const std::string>("labels: []");
     snapshot.content_bytes = snapshot.content->size();
 
-    FlowLabelingCompileRequestV1 request;
-    assert(request.struct_size == kFlowLabelingCompileRequestV1Size);
+    FlowLabelingCompileRequest request;
+    assert(request.struct_size == kFlowLabelingCompileRequestSize);
     request.snapshot = &snapshot;
     request.reserved_module_state_bytes = 64 * 1024;
     request.max_labels = 10'000;
@@ -4342,18 +4348,18 @@ void test_flow_labeling_public_contract() {
 
     bool sentinel_released = false;
     MockFlowLabelMatcher sentinel(&sentinel_released);
-    IFlowLabelMatcherV1* matcher = &sentinel;
+    IFlowLabelMatcher* matcher = &sentinel;
     provider.ready = false;
-    assert(provider.CreateMatcher(request, &matcher, &diagnostic) == FlowLabelingErrorV1::kUnavailable);
+    assert(provider.CreateMatcher(request, &matcher, &diagnostic) == FlowLabelingError::kUnavailable);
     assert(matcher == &sentinel);
     assert(!sentinel_released);
-    assert(diagnostic.error == FlowLabelingErrorV1::kUnavailable);
+    assert(diagnostic.error == FlowLabelingError::kUnavailable);
     assert(std::string(diagnostic.path) == "/runtime");
     assert(std::string(diagnostic.detail) == "mock runtime unavailable");
 
     provider.ready = true;
     matcher = nullptr;
-    assert(provider.CreateMatcher(request, &matcher, &diagnostic) == FlowLabelingErrorV1::kNone);
+    assert(provider.CreateMatcher(request, &matcher, &diagnostic) == FlowLabelingError::kNone);
     assert(matcher != nullptr);
     assert(provider.captured_revision == 7 && provider.captured_content == "labels: []");
     assert(provider.captured_reserved_bytes == 64 * 1024);
@@ -4361,7 +4367,7 @@ void test_flow_labeling_public_contract() {
     assert(provider.captured_max_logical_rules == 50'000);
     assert(provider.captured_max_compiled_rules == 100'000);
 
-    FlowLabelFactsV1 batch[2];
+    FlowLabelFacts batch[2];
     batch[0].observation_domain_id = 23;
     batch[0].ip_family = 4;
     batch[0].transport_protocol = 6;
@@ -4374,7 +4380,7 @@ void test_flow_labeling_public_contract() {
     assert(matcher->ClassifyBatch(batch, 2, labels) == 0);
     assert(labels[0] == 1001 && labels[1] == 0);
 
-    FlowPrimaryLabelViewV1 view;
+    FlowPrimaryLabelView view;
     assert(matcher->FindLabel(1001, &view));
     assert(view.label_id == 1001 && view.priority == 3000);
     assert(std::string(view.name) == "corp-web");

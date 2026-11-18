@@ -40,21 +40,21 @@ Json Id(const std::string& id) {
     String(j, "runtime_task_id", id, j.GetAllocator());
     return j;
 }
-struct SlowSession final : IKafkaClientSessionV1, IKafkaProducerSessionV1 {
-    KafkaBindingSnapshotV1 snapshot;
+struct SlowSession final : IKafkaClientSession, IKafkaProducerSession {
+    KafkaBindingSnapshot snapshot;
     std::atomic<bool> cancelled{false}, entered{false};
     uint32_t delay = 0;
     uint64_t confirmed_packets = 0, messages = 0, bytes = 0;
     std::vector<uint64_t> latencies;
     uint64_t last_sequence = 0;
-    const KafkaBindingSnapshotV1& Snapshot() const override { return snapshot; }
+    const KafkaBindingSnapshot& Snapshot() const override { return snapshot; }
     int Probe(uint32_t, std::string*) override { return 0; }
     int QueryInterface(const Guid&, void** out) override {
-        *out = static_cast<IKafkaProducerSessionV1*>(this);
+        *out = static_cast<IKafkaProducerSession*>(this);
         return 0;
     }
     void Cancel() override { cancelled = true; }
-    int Produce(const std::vector<KafkaProduceMessageV1>& m, uint32_t timeout, KafkaDeliveryV1* out) override {
+    int Produce(const std::vector<KafkaProduceMessage>& m, uint32_t timeout, KafkaDelivery* out) override {
         Check(m.size() == 1, "single_poll");
         entered = true;
         auto start = Clock::now();
@@ -92,14 +92,14 @@ struct SlowSession final : IKafkaClientSessionV1, IKafkaProducerSessionV1 {
     }
     int Drain(uint32_t) override { return 0; }
 };
-struct Factory final : IPacketSinkFactoryV1, IKafkaChannelCatalogV1 {
+struct Factory final : IPacketSinkFactory, IKafkaChannelCatalog {
     std::shared_ptr<SlowSession> session;
-    int DescribeChannel(const char*, KafkaChannelDescriptionV1* d) override {
+    int DescribeChannel(const char*, KafkaChannelDescription* d) override {
         d->role = "sink";
         d->sink_adapter_available = true;
         return 0;
     }
-    int CreateWriter(const PacketSinkContextV1& c, std::unique_ptr<IPacketSinkWriterV1>* out) override {
+    int CreateWriter(const PacketSinkContext& c, std::unique_ptr<IPacketSinkWriter>* out) override {
         *out = std::make_unique<PacketWriter>(Config(), c, session);
         return 0;
     }
@@ -136,8 +136,8 @@ int main(int argc, char** argv) {
         std::filesystem::create_directories(root);
         Factory factory;
         auto* loader = PluginLoader::Single();
-        loader->Regist(IID_PACKET_SINK_FACTORY_V1, &factory);
-        loader->Regist(IID_KAFKA_CHANNEL_CATALOG_V1, static_cast<IKafkaChannelCatalogV1*>(&factory));
+        loader->Regist(IID_PACKET_SINK_FACTORY, &factory);
+        loader->Regist(IID_KAFKA_CHANNEL_CATALOG, static_cast<IKafkaChannelCatalog*>(&factory));
         struct Libraries {
             PluginLoader* l;
             ~Libraries() {
@@ -150,12 +150,13 @@ int main(int argc, char** argv) {
             "data_dir=" + (root / "data").string() + ";operator_db_path=" + (root / "operators.db").string();
         const auto npi = std::string("{\"ldfile\":\"") + PACKET_NPI_CONFIG + "\",\"concurrency\":1}";
         const auto adapter = std::string("{\"db_path\":\"") + (root / "adapter.db").string() + "\"}";
-        const char* names[] = {"libflowsql_database.so",  "libflowsql_builtin.so", "libflowsql_catalog.so",
-                               "libflowsql_scheduler.so", "libflowsql_npi.so",     "libflowsql_capture_af_packet.so",
-                               "libflowsql_netadapter.so"};
-        const char* options[] = {db.c_str(),  nullptr, catalog.c_str(), "batch_workers=1",
-                                 npi.c_str(), nullptr, adapter.c_str()};
-        Check(!loader->Load(get_absolute_process_path(), names, options, 7) && !loader->StartAll(), "plugins");
+        const char* names[] = {"libflowsql_config_channel.so",    "libflowsql_database.so",  "libflowsql_builtin.so",
+                               "libflowsql_catalog.so",           "libflowsql_scheduler.so", "libflowsql_npi.so",
+                               "libflowsql_capture_af_packet.so", "libflowsql_netadapter.so"};
+        const std::string semantics_option = "db_path=" + (root / "semantics.db").string();
+        const char* options[] = {semantics_option.c_str(), db.c_str(),  nullptr, catalog.c_str(),
+                                 "batch_workers=1",        npi.c_str(), nullptr, adapter.c_str()};
+        Check(!loader->Load(get_absolute_process_path(), names, options, 8) && !loader->StartAll(), "plugins");
         auto* manager = static_cast<IBlockStreamManager*>(loader->First(IID_BLOCK_STREAM_MANAGER));
         Check(manager, "manager");
         const auto config = std::string("{\"backend\":\"af_packet\",\"interfaces\":[\"") + argv[1] +

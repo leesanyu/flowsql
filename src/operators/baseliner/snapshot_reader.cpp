@@ -21,25 +21,25 @@ std::string Quote(const std::string& name, const std::string& backend) {
     }
     return out + q;
 }
-std::vector<DatabaseParameterV1> Parameters(const std::vector<KeyValue>& values) {
-    std::vector<DatabaseParameterV1> out;
+std::vector<DatabaseParameter> Parameters(const std::vector<KeyValue>& values) {
+    std::vector<DatabaseParameter> out;
     for (const auto& value : values) {
-        DatabaseParameterV1 p;
+        DatabaseParameter p;
         std::visit(
             [&](const auto& v) {
                 using T = std::decay_t<decltype(v)>;
                 if constexpr (std::is_same_v<T, std::string>) {
-                    p.kind = DatabaseParameterKindV1::kString;
+                    p.kind = DatabaseParameterKind::kString;
                     p.data = v.data();
                     p.size = v.size();
                 } else if constexpr (std::is_same_v<T, uint64_t>) {
-                    p.kind = DatabaseParameterKindV1::kUInt64;
+                    p.kind = DatabaseParameterKind::kUInt64;
                     p.uint64_value = v;
                 } else if constexpr (std::is_same_v<T, double>) {
-                    p.kind = DatabaseParameterKindV1::kDouble;
+                    p.kind = DatabaseParameterKind::kDouble;
                     p.double_value = v;
                 } else {
-                    p.kind = DatabaseParameterKindV1::kInt64;
+                    p.kind = DatabaseParameterKind::kInt64;
                     p.int64_value = v;
                 }
             },
@@ -195,7 +195,7 @@ int SnapshotReader::Open(TaskConfig config, std::shared_ptr<IDatabaseChannel> so
         ~Cleanup() { action(); }
     } cleanup{[this] {
         if (!opened_) {
-            std::atomic_store(&session_, std::shared_ptr<IDatabaseSnapshotSessionV1>{});
+            std::atomic_store(&session_, std::shared_ptr<IDatabaseSnapshotSession>{});
             source_.reset();
             plans_.clear();
         }
@@ -203,13 +203,13 @@ int SnapshotReader::Open(TaskConfig config, std::shared_ptr<IDatabaseChannel> so
     config_ = std::move(config);
     config_.state.idle_timeout_ms = 0;
     source_ = std::move(source);
-    auto* capability = dynamic_cast<IDatabaseSnapshotSourceV1*>(source_.get());
+    auto* capability = dynamic_cast<IDatabaseSnapshotSource*>(source_.get());
     if (!capability) {
         error_ = "source lacks snapshot capability";
         return -1;
     }
     const std::string backend = source_->Category();
-    DatabaseSnapshotOptionsV1 options;
+    DatabaseSnapshotOptions options;
     options.operation_timeout_ms = config_.persistence.operation_timeout_ms;
     options.consistent_transaction = backend != "clickhouse";
     if (backend == "clickhouse" && std::any_of(config_.datasets.begin(), config_.datasets.end(), [](const auto& d) {
@@ -218,7 +218,7 @@ int SnapshotReader::Open(TaskConfig config, std::shared_ptr<IDatabaseChannel> so
         error_ = "ClickHouse consistent_snapshot unsupported";
         return -1;
     }
-    std::shared_ptr<IDatabaseSnapshotSessionV1> created;
+    std::shared_ptr<IDatabaseSnapshotSession> created;
     if (capability->CreateSnapshotSession(options, &created) != 0) {
         error_ = source_->GetLastError();
         return -1;

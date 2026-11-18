@@ -31,8 +31,7 @@ enum class FilterPlanError : int32_t {
     kTaskSessionCreationFailed,
 };
 
-constexpr const char kEmptyCanonicalFilterPlanV1[] =
-    "{\"version\":1,\"root\":null}";
+constexpr const char kEmptyCanonicalFilterPlan[] = "{\"version\":1,\"root\":null}";
 
 struct FilterPushdownSplit {
     std::vector<uint32_t> candidate_node_ids;
@@ -42,7 +41,7 @@ struct FilterPushdownSplit {
 };
 
 struct FilterPushdownTarget {
-    FilterPushdownTargetKindV1 kind = FilterPushdownTargetKindV1::kSource;
+    FilterPushdownTargetKind kind = FilterPushdownTargetKind::kSource;
     std::string category;
     std::string name;
     std::shared_ptr<arrow::Schema> output_schema;
@@ -101,13 +100,10 @@ FilterPlanError MaterializeFilterTaskSessionPlan(
     std::string* error);
 
 /** Create one exclusive transform session; the provider must copy all raw-pointer config fields. */
-FilterPlanError CreateBlockTransformTaskSession(
-    IBlockTransformOperatorV1* provider,
-    const std::string& task_id,
-    const std::string& with_params_json,
-    const FilterTaskSessionPlan& filter_plan,
-    IBlockTransformTaskV1** task,
-    std::string* error);
+FilterPlanError CreateBlockTransformTaskSession(IBlockTransformOperator* provider, const std::string& task_id,
+                                                const std::string& with_params_json,
+                                                const FilterTaskSessionPlan& filter_plan, IBlockTransformTask** task,
+                                                std::string* error);
 
 }  // namespace flowsql
 

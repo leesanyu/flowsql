@@ -30,7 +30,7 @@ struct BatchWriteStats {
     int64_t elapsed_ms = 0;
 };
 
-enum class DatabaseParameterKindV1 : uint8_t {
+enum class DatabaseParameterKind : uint8_t {
     kNull = 0,
     kInt64,
     kUInt64,
@@ -40,8 +40,8 @@ enum class DatabaseParameterKindV1 : uint8_t {
 };
 
 /** Borrowed value for one ExecutePrepared call. */
-struct DatabaseParameterV1 {
-    DatabaseParameterKindV1 kind = DatabaseParameterKindV1::kNull;
+struct DatabaseParameter {
+    DatabaseParameterKind kind = DatabaseParameterKind::kNull;
     int64_t int64_value = 0;
     uint64_t uint64_value = 0;
     double double_value = 0.0;
@@ -50,10 +50,10 @@ struct DatabaseParameterV1 {
 };
 
 /** Optional parameterized-command capability; separate from the existing IDatabaseChannel ABI. */
-interface IDatabasePreparedCommandV1 {
-    virtual ~IDatabasePreparedCommandV1() = default;
-    virtual int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) = 0;
-    virtual int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters,
+interface IDatabasePreparedCommand {
+    virtual ~IDatabasePreparedCommand() = default;
+    virtual int ExecutePrepared(const char* sql, const DatabaseParameter* parameters, size_t parameter_count) = 0;
+    virtual int ExecutePreparedBatch(const char* sql, const DatabaseParameter* parameters,
                                      size_t parameters_per_execution, size_t execution_count) = 0;
 };
 

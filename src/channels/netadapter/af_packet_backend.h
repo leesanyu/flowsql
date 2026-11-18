@@ -4,7 +4,7 @@
 #define FLOWSQL_CHANNELS_NETADAPTER_AF_PACKET_BACKEND_H_
 #include <framework/interfaces/icapture_backend.h>
 namespace flowsql::channels::netadapter {
-int OpenAfPacket(const CaptureBackendConfigV1& config, std::shared_ptr<ICaptureBackendSessionV1>* output,
+int OpenAfPacket(const CaptureBackendConfig& config, std::shared_ptr<ICaptureBackendSession>* output,
                  std::string* error);
 }  // namespace flowsql::channels::netadapter
 #endif

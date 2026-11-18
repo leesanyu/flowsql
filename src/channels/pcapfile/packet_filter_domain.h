@@ -51,9 +51,9 @@ bool EvaluatePcapDecodedFilter(const packet::PcapFilterPlan& plan, const packet:
 void CanonicalizePacketFilterRuleKeys(packet::PacketFilterRule* rule);
 
 /** Stateless pcapfile owner for packet-domain filter syntax. */
-class PcapFilterDomainResolver final : public IFilterDomainResolverV1 {
+class PcapFilterDomainResolver final : public IFilterDomainResolver {
  public:
-    int Resolve(const FilterDomainResolveRequestV1& request, FilterDomainResolveResultV1* result) const override;
+    int Resolve(const FilterDomainResolveRequest& request, FilterDomainResolveResult* result) const override;
 };
 
 }  // namespace flowsql::channels::pcapfile

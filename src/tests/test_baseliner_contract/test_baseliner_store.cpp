@@ -30,11 +30,11 @@ constexpr auto relation_json =
 "series_keys":["g"],"deduplicate":{"keys":["g","t"],"on_duplicate":"require_equal"},"bucket":{"column":"t","unit":"bucket_id"},
 "metrics":[{"id":"dist","kind":"relation","feature_type":"relation","profile":"default","group_space":{"id":"groups","version":"v1","column":"g","unknown":"other","other_group_idx":99},
 "metrics":[{"id":"m","column":"x","aggregate":"sum"}],"support_policy":{"k_support":3,"min_hist_share":0.01,"min_active_ratio":0.1},"summary_policy":{"k_head":2,"k_stable":1}}]}]})";
-void MysqlResultIndexes(IDatabaseAtomicSessionV1& session) {
+void MysqlResultIndexes(IDatabaseAtomicSession& session) {
     for (auto kind : {SchemaKind::kResults, SchemaKind::kRelationFusion, SchemaKind::kMaintenance}) {
-        const std::string table = kind == SchemaKind::kResults          ? "baseline_results_v1"
-                                  : kind == SchemaKind::kRelationFusion ? "baseline_relation_fusion_v1"
-                                                                        : "baseline_maintenance_v1";
+        const std::string table = kind == SchemaKind::kResults          ? "baseline_results"
+                                  : kind == SchemaKind::kRelationFusion ? "baseline_relation_fusion"
+                                                                        : "baseline_maintenance";
         const auto index = "baseline_" + std::to_string(static_cast<int>(kind)) + "_task_generation";
         std::shared_ptr<arrow::RecordBatch> rows;
         assert(ReadAtomicBatch(session,
@@ -108,18 +108,17 @@ void ActualModels(IDatabaseChannel* channel) {
             assert(store.Publish(checkpoint, {}, results) == 0);
             StoredGeneration restored;
             assert(store.Load(&restored) == 0 && restored.checkpoint == checkpoint && restored.generation == 1);
-            std::shared_ptr<IDatabaseAtomicSessionV1> observer;
-            assert(dynamic_cast<IDatabaseAtomicTargetV1*>(channel)->AcquireAtomicSession({}, &observer).ok());
+            std::shared_ptr<IDatabaseAtomicSession> observer;
+            assert(dynamic_cast<IDatabaseAtomicTarget*>(channel)->AcquireAtomicSession({}, &observer).ok());
             std::shared_ptr<arrow::RecordBatch> count;
             assert(ReadAtomicBatch(
                        *observer,
-                       "SELECT COUNT(*) AS n FROM baseline_results_v1 WHERE task_key=? AND result_kind='forecast'",
+                       "SELECT COUNT(*) AS n FROM baseline_results WHERE task_key=? AND result_kind='forecast'",
                        {TextParameter(c.config.task_key)}, &count)
                        .ok());
             assert(std::static_pointer_cast<arrow::Int64Array>(count->column(0))->Value(0) > 0);
             if (relation) {
-                assert(ReadAtomicBatch(*observer,
-                                       "SELECT COUNT(*) AS n FROM baseline_relation_fusion_v1 WHERE task_key=?",
+                assert(ReadAtomicBatch(*observer, "SELECT COUNT(*) AS n FROM baseline_relation_fusion WHERE task_key=?",
                                        {TextParameter(c.config.task_key)}, &count)
                            .ok());
                 assert(std::static_pointer_cast<arrow::Int64Array>(count->column(0))->Value(0) == 40);
@@ -165,8 +164,8 @@ void ModelTable(const std::shared_ptr<IDatabaseChannel>& channel, IDatabaseChann
     std::string error;
     assert(EncodeModelParameters(config, rows, 1 << 20, &batch, &error) == 0);
     auto count = [&](const std::string& name) {
-        std::shared_ptr<IDatabaseAtomicSessionV1> session;
-        assert(dynamic_cast<IDatabaseAtomicTargetV1*>(channel.get())->AcquireAtomicSession({}, &session).ok());
+        std::shared_ptr<IDatabaseAtomicSession> session;
+        assert(dynamic_cast<IDatabaseAtomicTarget*>(channel.get())->AcquireAtomicSession({}, &session).ok());
         std::shared_ptr<arrow::RecordBatch> result;
         assert(ReadAtomicBatch(*session, "SELECT COUNT(*) FROM " + name, {}, &result).ok());
         auto n = std::stoll(result->column(0)->GetScalar(0).ValueOrDie()->ToString());
@@ -268,8 +267,8 @@ void ResultTables(const std::shared_ptr<IDatabaseChannel>& channel) {
     }
     assert(EncodeModelParameters(config, model_rows, 1 << 20, &parameters, &error) == 0);
     auto count = [&](const std::string& name) {
-        std::shared_ptr<IDatabaseAtomicSessionV1> session;
-        assert(dynamic_cast<IDatabaseAtomicTargetV1*>(channel.get())->AcquireAtomicSession({}, &session).ok());
+        std::shared_ptr<IDatabaseAtomicSession> session;
+        assert(dynamic_cast<IDatabaseAtomicTarget*>(channel.get())->AcquireAtomicSession({}, &session).ok());
         std::shared_ptr<arrow::RecordBatch> result;
         assert(ReadAtomicBatch(*session, "SELECT COUNT(*) FROM " + name, {}, &result).ok());
         const auto n = std::stoll(result->column(0)->GetScalar(0).ValueOrDie()->ToString());
@@ -311,8 +310,8 @@ void ResultTables(const std::shared_ptr<IDatabaseChannel>& channel) {
     assert(result.State() == "failed" && model.State() == "failed" && result.RowsWritten() == 0 &&
            model.RowsWritten() == 0);
     assert(count(table) == 2 && count(failed_models) == 0);
-    std::shared_ptr<IDatabaseAtomicSessionV1> observer;
-    assert(dynamic_cast<IDatabaseAtomicTargetV1*>(channel.get())->AcquireAtomicSession({}, &observer).ok());
+    std::shared_ptr<IDatabaseAtomicSession> observer;
+    assert(dynamic_cast<IDatabaseAtomicTarget*>(channel.get())->AcquireAtomicSession({}, &observer).ok());
     std::shared_ptr<arrow::RecordBatch> preserved;
     assert(
         ReadAtomicBatch(*observer, "SELECT observed FROM " + table + " WHERE metric_id='other'", {}, &preserved).ok());
@@ -355,9 +354,9 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, IDatabaseChannel* cross_sch
     }
     StoredGeneration restored;
     assert(store.Load(&restored) == 0 && restored.generation == 0);
-    auto* target = dynamic_cast<IDatabaseAtomicTargetV1*>(channel.get());
+    auto* target = dynamic_cast<IDatabaseAtomicTarget*>(channel.get());
     assert(target);
-    std::shared_ptr<IDatabaseAtomicSessionV1> observer;
+    std::shared_ptr<IDatabaseAtomicSession> observer;
     assert(target->AcquireAtomicSession({}, &observer).ok());
     if (backend == "mysql") MysqlResultIndexes(*observer);
     assert(channel->ExecuteSql("CREATE TABLE IF NOT EXISTS source_facts(id BIGINT PRIMARY KEY,v TEXT)") >= 0);
@@ -381,7 +380,7 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, IDatabaseChannel* cross_sch
         std::shared_ptr<arrow::RecordBatch> batch;
         std::string error;
         assert(EncodeResults(c, {row, forecast}, 1 << 20, &batch, &error) == 0);
-        BlockInputProgressV1 p;
+        BlockInputProgress p;
         p.datasets = {{"d", "source-1", std::to_string(generation), generation + 1}};
         assert(store.Publish("checkpoint-" + std::to_string(generation), p, {batch}) == 0);
         assert(store.Load(&restored) == 0 && restored.generation == generation &&
@@ -389,7 +388,7 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, IDatabaseChannel* cross_sch
         assert(restored.progress.datasets[0].committed_position == std::to_string(generation));
     }
     std::shared_ptr<arrow::RecordBatch> rows;
-    assert(ReadAtomicBatch(*observer, "SELECT COUNT(*) AS n FROM baseline_results_v1 WHERE task_key=?",
+    assert(ReadAtomicBatch(*observer, "SELECT COUNT(*) AS n FROM baseline_results WHERE task_key=?",
                            {TextParameter(c.config.task_key)}, &rows)
                .ok());
     assert(std::static_pointer_cast<arrow::Int64Array>(rows->column(0))->Value(0) == 8);
@@ -399,12 +398,11 @@ void Test(std::shared_ptr<IDatabaseChannel> channel, IDatabaseChannel* cross_sch
     assert(std::static_pointer_cast<arrow::Int64Array>(rows->column(0))->Value(0) == 2);
     assert(ReadAtomicBatch(*observer, "SELECT v FROM source_facts", {}, &rows).ok());
     assert(std::static_pointer_cast<arrow::StringArray>(rows->column(0))->GetString(0) == "unchanged");
-    assert(
-        ReadAtomicBatch(*observer,
-                        "SELECT issued_after_bucket,observed,model_basis_id,published_generation FROM "
-                        "baseline_results_v1 WHERE task_key=? AND result_kind='forecast' ORDER BY issued_after_bucket",
-                        {TextParameter(c.config.task_key)}, &rows)
-            .ok());
+    assert(ReadAtomicBatch(*observer,
+                           "SELECT issued_after_bucket,observed,model_basis_id,published_generation FROM "
+                           "baseline_results WHERE task_key=? AND result_kind='forecast' ORDER BY issued_after_bucket",
+                           {TextParameter(c.config.task_key)}, &rows)
+               .ok());
     assert(rows->num_rows() == 4);
     for (int64_t i = 0; i < 4; ++i) {
         assert(std::static_pointer_cast<arrow::Int64Array>(rows->column(0))->Value(i) == i + 1);

@@ -1,5 +1,6 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
+#include <channels/config/compiled_semantics_schema.h>
 #include <channels/config/data_semantics_registry.h>
 #include <sqlite3.h>
 #include <unistd.h>
@@ -8,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <thread>
 
 using namespace flowsql;
@@ -18,12 +20,69 @@ std::string ReadFile(const std::string& path) {
     return {std::istreambuf_iterator<char>(stream), {}};
 }
 int main() {
+    {
+        rapidjson::Document document;
+        DataSemanticsError error;
+        assert(ParseSemanticsJson(R"([-9223372036854775808,18446744073709551615,1.25e3])", &document, &error) == 0);
+        assert(document[0].GetInt64() == std::numeric_limits<int64_t>::min());
+        assert(document[1].GetUint64() == std::numeric_limits<uint64_t>::max());
+        assert(document[2].GetDouble() == 1250.0);
+        assert(ParseSemanticsJson(R"({"a":[{"key":1},{"key":2}],"key":3})", &document, &error) == 0);
+        for (const std::string invalid :
+             {R"({"key":1,"key":2})", R"({"key":1,"\u006bey":2})", R"({"a":[{"key":1,"key":2}]})",
+              "18446744073709551616", "-9223372036854775809", "[1,]", "{} trailing", "1e9999"}) {
+            assert(ParseSemanticsJson(invalid, &document, &error) != 0);
+            assert(error.code == "INVALID_DOCUMENT");
+        }
+        const auto invalid_utf8 = std::string("{\"key\":\"") + char(0xc3) + "(\"}";
+        assert(ParseSemanticsJson(invalid_utf8, &document, &error) != 0 && error.code == "INVALID_DOCUMENT");
+        assert(ParseSemanticsJson(std::string(64, '[') + "0" + std::string(64, ']'), &document, &error) == 0);
+        assert(ParseSemanticsJson(std::string(65, '[') + "0" + std::string(65, ']'), &document, &error) != 0);
+        assert(error.code == "INVALID_DOCUMENT");
+    }
+    const auto concurrent_standard = ReadFile(FLOWSQL_SOURCE_ROOT "/examples/semantics/standard.json");
+    std::atomic<unsigned> ready{0};
+    std::atomic<bool> start{false};
+    std::vector<std::thread> validators;
+    for (unsigned i = 0; i < 4; ++i) {
+        validators.emplace_back([&, i] {
+            ++ready;
+            while (!start.load()) std::this_thread::yield();
+            for (unsigned repeat = 0; repeat < 8; ++repeat) {
+                rapidjson::Document document;
+                std::vector<SemanticsReference> references;
+                DataSemanticsError validation_error;
+                assert(NormalizeSemantics("standard", concurrent_standard, &document, &references, &validation_error) ==
+                       0);
+                document["title"].SetInt(42);
+                const auto invalid = SemanticsJson(document);
+                assert(NormalizeSemantics("standard", invalid, &document, &references, &validation_error) != 0);
+                assert(validation_error.code == "INVALID_DOCUMENT");
+                const char* definition = i % 2 ? "saveRequest" : "resolveRequest";
+                const std::string request =
+                    i % 2 ? R"({"kind":"standard","name":"concurrent","expected_current_revision":0,"document":)" +
+                                concurrent_standard + "}"
+                          : R"({"exact_reference":"standard.concurrent@1"})";
+                document.Parse(request.c_str());
+                const auto matches = [&](const rapidjson::Value& value) {
+                    rapidjson::SchemaValidator validator(CompiledSemanticsApiSchema(definition));
+                    return value.Accept(validator);
+                };
+                assert(matches(document));
+                document.RemoveMember(i % 2 ? "document" : "exact_reference");
+                assert(!matches(document));
+            }
+        });
+    }
+    while (ready.load() != validators.size()) std::this_thread::yield();
+    start = true;
+    for (auto& validator : validators) validator.join();
     char file[] = "/tmp/flowsql_semantics_XXXXXX";
     int fd = mkstemp(file);
     assert(fd >= 0);
     close(fd);
     DataSemanticsRegistry registry;
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     assert(registry.Open(file, &error) == 0);
     SemanticsSaveResult out;
     SemanticsSaveRequest standard{"standard", "request.duration",
@@ -48,14 +107,51 @@ int main() {
                                     ReadFile(FLOWSQL_SOURCE_ROOT "/examples/semantics/dictionary.json")};
     save(dictionary);
     assert(out.created_revision);
-    const std::string minimal = R"({"schema_id":"flowsql.data-standard.v1","title":"minimal"})";
+    {
+        rapidjson::Document repeated, preview;
+        repeated.Parse(dictionary.document_json.c_str());
+        auto& allocator = repeated.GetAllocator();
+        for (unsigned index = 0; index < 32; ++index) {
+            rapidjson::Value field(repeated["fields"][1], allocator);
+            const auto name = "elapsed_" + std::to_string(index);
+            field["field_id"].SetString(name.c_str(), allocator);
+            field["name"].SetString(name.c_str(), allocator);
+            repeated["fields"].PushBack(field, allocator);
+        }
+        std::string check;
+        assert(registry.Preview("dictionary", SemanticsJson(repeated), &preview, &check, &error) == 0);
+        repeated["fields"][33]["standard_refs"]["value"][0].SetString("standard.request.duration@99", allocator);
+        assert(registry.Preview("dictionary", SemanticsJson(repeated), &preview, &check, &error) != 0);
+        assert(error.code == "NOT_FOUND" && error.field_path.find("/fields/33/") == 0);
+        repeated["fields"][33]["standard_refs"]["value"][0].SetString("standard.request.duration@1", allocator);
+        sqlite3* storage = nullptr;
+        assert(sqlite3_open(file, &storage) == SQLITE_OK);
+        // A later invocation must re-read and reject corrupted content, not reuse an earlier snapshot.
+        assert(sqlite3_exec(storage,
+                            "BEGIN IMMEDIATE; UPDATE semantics_revision SET document='{}' "
+                            "WHERE kind='standard' AND name='request.duration' AND revision=1; COMMIT;",
+                            nullptr, nullptr, nullptr) == SQLITE_OK);
+        assert(registry.Preview("dictionary", SemanticsJson(repeated), &preview, &check, &error) != 0);
+        assert(error.code == "STORAGE_ERROR");
+        sqlite3_stmt* restore = nullptr;
+        assert(sqlite3_prepare_v2(storage,
+                                  "UPDATE semantics_revision SET document=? WHERE kind='standard' "
+                                  "AND name='request.duration' AND revision=1",
+                                  -1, &restore, nullptr) == SQLITE_OK);
+        assert(sqlite3_bind_text(restore, 1, held.document_json->c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK);
+        assert(sqlite3_step(restore) == SQLITE_DONE);
+        sqlite3_finalize(restore);
+        sqlite3_close(storage);
+        assert(registry.Preview("dictionary", SemanticsJson(repeated), &preview, &check, &error) == 0);
+    }
+    const std::string minimal = R"({"schema_id":"flowsql.data-standard","title":"minimal"})";
     for (const std::string bad :
-         {R"({"schema_id":"flowsql.data-standard.v1"})",
-          R"({"schema_id":"flowsql.data-standard.v1","title":"x","extra":1})",
-          R"({"schema_id":"flowsql.data-standard.v1","title":"x","unit":{"state":"unknown","value":"ms"}})",
-          R"({"schema_id":"flowsql.data-standard.v1","title":"x","unit":{"state":"declared","value":{"code":"ms"}}})",
-          R"({"schema_id":"flowsql.data-standard.v1","title":"x","title":"y"})",
-          R"({"schema_id":"flowsql.data-standard.v1","title":"x","definition":{"state":"declared","value":""}})"}) {
+         {R"({"schema_id":"flowsql.data-standard.v1","title":"old format"})",
+          R"({"schema_id":"flowsql.data-standard"})", R"({"schema_id":"flowsql.data-standard","title":"x","extra":1})",
+          R"({"schema_id":"flowsql.data-standard","title":"x","unit":{"state":"unknown","value":"ms"}})",
+          R"({"schema_id":"flowsql.data-standard","title":"x","unit":{"state":"declared","value":{"code":"ms"}}})",
+          R"({"schema_id":"flowsql.data-standard","title":"x","title":"y"})",
+          R"({"schema_id":"flowsql.data-standard","title":"x","definition":{"state":"declared","value":""}})"}) {
         auto r = standard;
         r.name = "negative";
         r.document_json = bad;
@@ -78,7 +174,7 @@ int main() {
     d["fields"][1]["standard_refs"]["value"][0].SetString("dictionary.app.requests@1", d.GetAllocator());
     invalid_dict.document_json = SemanticsJson(d);
     assert(registry.Save(invalid_dict, &out, &error) != 0 && error.code == "INVALID_REFERENCE");
-    DataSemanticsSnapshotV1 snapshot = held;
+    DataSemanticsSnapshot snapshot = held;
     assert(registry.Resolve("standard.request.duration@latest", &snapshot, &error) != 0 && !snapshot.document_json);
     assert(registry.Resolve("standard.request.duration@9007199254740992", &snapshot, &error) != 0);
     auto next = standard;
@@ -99,10 +195,10 @@ int main() {
     std::atomic<int> passed{0}, conflicts{0};
     auto write = [&](DataSemanticsRegistry& provider, const char* title) {
         SemanticsSaveRequest r{"standard", "request.duration",
-                               std::string("{\"schema_id\":\"flowsql.data-standard.v1\",\"title\":\"") + title + "\"}"};
+                               std::string("{\"schema_id\":\"flowsql.data-standard\",\"title\":\"") + title + "\"}"};
         r.expected_current_revision = 3;
         SemanticsSaveResult result;
-        DataSemanticsErrorV1 e;
+        DataSemanticsError e;
         if (provider.Save(r, &result, &e) == 0)
             ++passed;
         else {
@@ -136,7 +232,7 @@ int main() {
                                  ReadFile(FLOWSQL_SOURCE_ROOT "/examples/semantics/binding.json")};
     save(binding);
     assert(out.structure_check == "matched" && out.data_validation == "not_run");
-    DataSemanticsSnapshotV1 old_binding = out.snapshot;
+    DataSemanticsSnapshot old_binding = out.snapshot;
     assert(registry.BindingLookup("manual", "app.requests", &snapshot, &error) == 0 &&
            snapshot.exact_reference == "binding.app.requests@1");
     auto duplicate_binding = binding;

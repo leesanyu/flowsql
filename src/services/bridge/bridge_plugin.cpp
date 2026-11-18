@@ -127,7 +127,7 @@ int BridgePlugin::Stop() {
 }
 
 int BridgePlugin::WorkerControl(const std::string& operation, const rapidjson::Value& request,
-                                rapidjson::Document* response, DataSemanticsErrorV1* e) {
+                                rapidjson::Document* response, DataSemanticsError* e) {
     httplib::Client client(host_, port_);
     client.set_connection_timeout(2);
     client.set_read_timeout(10);
@@ -159,19 +159,18 @@ int BridgePlugin::DiscoverOperators() {
     rapidjson::Document doc;
     doc.Parse(response->body.c_str());
     if (doc.HasParseError() || !doc.IsArray()) return -1;
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     const int rc = ApplyOperators(doc, "", &error);
     if (rc) LOG_ERROR("BridgePlugin: registration failed: %s %s", error.code.c_str(), error.message.c_str());
     return rc;
 }
 
-int BridgePlugin::ApplyOperators(const rapidjson::Value& items, const std::string& token, DataSemanticsErrorV1* e) {
+int BridgePlugin::ApplyOperators(const rapidjson::Value& items, const std::string& token, DataSemanticsError* e) {
     if (!items.IsArray() || items.Size() > 256)
         return dataset::Fail(e, "CONTRACT_INVALID", "Worker list must contain at most 256 operators");
-    auto* catalog = querier_
-                        ? static_cast<IOperatorContractCatalogV1*>(querier_->First(IID_OPERATOR_CONTRACT_CATALOG_V1))
-                        : nullptr;
-    std::vector<OperatorContractDeclarationV1> declarations;
+    auto* catalog =
+        querier_ ? static_cast<IOperatorContractCatalog*>(querier_->First(IID_OPERATOR_CONTRACT_CATALOG)) : nullptr;
+    std::vector<OperatorContractDeclaration> declarations;
     std::vector<OperatorMeta> metadata;
     std::vector<flowsql::OperatorMeta> rows;
     std::set<std::string> keys;
@@ -193,7 +192,7 @@ int BridgePlugin::ApplyOperators(const rapidjson::Value& items, const std::strin
         if (!declaration.empty() && !catalog)
             return dataset::Fail(e, "UNAVAILABLE", "declared contract catalog unavailable");
         if (catalog && !digest.empty()) {
-            OperatorComponentContractV1 previous;
+            OperatorComponentContract previous;
             if (catalog->Lookup(meta.category.c_str(), meta.name.c_str(), &previous, e)) return -1;
             declarations.push_back({meta.category, meta.name, digest, declaration, previous.component_revision});
         } else if (!declaration.empty())
@@ -202,7 +201,7 @@ int BridgePlugin::ApplyOperators(const rapidjson::Value& items, const std::strin
                         meta.position == OperatorPosition::STORAGE ? "storage" : "data"});
         metadata.push_back(std::move(meta));
     }
-    std::vector<PreparedOperatorContractV1> prepared;
+    std::vector<PreparedOperatorContract> prepared;
     if (!declarations.empty() && catalog->Prepare(declarations, &prepared, e)) return -1;
     for (auto& meta : metadata)
         for (const auto& p : prepared)
@@ -218,7 +217,7 @@ int BridgePlugin::ApplyOperators(const rapidjson::Value& items, const std::strin
     if (!token.empty() && WorkerControl("activate", request, &response, e)) return -1;
     if (!prepared.empty() && catalog->Commit(prepared, e)) {
         if (!token.empty()) {
-            DataSemanticsErrorV1 rollback;
+            DataSemanticsError rollback;
             if (WorkerControl("rollback", request, &response, &rollback))
                 return dataset::Fail(e, "UNAVAILABLE",
                                      "association failed and Worker rollback failed; refresh required");
@@ -230,14 +229,13 @@ int BridgePlugin::ApplyOperators(const rapidjson::Value& items, const std::strin
         registered_operators_.swap(discovered);
     }
     if (!token.empty()) {
-        DataSemanticsErrorV1 finalize;
+        DataSemanticsError finalize;
         (void)WorkerControl("finalize", request, &response, &finalize);
     }
     return 0;
 }
 
-int BridgePlugin::ReadPythonSource(const char* category, const char* name, std::string* output,
-                                   DataSemanticsErrorV1* e) {
+int BridgePlugin::ReadPythonSource(const char* category, const char* name, std::string* output, DataSemanticsError* e) {
     if (output) output->clear();
     if (e) *e = {};
     if (!category || !name || !output) return dataset::Fail(e, "INVALID_REQUEST", "identity and output required");
@@ -250,7 +248,7 @@ int BridgePlugin::ReadPythonSource(const char* category, const char* name, std::
 }
 
 int BridgePlugin::PublishPythonSource(const char* filename, const char* source, const char* expected,
-                                      std::string* response_json, DataSemanticsErrorV1* e) {
+                                      std::string* response_json, DataSemanticsError* e) {
     if (response_json) response_json->clear();
     if (e) *e = {};
     if (!filename || !source || !response_json)
@@ -268,7 +266,7 @@ int BridgePlugin::PublishPythonSource(const char* filename, const char* source, 
     if (ApplyOperators(response["operators"], token, e)) {
         dataset::Json rollback(rapidjson::kObjectType), ignored;
         dataset::Set(rollback, "token", token, rollback.GetAllocator());
-        DataSemanticsErrorV1 rollback_error;
+        DataSemanticsError rollback_error;
         (void)WorkerControl("rollback", rollback, &ignored, &rollback_error);
         return -1;
     }

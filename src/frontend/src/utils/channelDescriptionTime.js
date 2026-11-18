@@ -1,7 +1,6 @@
 const declared = semantic => semantic?.state === 'declared' ? semantic.value : undefined
 const units = ['s', 'ms', 'us', 'ns']
 // Recognize only the two explicit Unix baselines already used by our contracts.
-const unixEpoch = value => ['1970-01-01T00:00:00Z', 'Unix epoch'].includes(value)
 
 export function timeEditorConfig(value, modes = []) {
   if (!value) return {}
@@ -9,7 +8,7 @@ export function timeEditorConfig(value, modes = []) {
   if (value.kind === 'duration' && units.includes(unit)) return { mode: 'duration', unit }
   const instant = { ...(unit ? { unit } : {}), ...(timezone ? { timezone } : {}) }
   if (value.kind === 'instant' && modes.includes('datetime')) return { mode: 'datetime', ...instant }
-  if (value.kind === 'instant' && unixEpoch(declared(value.epoch)) && units.includes(unit)) return { mode: 'unix_timestamp', ...instant }
+  if (value.kind === 'instant' && declared(value.epoch) === '1970-01-01T00:00:00Z' && units.includes(unit)) return { mode: 'unix_timestamp', ...instant }
   return { unsupported: true }
 }
 

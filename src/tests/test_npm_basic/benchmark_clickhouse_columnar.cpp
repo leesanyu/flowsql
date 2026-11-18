@@ -82,26 +82,26 @@ int main(int argc, char** argv) {
                            arrow::field("nullable", arrow::int64(), true),
                            arrow::field("ip", arrow::fixed_size_binary(16), false)}),
             rows, std::move(columns));
-        auto* prepared = dynamic_cast<flowsql::IDatabasePreparedCommandV1*>(channel.get());
-        auto* columnar = dynamic_cast<flowsql::IDatabaseArrowWriteV1*>(channel.get());
+        auto* prepared = dynamic_cast<flowsql::IDatabasePreparedCommand*>(channel.get());
+        auto* columnar = dynamic_cast<flowsql::IDatabaseArrowWrite*>(channel.get());
         Check(prepared && columnar, "write capabilities unavailable");
         arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
         const auto invoke = [&] {
             if (mode == "arrow") return columnar->WriteArrowBatchesWithPool(table.c_str(), {batch}, &pool);
-            std::vector<flowsql::DatabaseParameterV1> parameters;
+            std::vector<flowsql::DatabaseParameter> parameters;
             parameters.reserve(static_cast<size_t>(rows) * 4);
             for (int row = 0; row < rows; ++row) {
-                flowsql::DatabaseParameterV1 id, text, nullable, ip;
-                id.kind = flowsql::DatabaseParameterKindV1::kUInt64;
+                flowsql::DatabaseParameter id, text, nullable, ip;
+                id.kind = flowsql::DatabaseParameterKind::kUInt64;
                 id.uint64_value = std::numeric_limits<uint64_t>::max() - row;
-                text.kind = flowsql::DatabaseParameterKindV1::kString;
+                text.kind = flowsql::DatabaseParameterKind::kString;
                 text.data = special.data();
                 text.size = special.size();
                 if (row % 2) {
-                    nullable.kind = flowsql::DatabaseParameterKindV1::kInt64;
+                    nullable.kind = flowsql::DatabaseParameterKind::kInt64;
                     nullable.int64_value = -row;
                 }
-                ip.kind = flowsql::DatabaseParameterKindV1::kBlob;
+                ip.kind = flowsql::DatabaseParameterKind::kBlob;
                 const auto address =
                     std::static_pointer_cast<arrow::FixedSizeBinaryArray>(batch->column(3))->GetView(row);
                 ip.data = address.data();

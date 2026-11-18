@@ -30,10 +30,10 @@ struct ClassicRing {
         if (ring) pfring_close(ring);
     }
 };
-class ClassicSession final : public ICaptureBackendSessionV1 {
+class ClassicSession final : public ICaptureBackendSession {
  public:
-    const std::vector<CaptureBackendInputV1>& Inputs() const override { return inputs; }
-    int TryRead(uint32_t i, CapturePacketViewV1* out) override {
+    const std::vector<CaptureBackendInput>& Inputs() const override { return inputs; }
+    int TryRead(uint32_t i, CapturePacketView* out) override {
         if (cancelled) return ECANCELED;
         if (!out || i >= rings.size()) return EINVAL;
         auto& input = *rings[i];
@@ -57,12 +57,12 @@ class ClassicSession final : public ICaptureBackendSessionV1 {
         return 0;
     }
     void ReleasePacket(uint32_t i) override { rings[i]->borrowed = false; }
-    CaptureBacklogV1 Backlog(uint32_t i) const override {
-        return rings[i]->borrowed || pfring_get_num_queued_pkts(rings[i]->ring) > 0 ? CaptureBacklogV1::kPresent
-                                                                                    : CaptureBacklogV1::kEmpty;
+    CaptureBacklog Backlog(uint32_t i) const override {
+        return rings[i]->borrowed || pfring_get_num_queued_pkts(rings[i]->ring) > 0 ? CaptureBacklog::kPresent
+                                                                                    : CaptureBacklog::kEmpty;
     }
     int64_t IdleTimeNs(uint32_t i) const override { return rings[i]->idle_time; }
-    int ReadCounters(uint32_t i, CaptureCountersV1* out) override {
+    int ReadCounters(uint32_t i, CaptureCounters* out) override {
         if (!out || i >= rings.size()) return EINVAL;
         pfring_stat counters{};
         if (pfring_stats(rings[i]->ring, &counters) != 0) return ENOTSUP;
@@ -73,14 +73,14 @@ class ClassicSession final : public ICaptureBackendSessionV1 {
         return 0;
     }
     void Cancel() override { cancelled = true; }
-    std::vector<CaptureBackendInputV1> inputs;
+    std::vector<CaptureBackendInput> inputs;
     std::vector<std::unique_ptr<ClassicRing>> rings;
 
  private:
     std::atomic<bool> cancelled{false};
 };
 }  // namespace
-int OpenPfringClassic(const CaptureBackendConfigV1& config, std::shared_ptr<ICaptureBackendSessionV1>* out,
+int OpenPfringClassic(const CaptureBackendConfig& config, std::shared_ptr<ICaptureBackendSession>* out,
                       std::string* error) {
     if (!out) return EINVAL;
     out->reset();
@@ -138,7 +138,7 @@ int OpenPfringClassic(const CaptureBackendConfigV1& config, std::shared_ptr<ICap
             pfring_set_direction(input->ring, rx_and_tx_direction) != 0 ||
             pfring_set_socket_mode(input->ring, recv_only_mode) != 0)
             return fail(EIO, "PF_RING Classic receive scope/setup failed: " + name);
-        CaptureBackendInputV1 description;
+        CaptureBackendInput description;
         description.interface_name = name;
         description.ifindex = if_nametoindex(name.c_str());
         description.buffer_bytes = actual;
@@ -156,8 +156,7 @@ int OpenPfringClassic(const CaptureBackendConfigV1& config, std::shared_ptr<ICap
 }  // namespace flowsql::channels::netadapter
 #else
 namespace flowsql::channels::netadapter {
-int OpenPfringClassic(const CaptureBackendConfigV1&, std::shared_ptr<ICaptureBackendSessionV1>* out,
-                      std::string* error) {
+int OpenPfringClassic(const CaptureBackendConfig&, std::shared_ptr<ICaptureBackendSession>* out, std::string* error) {
     if (!out) return EINVAL;
     out->reset();
     if (error) *error = "PF_RING Classic unavailable: build with PF_RING headers/library (FLOWSQL_PFRING_ROOT)";

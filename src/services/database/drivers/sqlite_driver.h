@@ -97,21 +97,21 @@ class SqliteResultSet : public IResultSet {
 // SQLite Session 实现
 class SqliteSession : public RelationDbSessionBase<SqliteTraits>,
                       public IDbSnapshotSession,
-                      public IDatabaseExplorationSessionV1 {
+                      public IDatabaseExplorationSession {
  public:
     SqliteSession(SqliteDriver* driver, sqlite3* db);
     ~SqliteSession() override;
-    int BeginSnapshot(const DatabaseSnapshotOptionsV1& options) override;
-    int SnapshotPage(const char* sql, const DatabaseParameterV1* parameters, size_t count,
+    int BeginSnapshot(const DatabaseSnapshotOptions& options) override;
+    int SnapshotPage(const char* sql, const DatabaseParameter* parameters, size_t count,
                      std::shared_ptr<arrow::Schema> expected, uint32_t rows, uint64_t bytes,
                      std::shared_ptr<arrow::RecordBatch>* output) override;
     void CancelSnapshot() override;
-    int Query(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count, uint32_t max_rows,
-              uint64_t max_bytes, ExplorationResultV1* output) override;
+    int Query(const char* sql, const DatabaseParameter* parameters, size_t parameter_count, uint32_t max_rows,
+              uint64_t max_bytes, ExplorationResult* output) override;
     void Cancel() override { CancelSnapshot(); }
     std::string QueryError() const override { return last_error_; }
-    int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) override;
-    int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t parameters_per_execution,
+    int ExecutePrepared(const char* sql, const DatabaseParameter* parameters, size_t parameter_count) override;
+    int ExecutePreparedBatch(const char* sql, const DatabaseParameter* parameters, size_t parameters_per_execution,
                              size_t execution_count) override;
 
  protected:

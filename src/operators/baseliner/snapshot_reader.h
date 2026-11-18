@@ -42,7 +42,7 @@ class SnapshotReader {
     int ReadNext(Plan& plan, std::shared_ptr<arrow::RecordBatch>* batch);
     TaskConfig config_;
     std::shared_ptr<IDatabaseChannel> source_;
-    std::shared_ptr<IDatabaseSnapshotSessionV1> session_;
+    std::shared_ptr<IDatabaseSnapshotSession> session_;
     std::vector<Plan> plans_;
     size_t dataset_ = 0;
     bool opened_ = false;

@@ -23,7 +23,7 @@ class Engine;
 class Config;
 }  // namespace protocol
 
-class NetworkProtocolIdentify : public IPlugin, public IProtocol, public IProtocolPipelinePoolV1 {
+class NetworkProtocolIdentify : public IPlugin, public IProtocol, public IProtocolPipelinePool {
  public:
     NetworkProtocolIdentify();
     ~NetworkProtocolIdentify();
@@ -47,7 +47,7 @@ class NetworkProtocolIdentify : public IPlugin, public IProtocol, public IProtoc
 
     virtual protocol::IDictionary* Dictionary();
 
-    // IProtocolPipelinePoolV1
+    // IProtocolPipelinePool
     ProtocolPipelinePoolError Acquire(int32_t* pipeno) override;
     ProtocolPipelinePoolError Release(int32_t pipeno) override;
     int32_t Capacity() const override;

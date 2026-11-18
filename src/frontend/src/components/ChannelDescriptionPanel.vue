@@ -1,19 +1,14 @@
 <template>
   <section class="channel-description" data-testid="channel-description">
-    <div class="heading"><h3>数据说明</h3><div class="heading-actions"><button :disabled="busy || !!legacy || observation?.structure.state !== 'known'" @click="save">保存</button><button :disabled="busy" @click="refresh">刷新</button></div></div>
+    <div class="heading"><h3>数据说明</h3><div class="heading-actions"><button :disabled="busy || observation?.structure.state !== 'known'" @click="save">保存</button><button :disabled="busy" @click="refresh">刷新</button></div></div>
     <p class="subject">{{ locator.name }}<template v-if="locator.table"> / {{ locator.schema ? locator.schema + '.' : '' }}{{ locator.table }}</template></p>
     <p v-if="error" role="alert">{{ error }}</p><p v-if="notice" role="status">{{ notice }}</p>
     <p v-if="busy && !observation" role="status">正在读取当前结构与说明…</p>
     <p v-if="busy && observation?.structure.state === 'pending' && locator.kind === 'dataframe'" role="status">正在加载 DataFrame…</p>
     <p v-if="observation?.structure.state === 'unsupported'">{{ observation.structure.reason }}</p>
     <p v-if="observation?.description.state === 'needs_review'" role="status">来源或绑定需要核对；已有说明与草稿已保留。</p>
-    <div v-if="legacy && observation?.structure.state === 'known'" role="status">
-      <p>检测到旧版草稿，已完整保留。请先保存旧版草稿，再填写新的说明。</p>
-      <details><summary>查看旧版草稿</summary><pre>{{ json(legacy) }}</pre></details>
-      <button :disabled="busy" @click="save">保存旧版草稿</button>
-    </div>
     <template v-if="observation?.structure.state === 'known'">
-      <fieldset :disabled="busy || !!legacy || observation.structure.state !== 'known'">
+      <fieldset :disabled="busy || observation.structure.state !== 'known'">
         <div class="object-notes">
           <div><label for="object-description">对象说明</label><div class="description-editor"><textarea id="object-description" aria-label="对象说明" :value="value('description')" @input="edit('description', $event.target.value)" /><p v-for="note in entityNotes('limitations')" :key="note" class="supplement">{{ note }}</p></div></div>
           <div><label for="row-meaning">一行表示什么（可选）</label><div class="description-editor"><textarea id="row-meaning" aria-label="一行表示什么" :value="value('row_meaning')" @input="edit('row_meaning', $event.target.value)" /><p v-for="note in entityNotes('row_semantics')" :key="note" class="supplement">{{ note }}</p></div></div>
@@ -72,7 +67,7 @@ import ChannelRelationEditor from './ChannelRelationEditor.vue'
 import { semanticsCall as call, clone, json, parseJson, labels } from '../utils/dataSemantics.js'
 import { timeEditorConfig, timeDescription, timeSummary } from '../utils/channelDescriptionTime.js'
 const props = defineProps({ locator: { type: Object, required: true } })
-const observation = ref(null), basis = ref(null), changes = ref({}), legacy = ref(null), busy = ref(false), error = ref(''), notice = ref(''), filter = ref(''), confirmations = ref([]), relationField = ref(''), relationTargets = ref({})
+const observation = ref(null), basis = ref(null), changes = ref({}), busy = ref(false), error = ref(''), notice = ref(''), filter = ref(''), confirmations = ref([]), relationField = ref(''), relationTargets = ref({})
 const fieldsCollapsed = ref(false)
 const key = () => 'flowsql.channel-description.' + json(props.locator)
 const changedBasis = computed(() => !!basis.value && !!observation.value && json(basis.value) !== json(observation.value.basis))
@@ -146,7 +141,7 @@ function editTime(name, key, v) {
 }
 function edit(k, v) { changes.value[k] = v }
 function editField(name, k, v) { changes.value.fields ||= {}; changes.value.fields[name] ||= {}; changes.value.fields[name][k] = v }
-function persist() { if (basis.value) sessionStorage.setItem(key(), json({ basis: basis.value, editor_changes: changes.value, ...(legacy.value ? { changes: legacy.value } : {}) })) }
+function persist() { if (basis.value) sessionStorage.setItem(key(), json({ basis: basis.value, editor_changes: changes.value })) }
 watch(changes, persist, { deep: true })
 function differenceText(difference) {
   const name = difference.source_name || '来源'
@@ -194,7 +189,7 @@ async function refresh() {
       await load()
       observation.value = await call('describe', { target: { kind: 'channel', locator: props.locator } })
     }
-    if (!basis.value || (!Object.keys(changes.value).length && !legacy.value)) basis.value = clone(observation.value.basis)
+    if (!basis.value || !Object.keys(changes.value).length) basis.value = clone(observation.value.basis)
     if (changedBasis.value) notice.value = '当前来源或说明版本已变化；原稿保留，请核对差异后继续。'
     await readRelationTargets()
     await inspectSource()
@@ -211,9 +206,9 @@ function rebase() {
 async function save() {
   busy.value = true; error.value = ''; notice.value = ''
   try {
-    const r = await call('channels/save-description', { locator: props.locator, basis: basis.value, ...(legacy.value ? { changes: legacy.value } : { editor_changes: changes.value }), confirmations: confirmations.value })
+    const r = await call('channels/save-description', { locator: props.locator, basis: basis.value, editor_changes: changes.value, confirmations: confirmations.value })
     if (r.status !== 'applied') { notice.value = `定义已保存：${r.dictionary_ref}；尚未应用：${r.error?.code} ${r.error?.message}。原稿已保留，可重试。`; persist(); return }
-    notice.value = '说明已保存'; changes.value = {}; legacy.value = null; basis.value = r.basis; sessionStorage.removeItem(key())
+    notice.value = '说明已保存'; changes.value = {}; basis.value = r.basis; sessionStorage.removeItem(key())
     await refresh()
   } catch (e) {
     persist()
@@ -222,7 +217,19 @@ async function save() {
   } finally { busy.value = false }
 }
 async function copy() { try { await navigator.clipboard.writeText(json(observation.value)); notice.value = 'JSON 已复制' } catch { notice.value = '可在技术详情中选择并复制 JSON' } }
-onMounted(() => { try { const d = parseJson(sessionStorage.getItem(key()) || 'null'); if (d) { basis.value = d.basis; changes.value = d.editor_changes || {}; legacy.value = d.changes && Object.keys(d.changes).length ? d.changes : null } } catch {} refresh() })
+onMounted(async () => {
+  let draftError = ''
+  try {
+    const draft = parseJson(sessionStorage.getItem(key()) || 'null')
+    if (draft) {
+      const object = value => value && typeof value === 'object' && !Array.isArray(value)
+      if (!object(draft.basis) || !object(draft.editor_changes) || Object.keys(draft).some(k => !['basis', 'editor_changes'].includes(k))) throw Error('invalid draft')
+      basis.value = draft.basis; changes.value = draft.editor_changes
+    }
+  } catch { draftError = '本地草稿无法读取，请先备份后重新编辑。' }
+  await refresh()
+  if (draftError) error.value = draftError
+})
 </script>
 <style scoped>
 .channel-description { color: var(--text-primary); min-width: 0; max-width: 100%; }

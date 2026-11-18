@@ -38,10 +38,10 @@ NpmBasicResultCollector::NpmBasicResultCollector(NpmBasicFeatureConfig features,
         if (router_->Budget() != budget) throw std::invalid_argument("NPM collector/router budget mismatch");
         return;
     }
-    std::vector<NpmEntityDescriptorV1> entities;
+    std::vector<NpmEntityDescriptor> entities;
     for (auto family : {packet::AddressFamily::kIPv4, packet::AddressFamily::kIPv6}) {
-        if (features_.basic_enabled) entities.push_back(NpmBasicEntityDescriptorV1(family));
-        if (features_.session_enabled) entities.push_back(NpmSessionEntityDescriptorV1(family));
+        if (features_.basic_enabled) entities.push_back(NpmBasicEntityDescriptor(family));
+        if (features_.session_enabled) entities.push_back(NpmSessionEntityDescriptor(family));
     }
     router_ = std::make_shared<NpmResultRouter>(std::move(entities), features_.observing_entity,
                                                 MakeNpmResultContext("collector"), std::move(budget), nullptr,

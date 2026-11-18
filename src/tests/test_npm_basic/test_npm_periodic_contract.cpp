@@ -23,11 +23,11 @@ int main() {
         }
     }
     const auto schema = NpmBasicResultSchema(flowsql::packet::AddressFamily::kIPv4);
-    assert(schema->Equals(*NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema, true));
+    assert(schema->Equals(*NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv4).schema, true));
     assert(schema->num_fields() == 31);
     assert(schema->GetFieldByName("primary_label_id")->nullable());
     assert(schema->metadata()->Get("flowsql.schema_version").ValueOrDie() == "1");
-    assert(NpmBasicEntityDescriptorV1(flowsql::packet::AddressFamily::kIPv4).schema_version == 1);
+    assert(NpmBasicEntityDescriptor(flowsql::packet::AddressFamily::kIPv4).schema_version == 1);
     NpmBasicResult4 row;
     row.session_id = 1;
     row.revision = 1;

@@ -51,9 +51,7 @@ constexpr uint32_t kLabelingMaxCompiledRules = 100'000;
 
 std::string BuildConfigError(const NpmBasicTaskConfigStatus& status) {
     std::string error(kConfigError);
-    if (status.error == NpmBasicTaskConfigError::kParameterSourceConflict) {
-        error += ": configuration source conflict";
-    } else if (status.error == NpmBasicTaskConfigError::kInvalidParameters) {
+    if (status.error == NpmBasicTaskConfigError::kInvalidParameters) {
         error += ": invalid parameters";
     } else {
         error += ": invalid configuration";
@@ -72,11 +70,11 @@ std::string BuildConfigError(const NpmBasicTaskConfigStatus& status) {
 std::string BuildRuntimeOpenError(const NpmBasicTaskRuntimeStatus& status) {
     if (!status.consumer_error.empty()) return status.consumer_error;
     std::string error(kRuntimeOpenError);
-    if (status.module_status.error == NpmProtocolContractErrorV1::kNone) return error;
+    if (status.module_status.error == NpmProtocolContractError::kNone) return error;
 
-    if (status.module_status.error == NpmProtocolContractErrorV1::kUnavailableCapability) {
+    if (status.module_status.error == NpmProtocolContractError::kUnavailableCapability) {
         error += ": required module capability is unavailable";
-    } else if (status.module_status.error == NpmProtocolContractErrorV1::kInvalidLabelSelection) {
+    } else if (status.module_status.error == NpmProtocolContractError::kInvalidLabelSelection) {
         error += ": invalid primary label selection";
     } else if (status.error == NpmBasicTaskRuntimeError::kModuleCreateError) {
         error += ": module initialization failed";
@@ -90,7 +88,7 @@ std::string BuildRuntimeOpenError(const NpmBasicTaskRuntimeStatus& status) {
     return error;
 }
 
-std::string BuildLabelingProviderError(const FlowLabelingDiagnosticV1& diagnostic) {
+std::string BuildLabelingProviderError(const FlowLabelingDiagnostic& diagnostic) {
     std::string error(kLabelingProviderError);
     if (diagnostic.path != nullptr && diagnostic.path[0] != '\0') {
         error += " at ";
@@ -133,14 +131,12 @@ bool MaxPacketTimestampNs(const std::shared_ptr<arrow::RecordBatch>& input, int6
 
 }  // namespace
 
-NpmBasicTask::NpmBasicTask(const BlockTransformTaskConfigV1& config, IQuerier* querier, NpmBasicOperator* owner,
-                           bool v2)
+NpmBasicTask::NpmBasicTask(const BlockTransformTaskConfig& config, IQuerier* querier, NpmBasicOperator* owner)
     : task_id_(config.task_id),
       with_params_json_(config.with_params_json),
       pushed_filter_plan_json_(config.pushed_filter_plan_json),
       querier_(querier),
-      owner_(owner),
-      v2_(v2) {}
+      owner_(owner) {}
 
 NpmBasicTask::~NpmBasicTask() = default;
 
@@ -155,10 +151,9 @@ int NpmBasicTask::BindInputSource(const char* source) {
     }
 }
 
-int NpmBasicTask::BindCaptureSources(const CaptureSourceSetV2& sources) {
-    if (!v2_) return ENOTSUP;
+int NpmBasicTask::BindCaptureSources(const CaptureSourceSet& sources) {
     if (state_.load(std::memory_order_acquire) != State::kCreated || capture_bound_) return EALREADY;
-    if (ValidateCaptureSourceSetV2(sources) != CaptureDescriptionErrorV1::kNone) return EINVAL;
+    if (ValidateCaptureSourceSet(sources) != CaptureDescriptionError::kNone) return EINVAL;
     try {
         auto next = sources;
         std::vector<std::string> names;
@@ -168,7 +163,7 @@ int NpmBasicTask::BindCaptureSources(const CaptureSourceSetV2& sources) {
         capture_source_names_ = std::move(names);
         for (size_t i = 0; i < capture_sources_.inputs.size(); ++i)
             capture_sources_.inputs[i].source_name = capture_source_names_[i].c_str();
-        capture_tracker_ = std::make_unique<CaptureProgressTrackerV2>(capture_sources_);
+        capture_tracker_ = std::make_unique<MultiInputCaptureProgressTracker>(capture_sources_);
         capture_bound_ = true;
         return 0;
     } catch (const std::bad_alloc&) {
@@ -176,17 +171,17 @@ int NpmBasicTask::BindCaptureSources(const CaptureSourceSetV2& sources) {
     }
 }
 
-int NpmBasicTask::AcceptCaptureFacts(const std::vector<CaptureProgressV1>& facts) {
-    if (state_.load(std::memory_order_acquire) != State::kOpened || !v2_ || !capture_bound_) return EPIPE;
+int NpmBasicTask::AcceptCaptureFacts(const std::vector<CaptureProgress>& facts) {
+    if (state_.load(std::memory_order_acquire) != State::kOpened || !capture_bound_) return EPIPE;
     if (facts.empty()) return 0;
     try {
         auto next = *capture_tracker_;
-        if (next.Observe(facts) != CaptureProgressErrorV1::kNone) return EINVAL;
-        CaptureProgressV1 common;
+        if (next.Observe(facts) != CaptureProgressError::kNone) return EINVAL;
+        CaptureProgress common;
         const auto candidate = next.CommonCandidateNs();
         common.capture_time_ns = candidate.value_or(0);
         common.source_idle_confirmed = candidate.has_value();
-        common.backlog = candidate ? CaptureBacklogV1::kEmpty : CaptureBacklogV1::kUnknown;
+        common.backlog = candidate ? CaptureBacklog::kEmpty : CaptureBacklog::kUnknown;
         pending_capture_facts_.push_back(common);
         *capture_tracker_ = std::move(next);
         return 0;
@@ -195,14 +190,14 @@ int NpmBasicTask::AcceptCaptureFacts(const std::vector<CaptureProgressV1>& facts
     }
 }
 
-int NpmBasicTask::GetTimeDriveState(BlockTransformTimeDriveStateV1* state) {
-    if (!state || state->struct_size < kBlockTransformTimeDriveStateV1Size ||
-        state->contract_version != kBlockTransformTimeDriveVersionV1) {
+int NpmBasicTask::GetTimeDriveState(BlockTransformTimeDriveState* state) {
+    if (!state || state->struct_size < kBlockTransformTimeDriveStateSize ||
+        state->contract_version != kBlockTransformTimeDriveVersion) {
         return EINVAL;
     }
-    *state = BlockTransformTimeDriveStateV1{};
-    state->struct_size = kBlockTransformTimeDriveStateV1Size;
-    state->contract_version = kBlockTransformTimeDriveVersionV1;
+    *state = BlockTransformTimeDriveState{};
+    state->struct_size = kBlockTransformTimeDriveStateSize;
+    state->contract_version = kBlockTransformTimeDriveVersion;
     const auto runtime = Runtime();
     if (state_.load(std::memory_order_acquire) != State::kOpened || !runtime) return EPIPE;
     if (runtime->Config().analysis.run_mode != NpmRunMode::kRealtime) return 0;
@@ -219,9 +214,9 @@ int NpmBasicTask::GetTimeDriveState(BlockTransformTimeDriveStateV1* state) {
     return 0;
 }
 
-int NpmBasicTask::OnTime(const BlockTransformTimeEventV1& event, std::vector<BlockTransformOutputV1>* outputs) {
-    if (!outputs || !outputs->empty() || event.struct_size < kBlockTransformTimeEventV1Size ||
-        event.contract_version != kBlockTransformTimeDriveVersionV1 || event.monotonic_now_ns < 0) {
+int NpmBasicTask::OnTime(const BlockTransformTimeEvent& event, std::vector<BlockTransformOutput>* outputs) {
+    if (!outputs || !outputs->empty() || event.struct_size < kBlockTransformTimeEventSize ||
+        event.contract_version != kBlockTransformTimeDriveVersion || event.monotonic_now_ns < 0) {
         return -EINVAL;
     }
     const auto runtime = Runtime();
@@ -229,8 +224,8 @@ int NpmBasicTask::OnTime(const BlockTransformTimeEventV1& event, std::vector<Blo
         runtime->Config().analysis.run_mode != NpmRunMode::kRealtime) {
         return -EPIPE;
     }
-    std::vector<BlockTransformOutputV1> next_outputs;
-    const auto drive = [&](const CaptureProgressV1* fact) {
+    std::vector<BlockTransformOutput> next_outputs;
+    const auto drive = [&](const CaptureProgress* fact) {
         NpmBasicRealtimeMaintenanceInput input;
         input.monotonic_now_ns = event.monotonic_now_ns;
         input.observed_at_ns = event.wall_now_ns;
@@ -238,8 +233,8 @@ int NpmBasicTask::OnTime(const BlockTransformTimeEventV1& event, std::vector<Blo
             input.capture_progress.capture_time_ns = fact->capture_time_ns;
             input.capture_progress.packet_observed = fact->packet_observed;
             input.capture_progress.source_idle_confirmed = fact->source_idle_confirmed;
-            input.capture_progress.source_backlog_known = fact->backlog != CaptureBacklogV1::kUnknown;
-            input.capture_progress.source_has_backlog = fact->backlog == CaptureBacklogV1::kPresent;
+            input.capture_progress.source_backlog_known = fact->backlog != CaptureBacklog::kUnknown;
+            input.capture_progress.source_has_backlog = fact->backlog == CaptureBacklog::kPresent;
         }
         std::shared_ptr<arrow::RecordBatch> batch;
         const auto status = runtime->DriveRealtimeMaintenance(input, &batch);
@@ -270,13 +265,13 @@ int NpmBasicTask::OnTime(const BlockTransformTimeEventV1& event, std::vector<Blo
     has_observed_at_ = true;
     last_output_ts_ms_ = event.wall_now_ns / 1'000'000;
     *outputs = std::move(next_outputs);
-    return static_cast<int>(BlockTransformStatusV1::kContinue);
+    return static_cast<int>(BlockTransformStatus::kContinue);
 }
 
-int NpmBasicTask::BindManagedSink(const BlockTransformManagedSinkBindingV1& binding) {
+int NpmBasicTask::BindManagedSink(const BlockTransformManagedSinkBinding& binding) {
     if (state_.load(std::memory_order_acquire) != State::kCreated || managed_channel_ != nullptr) return EALREADY;
-    if (binding.struct_size != sizeof(BlockTransformManagedSinkBindingV1) ||
-        binding.contract_version != kBlockTransformManagedSinkContractVersionV1 || !binding.sink_channel ||
+    if (binding.struct_size != sizeof(BlockTransformManagedSinkBinding) ||
+        binding.contract_version != kBlockTransformManagedSinkContractVersion || !binding.sink_channel ||
         !binding.target || !binding.category || !binding.name || !binding.relation) {
         return EINVAL;
     }
@@ -350,15 +345,15 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
     }
 
     const bool labeling_requested = NpmBasicTaskRequestsLabeling(with_params_json_.c_str());
-    IFlowLabelingProviderV1* labeling_provider = nullptr;
+    IFlowLabelingProvider* labeling_provider = nullptr;
     if (labeling_requested) {
         labeling_provider = querier_ == nullptr
                                 ? nullptr
-                                : static_cast<IFlowLabelingProviderV1*>(querier_->First(IID_FLOW_LABELING_PROVIDER_V1));
-        FlowLabelingDiagnosticV1 diagnostic;
-        const auto provider_status = labeling_provider == nullptr ? FlowLabelingErrorV1::kUnavailable
+                                : static_cast<IFlowLabelingProvider*>(querier_->First(IID_FLOW_LABELING_PROVIDER));
+        FlowLabelingDiagnostic diagnostic;
+        const auto provider_status = labeling_provider == nullptr ? FlowLabelingError::kUnavailable
                                                                   : labeling_provider->RuntimeStatus(&diagnostic);
-        if (provider_status != FlowLabelingErrorV1::kNone) {
+        if (provider_status != FlowLabelingError::kNone) {
             const char* error = kLabelingProviderError;
             if (labeling_provider != nullptr) {
                 try {
@@ -375,7 +370,7 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
 
     NpmBasicTaskConfig parsed;
     const auto parse_status =
-        ParseNpmBasicTaskConfig(with_params_json_.c_str(), &parsed, labeling_requested, ProductionNpmModuleCatalogV1(),
+        ParseNpmBasicTaskConfig(with_params_json_.c_str(), &parsed, labeling_requested, ProductionNpmModuleCatalog(),
                                 input_source_.empty() ? task_id_ : input_source_, managed_channel_ != nullptr);
     if (parse_status.error != NpmBasicTaskConfigError::kNone) {
         const char* error = kConfigError;
@@ -390,13 +385,13 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
     }
     if (!parsed.run_mode_explicit) {
         parsed.analysis.run_mode = capture_bound_ ? NpmRunMode::kRealtime : NpmRunMode::kOffline;
-    } else if (v2_ && (parsed.analysis.run_mode == NpmRunMode::kRealtime) != capture_bound_) {
+    } else if ((parsed.analysis.run_mode == NpmRunMode::kRealtime) != capture_bound_) {
         expected = State::kOpening;
         expected = Fail(expected, "npm.basic run_mode conflicts with bound source capabilities");
         return expected == State::kCancelled ? ECANCELED : EINVAL;
     }
     NpmTimeCapabilities time_capabilities;
-    if (v2_ && parsed.analysis.run_mode == NpmRunMode::kRealtime) {
+    if (parsed.analysis.run_mode == NpmRunMode::kRealtime) {
         const bool schema_probe = task_id_.size() >= 7 && task_id_.compare(task_id_.size() - 7, 7, ".schema") == 0;
         if (!capture_bound_ && !schema_probe) {
             expected = State::kOpening;
@@ -439,7 +434,7 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
     }
     std::shared_ptr<arrow::Schema> next_schema;
     std::unique_ptr<NpmBasicTaskRuntime> next_runtime;
-    std::unique_ptr<INpmResultConsumerFactoryV1> managed_consumer_factory;
+    std::unique_ptr<INpmResultConsumerFactory> managed_consumer_factory;
     if (managed_channel_ != nullptr) {
         auto* database = dynamic_cast<IDatabaseChannel*>(managed_channel_);
         if (!database) {
@@ -451,7 +446,7 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
                                                                         parsed.result_retention_days);
     }
     std::shared_ptr<NpmTaskBudget> labeling_budget;
-    IFlowLabelMatcherV1* matcher = nullptr;
+    IFlowLabelMatcher* matcher = nullptr;
     uint64_t labeling_memory_bytes = 0;
     if (parsed.features.labeling_enabled) {
         labeling_memory_bytes = static_cast<uint64_t>(parsed.labeling_memory_mib) * kNpmMebibyte;
@@ -462,7 +457,7 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
         }
         auto* registry = querier_ == nullptr
                              ? nullptr
-                             : static_cast<IConfigChannelRegistryV1*>(querier_->First(IID_CONFIG_CHANNEL_REGISTRY_V1));
+                             : static_cast<IConfigChannelRegistry*>(querier_->First(IID_CONFIG_CHANNEL_REGISTRY));
         if (registry == nullptr) {
             expected = State::kOpening;
             expected = Fail(expected, kLabelingConfigRegistryError);
@@ -498,15 +493,15 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
             return expected == State::kCancelled ? ECANCELED : ENOSPC;
         }
 
-        FlowLabelingCompileRequestV1 request;
+        FlowLabelingCompileRequest request;
         request.snapshot = &snapshot;
         request.reserved_module_state_bytes = labeling_memory_bytes;
         request.max_labels = kLabelingMaxLabels;
         request.max_logical_rules = kLabelingMaxLogicalRules;
         request.max_compiled_rules = kLabelingMaxCompiledRules;
-        FlowLabelingDiagnosticV1 diagnostic;
+        FlowLabelingDiagnostic diagnostic;
         const auto matcher_status = labeling_provider->CreateMatcher(request, &matcher, &diagnostic);
-        if (matcher_status != FlowLabelingErrorV1::kNone || matcher == nullptr) {
+        if (matcher_status != FlowLabelingError::kNone || matcher == nullptr) {
             if (matcher) matcher->Release();
             labeling_budget->Release(NpmBudgetCategory::kModuleState, labeling_memory_bytes);
             const char* error = kLabelingMatcherError;
@@ -523,7 +518,7 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
 
     const auto runtime_status = NpmBasicTaskRuntime::CreateWithTimeCapabilities(
         parsed, querier_, input_schema, time_capabilities, &next_schema, &next_runtime, std::move(labeling_budget),
-        matcher, ProductionNpmModuleCatalogV1(), {}, task_id_, managed_consumer_factory.get(), labeling_memory_bytes);
+        matcher, ProductionNpmModuleCatalog(), {}, task_id_, managed_consumer_factory.get(), labeling_memory_bytes);
     if (runtime_status.error != NpmBasicTaskRuntimeError::kNone) {
         expected = State::kOpening;
         const char* error = kRuntimeOpenError;
@@ -537,7 +532,7 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
     }
 
     if (managed_channel_ && component_.contract_state == "declared") {
-        DataSemanticsErrorV1 error;
+        DataSemanticsError error;
         if (PublishNpmResultSemantics(querier_, component_, managed_category_, managed_name_,
                                       parsed.domains.input_namespace, next_runtime->ManagedResultJson(),
                                       &semantics_context_, &error)) {
@@ -567,7 +562,7 @@ int NpmBasicTask::Open(std::shared_ptr<arrow::Schema> input_schema, std::shared_
 }
 
 int NpmBasicTask::ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input, int64_t ts_ms,
-                               std::vector<BlockTransformOutputV1>* outputs) {
+                               std::vector<BlockTransformOutput>* outputs) {
     State current = state_.load(std::memory_order_acquire);
     if (current != State::kOpened) {
         if (current == State::kCreated) {
@@ -613,7 +608,7 @@ int NpmBasicTask::ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
         return -EIO;
     }
 
-    std::vector<BlockTransformOutputV1> next_outputs;
+    std::vector<BlockTransformOutput> next_outputs;
     try {
         next_outputs.push_back({std::move(batch), ts_ms});
     } catch (const std::bad_alloc&) {
@@ -633,10 +628,10 @@ int NpmBasicTask::ProcessBlock(const std::shared_ptr<arrow::RecordBatch>& input,
     }
     last_output_ts_ms_ = ts_ms;
     *outputs = std::move(next_outputs);
-    return static_cast<int>(BlockTransformStatusV1::kContinue);
+    return static_cast<int>(BlockTransformStatus::kContinue);
 }
 
-int NpmBasicTask::Flush(std::vector<BlockTransformOutputV1>* outputs) {
+int NpmBasicTask::Flush(std::vector<BlockTransformOutput>* outputs) {
     State current = state_.load(std::memory_order_acquire);
     if (current != State::kOpened) {
         if (current == State::kCreated) {
@@ -660,12 +655,12 @@ int NpmBasicTask::Flush(std::vector<BlockTransformOutputV1>* outputs) {
         return -EIO;
     }
 
-    std::vector<BlockTransformOutputV1> next_outputs;
+    std::vector<BlockTransformOutput> next_outputs;
     if (!pending_capture_facts_.empty()) {
         // Stop can arrive after AcceptCaptureFact and before the runner's next OnTime.
-        BlockTransformTimeEventV1 event{};
-        event.struct_size = kBlockTransformTimeEventV1Size;
-        event.contract_version = kBlockTransformTimeDriveVersionV1;
+        BlockTransformTimeEvent event{};
+        event.struct_size = kBlockTransformTimeEventSize;
+        event.contract_version = kBlockTransformTimeDriveVersion;
         event.monotonic_now_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
                 .count();
@@ -789,7 +784,7 @@ int NpmBasicOperator::Start() {
     if (!loaded_ || querier_ == nullptr) return EINVAL;
     if (started_) return 0;
 
-    auto* pool = static_cast<IProtocolPipelinePoolV1*>(querier_->First(IID_PROTOCOL_PIPELINE_POOL_V1));
+    auto* pool = static_cast<IProtocolPipelinePool*>(querier_->First(IID_PROTOCOL_PIPELINE_POOL));
     if (pool == nullptr || pool->Capacity() < 1) return ENODEV;
     IProtocol* protocol = pool->Protocol();
     if (protocol == nullptr || protocol->Dictionary() == nullptr) return ENODEV;
@@ -809,51 +804,26 @@ std::string NpmBasicOperator::Name() const { return "basic"; }
 
 std::string NpmBasicOperator::Description() const { return "NPM basic session analysis"; }
 
-int NpmBasicOperator::CreateTask(const BlockTransformTaskConfigV1& config, IBlockTransformTaskV1** task) {
-    if (!started_) return EPIPE;
-    if (task == nullptr || config.contract_version != kBlockTransformContractVersionV1 || config.task_id == nullptr ||
-        config.task_id[0] == '\0' || config.with_params_json == nullptr || config.with_params_json[0] == '\0' ||
-        config.pushed_filter_plan_json == nullptr || config.pushed_filter_plan_json[0] == '\0') {
-        return EINVAL;
-    }
-
-    try {
-        auto* next = new NpmBasicTask(config, querier_, this, false);
-        *task = next;
-        return 0;
-    } catch (const std::bad_alloc&) {
-        return ENOMEM;
-    }
-}
-
-void NpmBasicOperator::ReleaseTask(IBlockTransformTaskV1* task) {
+void NpmBasicOperator::ReleaseTask(IBlockTransformTask* task) {
     auto* owned = dynamic_cast<NpmBasicTask*>(task);
     if (owned == nullptr || owned->owner_ != this) return;
     delete owned;
 }
 
-int NpmBasicOperator::CreateTask(const BlockTransformTaskConfigV2& config, IBlockTransformTaskV2** task) {
+int NpmBasicOperator::CreateTask(const BlockTransformTaskConfig& config, IBlockTransformTask** task) {
     if (!started_) return EPIPE;
-    if (!task || config.struct_size < kBlockTransformTaskConfigV2Size ||
-        config.contract_version != kBlockTransformContractVersionV2 || !config.task_id || !config.task_id[0] ||
+    if (!task || config.struct_size < kBlockTransformTaskConfigSize ||
+        config.contract_version != kBlockTransformContractVersion || !config.task_id || !config.task_id[0] ||
         !config.with_params_json || !config.with_params_json[0] || !config.pushed_filter_plan_json ||
         !config.pushed_filter_plan_json[0]) {
         return EINVAL;
     }
     try {
-        BlockTransformTaskConfigV1 v1;
-        v1.task_id = config.task_id;
-        v1.with_params_json = config.with_params_json;
-        v1.pushed_filter_plan_json = config.pushed_filter_plan_json;
-        *task = new NpmBasicTask(v1, querier_, this, true);
+        *task = new NpmBasicTask(config, querier_, this);
         return 0;
     } catch (const std::bad_alloc&) {
         return ENOMEM;
     }
-}
-
-void NpmBasicOperator::ReleaseTask(IBlockTransformTaskV2* task) {
-    ReleaseTask(static_cast<IBlockTransformTaskV1*>(task));
 }
 
 }  // namespace flowsql::npm

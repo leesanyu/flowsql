@@ -26,15 +26,15 @@ std::string Hash(std::string_view value) {
 std::string Text(const arrow::RecordBatch& b, int column, int64_t row) {
     return std::static_pointer_cast<arrow::StringArray>(b.column(column))->GetString(row);
 }
-DatabaseParameterV1 ScalarParameter(const arrow::Scalar& scalar) {
-    DatabaseParameterV1 p;
+DatabaseParameter ScalarParameter(const arrow::Scalar& scalar) {
+    DatabaseParameter p;
     if (!scalar.is_valid) return p;
     switch (scalar.type->id()) {
         case arrow::Type::STRING:
         case arrow::Type::BINARY: {
             auto& s = static_cast<const arrow::BaseBinaryScalar&>(scalar);
-            p.kind = scalar.type->id() == arrow::Type::STRING ? DatabaseParameterKindV1::kString
-                                                              : DatabaseParameterKindV1::kBlob;
+            p.kind = scalar.type->id() == arrow::Type::STRING ? DatabaseParameterKind::kString
+                                                              : DatabaseParameterKind::kBlob;
             p.data = s.value->data();
             p.size = s.value->size();
             break;
@@ -46,11 +46,11 @@ DatabaseParameterV1 ScalarParameter(const arrow::Scalar& scalar) {
             p = IntParameter(static_cast<const arrow::Int32Scalar&>(scalar).value);
             break;
         case arrow::Type::UINT64:
-            p.kind = DatabaseParameterKindV1::kUInt64;
+            p.kind = DatabaseParameterKind::kUInt64;
             p.uint64_value = static_cast<const arrow::UInt64Scalar&>(scalar).value;
             break;
         case arrow::Type::DOUBLE:
-            p.kind = DatabaseParameterKindV1::kDouble;
+            p.kind = DatabaseParameterKind::kDouble;
             p.double_value = static_cast<const arrow::DoubleScalar&>(scalar).value;
             break;
         case arrow::Type::BOOL:
@@ -90,12 +90,12 @@ int DurableStore::Open(const ConfigSnapshot& config, IDatabaseChannel* channel, 
     backend_ = channel->Category();
     if (backend_ != "sqlite" && backend_ != "mysql" && backend_ != "postgres")
         return Fail("target does not support atomic publication");
-    auto* target = dynamic_cast<IDatabaseAtomicTargetV1*>(channel);
+    auto* target = dynamic_cast<IDatabaseAtomicTarget*>(channel);
     if (!target) return Fail("missing atomic target capability");
     config_ = config;
-    DatabaseAtomicSessionOptionsV1 options;
+    DatabaseAtomicSessionOptions options;
     options.operation_timeout_ms = config.config.persistence.operation_timeout_ms;
-    std::shared_ptr<IDatabaseAtomicSessionV1> session;
+    std::shared_ptr<IDatabaseAtomicSession> session;
     auto status = target->AcquireAtomicSession(options, &session);
     if (!status.ok()) return Fail(status.message);
     std::atomic_store(&session_, session);
@@ -140,9 +140,9 @@ int DurableStore::Initialize() {
     }
     for (auto kind : {SchemaKind::kResults, SchemaKind::kRelationFusion, SchemaKind::kMaintenance}) {
         auto schema = MakeSchema(kind);
-        std::string table = kind == SchemaKind::kResults          ? "baseline_results_v1"
-                            : kind == SchemaKind::kRelationFusion ? "baseline_relation_fusion_v1"
-                                                                  : "baseline_maintenance_v1";
+        std::string table = kind == SchemaKind::kResults          ? "baseline_results"
+                            : kind == SchemaKind::kRelationFusion ? "baseline_relation_fusion"
+                                                                  : "baseline_maintenance";
         std::string sql = "CREATE TABLE IF NOT EXISTS " + table + "(logical_key VARCHAR(64) PRIMARY KEY";
         for (const auto& f : schema->fields()) {
             std::string type;
@@ -206,7 +206,7 @@ int DurableStore::Load(StoredGeneration* output) {
     auto status = session.Begin();
     if (!status.ok()) return Fail(status.message);
     std::shared_ptr<arrow::RecordBatch> batch;
-    auto p = std::vector<DatabaseParameterV1>{TextParameter(config_.config.task_key), IntParameter(output->generation)};
+    auto p = std::vector<DatabaseParameter>{TextParameter(config_.config.task_key), IntParameter(output->generation)};
     status = ReadAtomicBatch(session,
                              "SELECT config_hash,checksum,checkpoint,config_json FROM baseline_model_versions WHERE "
                              "task_key=? AND generation=?",
@@ -249,9 +249,9 @@ int DurableStore::InsertResults(const arrow::RecordBatch& batch, int64_t generat
         kind = SchemaKind::kMaintenance;
     else
         return Fail("result schema mismatch");
-    std::string table = kind == SchemaKind::kResults          ? "baseline_results_v1"
-                        : kind == SchemaKind::kRelationFusion ? "baseline_relation_fusion_v1"
-                                                              : "baseline_maintenance_v1";
+    std::string table = kind == SchemaKind::kResults          ? "baseline_results"
+                        : kind == SchemaKind::kRelationFusion ? "baseline_relation_fusion"
+                                                              : "baseline_maintenance";
     std::string sql = "INSERT INTO " + table + "(logical_key";
     std::string marks = "?";
     for (const auto& f : batch.schema()->fields()) {
@@ -261,7 +261,7 @@ int DurableStore::InsertResults(const arrow::RecordBatch& batch, int64_t generat
     sql += ") VALUES(" + marks + ")";
     for (int64_t row = 0; row < batch.num_rows(); ++row) {
         std::vector<std::shared_ptr<arrow::Scalar>> scalars;
-        std::vector<DatabaseParameterV1> parameters(1);
+        std::vector<DatabaseParameter> parameters(1);
         for (int i = 0; i < batch.num_columns(); ++i) {
             auto scalar = batch.column(i)->GetScalar(row);
             if (!scalar.ok()) return Fail(scalar.status().ToString());
@@ -294,7 +294,7 @@ int DurableStore::InsertResults(const arrow::RecordBatch& batch, int64_t generat
     }
     return 0;
 }
-int DurableStore::Publish(const std::string& checkpoint, const BlockInputProgressV1& progress,
+int DurableStore::Publish(const std::string& checkpoint, const BlockInputProgress& progress,
                           const std::vector<std::shared_ptr<arrow::RecordBatch>>& results) {
     if (failed_ || checkpoint.empty() || checkpoint.size() > config_.config.persistence.max_checkpoint_bytes)
         return Fail("checkpoint size/store unavailable");
@@ -312,13 +312,13 @@ int DurableStore::Publish(const std::string& checkpoint, const BlockInputProgres
     const auto generation = fence_.Generation() + 1;
     uint64_t n = 0;
     auto checksum = Hash(checkpoint);
-    auto p = std::vector<DatabaseParameterV1>{TextParameter(config_.config.task_key),
-                                              IntParameter(generation),
-                                              IntParameter(1),
-                                              TextParameter(config_.sha256_hex),
-                                              TextParameter(config_.original_json),
-                                              TextParameter(checksum),
-                                              TextParameter(checkpoint)};
+    auto p = std::vector<DatabaseParameter>{TextParameter(config_.config.task_key),
+                                            IntParameter(generation),
+                                            IntParameter(1),
+                                            TextParameter(config_.sha256_hex),
+                                            TextParameter(config_.original_json),
+                                            TextParameter(checksum),
+                                            TextParameter(checkpoint)};
     auto status =
         session.ExecutePrepared("INSERT INTO baseline_model_versions VALUES(?,?,?,?,?,?,?)", p.data(), p.size(), &n);
     if (!status.ok()) {

@@ -151,10 +151,10 @@ int DescribeDevice(const std::string& name, XdpDevice& device, std::string* erro
     }
     return 0;
 }
-class XdpSession final : public ICaptureBackendSessionV1 {
+class XdpSession final : public ICaptureBackendSession {
  public:
-    const std::vector<CaptureBackendInputV1>& Inputs() const override { return inputs; }
-    int TryRead(uint32_t i, CapturePacketViewV1* output) override {
+    const std::vector<CaptureBackendInput>& Inputs() const override { return inputs; }
+    int TryRead(uint32_t i, CapturePacketView* output) override {
         if (cancelled) return ECANCELED;
         if (!output || i >= queues.size()) return EINVAL;
         auto& queue = *queues[i];
@@ -193,15 +193,15 @@ class XdpSession final : public ICaptureBackendSessionV1 {
         }
         queue.borrowed = false;
     }
-    CaptureBacklogV1 Backlog(uint32_t i) const override {
+    CaptureBacklog Backlog(uint32_t i) const override {
         const auto& queue = *queues[i];
-        if (queue.failure) return CaptureBacklogV1::kUnknown;
+        if (queue.failure) return CaptureBacklog::kUnknown;
         const auto produced = __atomic_load_n(queue.rx.producer, __ATOMIC_ACQUIRE);
         const auto consumed = __atomic_load_n(queue.rx.consumer, __ATOMIC_ACQUIRE);
-        return produced != consumed || queue.borrowed ? CaptureBacklogV1::kPresent : CaptureBacklogV1::kEmpty;
+        return produced != consumed || queue.borrowed ? CaptureBacklog::kPresent : CaptureBacklog::kEmpty;
     }
     int64_t IdleTimeNs(uint32_t i) const override { return queues[i]->idle_time; }
-    int ReadCounters(uint32_t i, CaptureCountersV1* output) override {
+    int ReadCounters(uint32_t i, CaptureCounters* output) override {
         if (!output || i >= queues.size()) return EINVAL;
         xdp_statistics statistics{};
         socklen_t size = sizeof(statistics);
@@ -216,7 +216,7 @@ class XdpSession final : public ICaptureBackendSessionV1 {
     }
     void Cancel() override { cancelled = true; }
     uint32_t snaplen = 65535;
-    std::vector<CaptureBackendInputV1> inputs;
+    std::vector<CaptureBackendInput> inputs;
     std::vector<std::unique_ptr<XdpDevice>> devices;
     std::vector<std::unique_ptr<XdpQueue>> queues;
 
@@ -224,7 +224,7 @@ class XdpSession final : public ICaptureBackendSessionV1 {
     std::atomic<bool> cancelled{false};
 };
 }  // namespace
-int OpenAfXdpCopySkb(const CaptureBackendConfigV1& config, std::shared_ptr<ICaptureBackendSessionV1>* output,
+int OpenAfXdpCopySkb(const CaptureBackendConfig& config, std::shared_ptr<ICaptureBackendSession>* output,
                      std::string* error) {
     if (!output) return EINVAL;
     output->reset();
@@ -311,7 +311,7 @@ int OpenAfXdpCopySkb(const CaptureBackendConfigV1& config, std::shared_ptr<ICapt
                                          aligned(offsets.cr.desc + frames * sizeof(uint64_t));
             if (descriptors > kDescriptorEnvelope)
                 return fail(ENOMEM, "AF_XDP descriptor mappings exceed reserved capacity");
-            CaptureBackendInputV1 input;
+            CaptureBackendInput input;
             input.interface_name = device->name;
             input.ifindex = device->ifindex;
             input.queue_id = id;
@@ -337,8 +337,7 @@ int OpenAfXdpCopySkb(const CaptureBackendConfigV1& config, std::shared_ptr<ICapt
 }  // namespace flowsql::channels::netadapter
 #else
 namespace flowsql::channels::netadapter {
-int OpenAfXdpCopySkb(const CaptureBackendConfigV1&, std::shared_ptr<ICaptureBackendSessionV1>* output,
-                     std::string* error) {
+int OpenAfXdpCopySkb(const CaptureBackendConfig&, std::shared_ptr<ICaptureBackendSession>* output, std::string* error) {
     if (!output) return EINVAL;
     output->reset();
     if (error) *error = "AF_XDP SKB/COPY unavailable: libxdp/libbpf build dependencies missing";

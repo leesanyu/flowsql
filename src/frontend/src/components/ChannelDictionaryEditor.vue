@@ -87,7 +87,7 @@ async function findReplacements(source) {
   for (const item of await all('list', { kind: 'binding' })) {
     const old = await call('resolve', { exact_reference: item.exact_reference })
     const observed = old.document.source_snapshot
-    if (!observed || ['provider_id', 'object_id'].every(k => observed.object_key[k] === source.object_key[k])) continue
+    if (['provider_id', 'object_id'].every(k => observed.object_key[k] === source.object_key[k])) continue
     if (['kind', 'name', 'type', 'table'].every(k => observed.locator[k] === source.locator[k]) &&
         ['database', 'schema'].every(k => !props.locator[k] || observed.locator[k] === source.locator[k]))
       replacements.value.push({ key: observed.object_key, binding: item.exact_reference, dictionary: old.document.dictionary_ref })

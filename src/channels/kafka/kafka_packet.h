@@ -40,29 +40,29 @@ struct PacketEnvelope {
     uint64_t observation_domain_id = 0, capture_generation = 0, poll_sequence = 0;
     std::vector<PacketWireRecord> packets;
     // generation is local-only and is never serialized; all other fact fields are preserved.
-    std::vector<CaptureProgressV1> progress;
+    std::vector<CaptureProgress> progress;
 };
 // Throws invalid_argument("INVALID_PACKET_SOURCE"), without input values.
 PacketSourceConfig ParsePacketSourceConfig(const rapidjson::Value& value);
 // Strict preflight precedes raw-byte allocation. Both functions enforce the same wire contract.
-arrow::Result<PacketEnvelope> DecodePacket(const PacketSourceConfig& config, const KafkaMessageV1& message);
-arrow::Result<KafkaMessageV1> EncodePacket(const PacketSourceConfig& config, const PacketEnvelope& envelope);
+arrow::Result<PacketEnvelope> DecodePacket(const PacketSourceConfig& config, const KafkaMessage& message);
+arrow::Result<KafkaMessage> EncodePacket(const PacketSourceConfig& config, const PacketEnvelope& envelope);
 // Task-owned encoder. Source strings are copied; no layer/NPI state crosses the wire.
 class PacketSinkCodec {
  public:
     explicit PacketSinkCodec(PacketSinkConfig config) : config_(std::move(config)) {}
-    void Open(const CaptureSourceSetV2&, const std::shared_ptr<arrow::Schema>&);
-    arrow::Result<KafkaMessageV1> Encode(const CapturePollEventV2&, const std::array<uint8_t, 16>& epoch,
-                                         uint64_t poll_sequence, const std::function<bool()>& interrupted = {});
+    void Open(const CaptureSourceSet&, const std::shared_ptr<arrow::Schema>&);
+    arrow::Result<KafkaMessage> Encode(const CapturePollEvent&, const std::array<uint8_t, 16>& epoch,
+                                       uint64_t poll_sequence, const std::function<bool()>& interrupted = {});
     const PacketSourceConfig& WireConfig() const { return wire_; }
     uint64_t Generation() const { return generation_; }
-    const CaptureSourceSetV2& Sources() const { return sources_; }
+    const CaptureSourceSet& Sources() const { return sources_; }
 
  private:
     PacketSinkConfig config_;
     PacketSourceConfig wire_;
-    CaptureSourceSetV2 sources_;
+    CaptureSourceSet sources_;
     uint64_t generation_ = 0, last_packet_sequence_ = 0;
-    std::map<uint32_t, CaptureProgressTrackerV1> trackers_;
+    std::map<uint32_t, SingleInputCaptureProgressTracker> trackers_;
 };
 }  // namespace flowsql::channels::kafka

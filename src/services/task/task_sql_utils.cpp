@@ -1,10 +1,5 @@
-/*
- * Copyright (C) 2026 LIHUO
- *
- * Licensed under the MIT License. See LICENSE file in the project root
- * for full license information.
- *
- */
+// Copyright (C) 2026 LIHUO. All rights reserved.
+// Licensed under the MIT License.
 
 #include "task_sql_utils.h"
 
@@ -99,8 +94,6 @@ std::string BuildOperatorChainFromSql(const std::string& sql) {
         for (const auto& op : stmt.operators) {
             chain.push_back(op.category + "." + op.name);
         }
-    } else if (!stmt.op_category.empty() && !stmt.op_name.empty()) {
-        chain.push_back(stmt.op_category + "." + stmt.op_name);
     }
 
     if (chain.empty()) return "";

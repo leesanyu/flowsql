@@ -21,7 +21,7 @@ int main() {
     assert(fd >= 0);
     close(fd);
     DataSemanticsRegistry registry;
-    DataSemanticsErrorV1 error;
+    DataSemanticsError error;
     assert(registry.Open(path, &error) == 0);
     OperatorContractService service(registry);
     auto fields = Parse(
@@ -30,7 +30,7 @@ int main() {
     auto metadata = Parse("{}");
     auto source = Snapshot("fixture", "input", locator, fields, metadata, "1");
     auto dictionary = Parse(
-        R"({"schema_id":"flowsql.data-dictionary.v1","title":"requests","entity":{"identity_fields":{"state":"declared","value":["identity"]},"row_semantics":{"state":"declared","value":"event"}},"fields":[{"field_id":"latency","name":"latency","title":"latency","type":{"system":"arrow","name":"double","parameters":{}},"nullable":false,"unit":{"state":"declared","value":{"code":"ms","label":"milliseconds"}}},{"field_id":"identity","name":"id","title":"id","type":{"system":"arrow","name":"int64","parameters":{}},"nullable":false}]})");
+        R"({"schema_id":"flowsql.data-dictionary","title":"requests","entity":{"identity_fields":{"state":"declared","value":["identity"]},"row_semantics":{"state":"declared","value":"event"}},"fields":[{"field_id":"latency","name":"latency","title":"latency","type":{"system":"arrow","name":"double","parameters":{}},"nullable":false,"unit":{"state":"declared","value":{"code":"ms","label":"milliseconds"}}},{"field_id":"identity","name":"id","title":"id","type":{"system":"arrow","name":"int64","parameters":{}},"nullable":false}]})");
     auto contextual_validity = Parse(
         R"({"state":"declared","value":{"mode":"descriptive","description":"requires event identity","field_ids":["identity"]}})");
     Set(dictionary["fields"][0], "validity", Copy(contextual_validity, dictionary.GetAllocator()),
@@ -38,7 +38,7 @@ int main() {
     SemanticsSaveResult saved;
     assert(registry.Save({"dictionary", "input", Encode(dictionary)}, &saved, &error) == 0);
     auto binding = Parse(
-        R"({"schema_id":"flowsql.data-binding.v2","object_label":"source","dictionary_ref":"dictionary.input@1","field_map":{"latency":"latency","identity":"id"},"declared_schema":null,"confirmation":{"source_revision":"","items":[]}})");
+        R"({"schema_id":"flowsql.data-binding","object_label":"source","dictionary_ref":"dictionary.input@1","field_map":{"latency":"latency","identity":"id"},"declared_schema":null,"confirmation":{"source_revision":"","items":[]}})");
     auto& ba = binding.GetAllocator();
     binding.AddMember("object_key", Copy(source["object_key"], ba), ba)
         .AddMember("source_snapshot", Copy(source, ba), ba);
@@ -47,7 +47,7 @@ int main() {
     bound.source_observed = true;
     assert(registry.Save(bound, &saved, &error) == 0);
     auto contract = Parse(
-        R"({"schema_id":"flowsql.operator-data-contract.v1","title":"transform","operator":{"category":"fixture","name":"transform","version":"1"},"configuration":{"invocation_schema":{"type":"object","additionalProperties":true},"affects":{}},"inputs":[{"port_id":"input","min_count":1,"max_count":2,"shape":"dataframe","roles":[{"role_id":"measure","required":true,"types":[],"nullable":null,"semantic_requirements":{},"selector":{"kind":"column","column":"latency"}}]}],"outputs":[{"port_id":"main","shape":"dataframe","mode":"derived","rules":[{"kind":"copy","source_port":"input","all_fields":true}]}],"limitations":[]})");
+        R"({"schema_id":"flowsql.operator-data-contract","title":"transform","operator":{"category":"fixture","name":"transform","version":"1"},"configuration":{"invocation_schema":{"type":"object","additionalProperties":true},"affects":{}},"inputs":[{"port_id":"input","min_count":1,"max_count":2,"shape":"dataframe","roles":[{"role_id":"measure","required":true,"types":[],"nullable":null,"semantic_requirements":{},"selector":{"kind":"column","column":"latency"}}]}],"outputs":[{"port_id":"main","shape":"dataframe","mode":"derived","rules":[{"kind":"copy","source_port":"input","all_fields":true}]}],"limitations":[]})");
     auto invocation = Parse(
         R"({"contract_ref":"","component_revision":"actual-digest","effective_parameters":{},"config_refs":[],"execution_context":{"input_shapes":["dataframe","dataframe"]},"inputs":[{"port_id":"input","input_index":0,"binding_ref":"binding.input@1"}]})");
     auto& ia = invocation.GetAllocator();
@@ -135,7 +135,7 @@ int main() {
     result = check();
     auto observation = [&](const std::string& name, const Value& actual_fields) {
         auto request = Parse(
-            R"({"name":"","expected_current_revision":0,"document":{"schema_id":"flowsql.operator-data-use.v1","title":"execution","run_id":"run","stage_index":0,"operator_ref":{"category":"fixture","name":"transform","version":"1"},"component_revision":"actual-digest","contract_ref":"","input_snapshots":[],"role_map":{},"effective_parameters":{},"config_refs":[],"execution_context":{"input_shapes":["dataframe"]},"checks":{},"outputs":[],"outcome":"complete"}})");
+            R"({"name":"","expected_current_revision":0,"document":{"schema_id":"flowsql.operator-data-use","title":"execution","run_id":"run","stage_index":0,"operator_ref":{"category":"fixture","name":"transform","version":"1"},"component_revision":"actual-digest","contract_ref":"","input_snapshots":[],"role_map":{},"effective_parameters":{},"config_refs":[],"execution_context":{"input_shapes":["dataframe"]},"checks":{},"outputs":[],"outcome":"complete"}})");
         auto& a = request.GetAllocator();
         Set(request, "name", name, a);
         auto& d = request["document"];
@@ -150,14 +150,14 @@ int main() {
         return request;
     };
     auto request = observation("unknown", fields);
-    OperatorContractSnapshotV1 use;
+    OperatorContractSnapshot use;
     int rc = service.RecordUse(Encode(request).c_str(), &use, &error);
     if (rc) std::cerr << error.code << " " << error.message << " " << error.field_path << '\n';
     assert(rc == 0);
     auto used = Parse(use.document_json->c_str());
     assert(!used["role_map"].ObjectEmpty());
     assert(used["outputs"][0]["output_check"] == "matched");
-    DataSemanticsSnapshotV1 output_dictionary;
+    DataSemanticsSnapshot output_dictionary;
     assert(registry.Resolve(Get(used["outputs"][0], "dictionary_ref").c_str(), &output_dictionary, &error) == 0);
     auto unknown = Parse(output_dictionary.document_json->c_str());
     assert(unknown["fields"][0]["unit"]["state"] == "unknown");
@@ -177,7 +177,7 @@ int main() {
     request = observation("drift", drift);
     assert(service.RecordUse(Encode(request).c_str(), &use, &error) != 0 && error.code == "OUTPUT_SCHEMA_MISMATCH" &&
            !use.document_json);
-    DataSemanticsSnapshotV1 missing;
+    DataSemanticsSnapshot missing;
     assert(registry.Resolve("operator_use.drift@1", &missing, &error) != 0);
     // Conditions, two entities, and row declarations survive without being row validation.
     auto secondary = Parse(
@@ -256,7 +256,7 @@ int main() {
     SemanticsSaveRequest other_bound{"binding", "bytes", Encode(other_binding)};
     other_bound.source_observed = true;
     assert(registry.Save(other_bound, &saved, &error) == 0);
-    auto contextual = Parse(R"({"schema_id":"flowsql.operator-data-contract.v1","title":"contexts",
+    auto contextual = Parse(R"({"schema_id":"flowsql.operator-data-contract","title":"contexts",
       "operator":{"category":"fixture","name":"contexts","version":"1"},
       "configuration":{"invocation_schema":{"type":"object","additionalProperties":true},"affects":{}},
       "inputs":[{"port_id":"datasets","min_count":1,"max_count":2,"shape":"dataframe","roles":[],

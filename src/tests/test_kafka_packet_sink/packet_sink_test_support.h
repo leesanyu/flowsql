@@ -12,11 +12,11 @@ using namespace flowsql;
 using namespace flowsql::channels::kafka;
 inline PacketSinkConfig Config() {
     return ParsePacketSinkConfig(
-        Parse(R"({"encoding":"flowsql_packet_v1","stream_id":"probe-a","delivery_timeout_ms":2000})"));
+        Parse(R"({"encoding":"flowsql_packet","stream_id":"probe-a","delivery_timeout_ms":2000})"));
 }
-inline CaptureSourceSetV2 Sources() {
-    CaptureSourceSetV2 s;
-    CaptureQueueIdentityV1 i;
+inline CaptureSourceSet Sources() {
+    CaptureSourceSet s;
+    CaptureQueueIdentity i;
     i.observation_domain_id = 7;
     i.source_id = 0;
     i.queue_id = 2;
@@ -28,10 +28,10 @@ inline CaptureSourceSetV2 Sources() {
     i.queue_id = 3;
     i.source_name = "eth1";
     s.inputs.push_back(i);
-    s.limits = {sizeof(CaptureReaderLimitsV1), 1, 256, 1048576, 100, 1};
+    s.limits = {sizeof(CaptureReaderLimits), 1, 256, 1048576, 100, 1};
     return s;
 }
-inline CapturePollEventV2 Event(uint64_t sequence = 1, int rows = 3) {
+inline CapturePollEvent Event(uint64_t sequence = 1, int rows = 3) {
     packet::PacketFamilyBatch records;
     for (int n = 0; n < rows; ++n) {
         auto owner = std::make_shared<std::string>(std::string("\x00\xff\x00", 3));
@@ -40,12 +40,12 @@ inline CapturePollEventV2 Event(uint64_t sequence = 1, int rows = 3) {
         row.raw_data = {owner, reinterpret_cast<const uint8_t*>(owner->data()), 3};
         records.rows.push_back(row);
     }
-    CapturePollEventV2 e;
+    CapturePollEvent e;
     if (rows) {
         e.block.kind = BlockPollEvent::kData;
         assert(packet::EncodePacketFamilyBatch(records, &e.block.batch) == packet::PacketBatchError::kNone);
     }
-    CaptureProgressV1 fact;
+    CaptureProgress fact;
     fact.source_id = 0;
     fact.queue_id = 2;
     fact.generation = 9;
@@ -53,23 +53,23 @@ inline CapturePollEventV2 Event(uint64_t sequence = 1, int rows = 3) {
     fact.capture_time_ns = 100;
     fact.packet_observed = rows > 0;
     fact.source_idle_confirmed = !rows;
-    fact.backlog = CaptureBacklogV1::kEmpty;
+    fact.backlog = CaptureBacklog::kEmpty;
     e.progress.push_back(fact);
     return e;
 }
-struct FakeSession final : IKafkaClientSessionV1, IKafkaProducerSessionV1 {
-    KafkaBindingSnapshotV1 snapshot;
+struct FakeSession final : IKafkaClientSession, IKafkaProducerSession {
+    KafkaBindingSnapshot snapshot;
     std::atomic<bool> cancelled{false}, entered{false}, wait{false};
     int calls = 0, drains = 0, fail_call = -1, drain_rc = 0, probe_rc = 0;
-    std::vector<KafkaProduceMessageV1> messages;
-    const KafkaBindingSnapshotV1& Snapshot() const override { return snapshot; }
+    std::vector<KafkaProduceMessage> messages;
+    const KafkaBindingSnapshot& Snapshot() const override { return snapshot; }
     int Probe(uint32_t, std::string*) override { return cancelled ? ECANCELED : probe_rc; }
     void Cancel() override { cancelled = true; }
     int QueryInterface(const Guid&, void** out) override {
-        *out = static_cast<IKafkaProducerSessionV1*>(this);
+        *out = static_cast<IKafkaProducerSession*>(this);
         return 0;
     }
-    int Produce(const std::vector<KafkaProduceMessageV1>& m, uint32_t timeout, KafkaDeliveryV1* out) override {
+    int Produce(const std::vector<KafkaProduceMessage>& m, uint32_t timeout, KafkaDelivery* out) override {
         assert(m.size() == 1 && timeout > 0 && timeout <= 2000);
         entered = true;
         while (wait && !cancelled) std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -86,7 +86,7 @@ struct FakeSession final : IKafkaClientSessionV1, IKafkaProducerSessionV1 {
         return drain_rc;
     }
 };
-inline void Balanced(const PacketSinkReportV1& r) {
+inline void Balanced(const PacketSinkReport& r) {
     for (const auto* c : {&r.messages, &r.packets}) assert(c->input == c->confirmed + c->not_sent + c->unknown);
 }
 }  // namespace packet_sink_test

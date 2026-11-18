@@ -10,7 +10,7 @@
 namespace flowsql::npm {
 namespace {
 
-bool FragmentedOuter(const NpmInputEventV1& input, uint8_t family) {
+bool FragmentedOuter(const NpmInputEvent& input, uint8_t family) {
     const auto& layer = *input.layer;
     const auto bytes = input.packet.bytes;
     const size_t network = layer.layers[layer.network_layer_index].offset;
@@ -30,7 +30,7 @@ bool FragmentedOuter(const NpmInputEventV1& input, uint8_t family) {
 }
 
 template <typename Address>
-void ParseQuote(const NpmInputEventV1& input, uint8_t outer_family, NpmIcmpFamilyParsed<Address>* parsed) {
+void ParseQuote(const NpmInputEvent& input, uint8_t outer_family, NpmIcmpFamilyParsed<Address>* parsed) {
     const auto* quote = input.body.data + sizeof(IcmpHeader);
     const size_t size = input.body.size - sizeof(IcmpHeader);
     parsed->quote_status = "unavailable";
@@ -94,28 +94,28 @@ void ParseQuote(const NpmInputEventV1& input, uint8_t outer_family, NpmIcmpFamil
 }  // namespace
 
 template <typename Address>
-NpmIcmpParseErrorV1 ParseNpmIcmpControlV1(const NpmInputEventV1& input, NpmIcmpFamilyParsed<Address>* output) {
-    if (!output || ValidateNpmInputEventV1(input).error != NpmProtocolContractErrorV1::kNone ||
-        input.kind != NpmInputKindV1::kControlPacket || input.layer->network_layer_index >= input.layer->layer_count) {
-        return NpmIcmpParseErrorV1::kInvalidInput;
+NpmIcmpParseError ParseNpmIcmpControl(const NpmInputEvent& input, NpmIcmpFamilyParsed<Address>* output) {
+    if (!output || ValidateNpmInputEvent(input).error != NpmProtocolContractError::kNone ||
+        input.kind != NpmInputKind::kControlPacket || input.layer->network_layer_index >= input.layer->layer_count) {
+        return NpmIcmpParseError::kInvalidInput;
     }
     NpmIcmpFamilyParsed<Address> parsed;
     constexpr uint8_t family = sizeof(Address) == 4 ? 4 : 6;
     if (input.layer->transport_protocol != (family == 4 ? 1 : 58) ||
         input.layer->address_state != packet::PacketAddressState::kAvailable)
-        return NpmIcmpParseErrorV1::kInvalidInput;
+        return NpmIcmpParseError::kInvalidInput;
     if constexpr (sizeof(Address) == 4) {
-        if (!input.layer->Get4()) return NpmIcmpParseErrorV1::kInvalidInput;
+        if (!input.layer->Get4()) return NpmIcmpParseError::kInvalidInput;
         parsed.src_ip = input.layer->Get4()->src;
         parsed.dst_ip = input.layer->Get4()->dst;
     } else {
-        if (!input.layer->Get6()) return NpmIcmpParseErrorV1::kInvalidInput;
+        if (!input.layer->Get6()) return NpmIcmpParseError::kInvalidInput;
         parsed.src_ip = input.layer->Get6()->src;
         parsed.dst_ip = input.layer->Get6()->dst;
     }
     if (FragmentedOuter(input, family) || input.body.size < sizeof(IcmpHeader)) {
         *output = std::move(parsed);
-        return NpmIcmpParseErrorV1::kNone;
+        return NpmIcmpParseError::kNone;
     }
     const auto* header = reinterpret_cast<const IcmpHeader*>(input.body.data);
     parsed.icmp_type = header->type;
@@ -124,14 +124,14 @@ NpmIcmpParseErrorV1 ParseNpmIcmpControlV1(const NpmInputEventV1& input, NpmIcmpF
     const bool request = (family == 4 && header->type == 8) || (family == 6 && header->type == 128);
     const bool reply = (family == 4 && header->type == 0) || (family == 6 && header->type == 129);
     if ((request || reply) && header->code == 0) {
-        parsed.kind = request ? NpmIcmpMessageKindV1::kEchoRequest : NpmIcmpMessageKindV1::kEchoReply;
+        parsed.kind = request ? NpmIcmpMessageKind::kEchoRequest : NpmIcmpMessageKind::kEchoReply;
         parsed.echo_id = ntohs(header->body.echo.id);
         parsed.echo_sequence = ntohs(header->body.echo.sequence);
     } else {
         const bool error = family == 4 ? (header->type == 3 || header->type == 11 || header->type == 12)
                                        : (header->type >= 1 && header->type <= 4);
         if (error) {
-            parsed.kind = NpmIcmpMessageKindV1::kError;
+            parsed.kind = NpmIcmpMessageKind::kError;
             if (family == 4 && header->type == 3 && header->code == 4) {
                 parsed.next_hop_mtu = ntohs(header->body.unreachable.mtu);
             } else if (family == 6 && header->type == 2) {
@@ -141,10 +141,10 @@ NpmIcmpParseErrorV1 ParseNpmIcmpControlV1(const NpmInputEventV1& input, NpmIcmpF
         }
     }
     *output = std::move(parsed);
-    return NpmIcmpParseErrorV1::kNone;
+    return NpmIcmpParseError::kNone;
 }
 
-template NpmIcmpParseErrorV1 ParseNpmIcmpControlV1(const NpmInputEventV1&, NpmIcmpParsed4*);
-template NpmIcmpParseErrorV1 ParseNpmIcmpControlV1(const NpmInputEventV1&, NpmIcmpParsed6*);
+template NpmIcmpParseError ParseNpmIcmpControl(const NpmInputEvent&, NpmIcmpParsed4*);
+template NpmIcmpParseError ParseNpmIcmpControl(const NpmInputEvent&, NpmIcmpParsed6*);
 
 }  // namespace flowsql::npm

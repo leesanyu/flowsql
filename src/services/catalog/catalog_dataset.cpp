@@ -77,8 +77,8 @@ int CatalogPlugin::RenameDatasetIdentity(const std::string& old_name, const std:
         return -1;
     }
 }
-int CatalogPlugin::Describe(const ChannelDatasetRequestV1& request, ChannelDatasetSnapshotV1* out,
-                            DataSemanticsErrorV1* error) {
+int CatalogPlugin::Describe(const ChannelDatasetRequest& request, ChannelDatasetSnapshot* out,
+                            DataSemanticsError* error) {
     using namespace dataset;
     if (!out) return Fail(error, "INVALID_REQUEST", "output is required");
     *out = {};
@@ -92,7 +92,7 @@ int CatalogPlugin::Describe(const ChannelDatasetRequestV1& request, ChannelDatas
     const auto name = dataset::Get(locator, "name");
     auto it = channels_.find(name);
     if (it == channels_.end()) return Fail(error, "NOT_FOUND", "dataframe does not exist");
-    auto* reader = dynamic_cast<IDataFrameMetadataV1*>(it->second.get());
+    auto* reader = dynamic_cast<IDataFrameMetadata*>(it->second.get());
     if (!reader) return Fail(error, "UNSUPPORTED_SOURCE", "channel has no metadata capability");
     auto meta = reader->DescribeMetadata();
     if (!meta.error.empty()) return Fail(error, "SOURCE_UNAVAILABLE", meta.error);

@@ -25,12 +25,12 @@ namespace database {
 // DatabaseChannel — 通用数据库通道实现
 // 持有 IDbDriver 弱引用和 Session 工厂，支持连接池复用
 class DatabaseChannel : public IDatabaseChannel,
-                        public IDatabasePreparedCommandV1,
-                        public IDatabaseArrowWriteV1,
-                        public IDatabaseSnapshotSourceV1,
-                        public IDatabasePublishedSourceV1,
-                        public IDatabaseAtomicTargetV1,
-                        public IDatabaseExplorationSourceV1 {
+                        public IDatabasePreparedCommand,
+                        public IDatabaseArrowWrite,
+                        public IDatabaseSnapshotSource,
+                        public IDatabasePublishedSource,
+                        public IDatabaseAtomicTarget,
+                        public IDatabaseExplorationSource {
  public:
     using SessionFactory = std::function<std::shared_ptr<IDbSession>()>;
 
@@ -66,19 +66,19 @@ class DatabaseChannel : public IDatabaseChannel,
 
     // IDatabaseChannel 通用接口
     int ExecuteSql(const char* sql) override;
-    int ExecutePrepared(const char* sql, const DatabaseParameterV1* parameters, size_t parameter_count) override;
-    int ExecutePreparedBatch(const char* sql, const DatabaseParameterV1* parameters, size_t parameters_per_execution,
+    int ExecutePrepared(const char* sql, const DatabaseParameter* parameters, size_t parameter_count) override;
+    int ExecutePreparedBatch(const char* sql, const DatabaseParameter* parameters, size_t parameters_per_execution,
                              size_t execution_count) override;
 
-    int CreateSnapshotSession(const DatabaseSnapshotOptionsV1& options,
-                              std::shared_ptr<IDatabaseSnapshotSessionV1>* output) override;
-    int CreateExplorationSession(const DatabaseSnapshotOptionsV1& options,
-                                 std::shared_ptr<IDatabaseExplorationSessionV1>* output) override;
-    int CreatePublishedProgressReader(const DatabaseSnapshotOptionsV1& options,
-                                      std::shared_ptr<IDatabasePublishedProgressReaderV1>* output) override;
+    int CreateSnapshotSession(const DatabaseSnapshotOptions& options,
+                              std::shared_ptr<IDatabaseSnapshotSession>* output) override;
+    int CreateExplorationSession(const DatabaseSnapshotOptions& options,
+                                 std::shared_ptr<IDatabaseExplorationSession>* output) override;
+    int CreatePublishedProgressReader(const DatabaseSnapshotOptions& options,
+                                      std::shared_ptr<IDatabasePublishedProgressReader>* output) override;
 
-    DatabaseAtomicStatusV1 AcquireAtomicSession(const DatabaseAtomicSessionOptionsV1& options,
-                                                std::shared_ptr<IDatabaseAtomicSessionV1>* output) override;
+    DatabaseAtomicStatus AcquireAtomicSession(const DatabaseAtomicSessionOptions& options,
+                                              std::shared_ptr<IDatabaseAtomicSession>* output) override;
 
  private:
     std::string type_;

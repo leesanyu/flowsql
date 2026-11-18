@@ -9,7 +9,7 @@
 
 namespace flowsql::catalog {
 namespace {
-bool Interrupted(const DataFrameSnapshotRequestV1* request, std::string* error) {
+bool Interrupted(const DataFrameSnapshotRequest* request, std::string* error) {
     if (!request) return false;
     if (request->cancelled && request->cancelled->load()) {
         *error = "CANCELLED";
@@ -77,7 +77,7 @@ int LazyDataFrameChannel::RenameFile(const std::string& path, const std::string&
     name_ = name;
     return 0;
 }
-std::shared_ptr<IDataFrameChannel> LazyDataFrameChannel::EnsureLoaded(const DataFrameSnapshotRequestV1* request,
+std::shared_ptr<IDataFrameChannel> LazyDataFrameChannel::EnsureLoaded(const DataFrameSnapshotRequest* request,
                                                                       std::string* error) {
     error->clear();
     std::unique_lock<std::mutex> lock(mutex_);
@@ -178,7 +178,7 @@ int LazyDataFrameChannel::Write(IDataFrame* frame) {
     changed_.notify_all();
     return 0;
 }
-int LazyDataFrameChannel::CaptureSnapshot(const DataFrameSnapshotRequestV1& request,
+int LazyDataFrameChannel::CaptureSnapshot(const DataFrameSnapshotRequest& request,
                                           std::shared_ptr<arrow::RecordBatch>* output, uint64_t* retained_bytes,
                                           std::string* error) {
     if (!output || !retained_bytes || !error) return -1;
@@ -186,12 +186,11 @@ int LazyDataFrameChannel::CaptureSnapshot(const DataFrameSnapshotRequestV1& requ
     *retained_bytes = 0;
     const auto data = EnsureLoaded(&request, error);
     if (!data) return -1;
-    return dynamic_cast<IDataFrameSnapshotReaderV1*>(data.get())
-        ->CaptureSnapshot(request, output, retained_bytes, error);
+    return dynamic_cast<IDataFrameSnapshotReader*>(data.get())->CaptureSnapshot(request, output, retained_bytes, error);
 }
-DataFrameMetadataV1 LazyDataFrameChannel::DescribeMetadata() {
+DataFrameMetadata LazyDataFrameChannel::DescribeMetadata() {
     std::lock_guard<std::mutex> lock(mutex_);
-    DataFrameMetadataV1 result;
+    DataFrameMetadata result;
     result.replacement_generation = replacement_generation_;
     if (!opened_ || retired_)
         result.error = "SOURCE_UNAVAILABLE";
@@ -200,7 +199,7 @@ DataFrameMetadataV1 LazyDataFrameChannel::DescribeMetadata() {
     else if (!data_)
         result.pending = true;
     else {
-        auto* reader = dynamic_cast<IDataFrameMetadataV1*>(data_.get());
+        auto* reader = dynamic_cast<IDataFrameMetadata*>(data_.get());
         if (reader)
             result.schema = reader->DescribeMetadata().schema;
         else

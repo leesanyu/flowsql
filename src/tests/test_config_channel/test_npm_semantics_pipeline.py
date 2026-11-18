@@ -430,7 +430,7 @@ def semantic(call, operation, payload, expected=0):
     key = operation.replace('/', '_') if operation.startswith('channels/') else operation
     if expected == 0:
         validate(key + 'Request', payload)
-    result = call('/semantics/v1/' + operation, payload, expected)
+    result = call('/semantics/' + operation, payload, expected)
     validate(key + 'Response' if expected == 0 else 'error', result)
     return result.get('data', result.get('error'))
 
@@ -455,7 +455,7 @@ def publish_labels(call, protocols=("dns",)):
                                                  max=definitions[name][1])]) for name in protocols]
     content = yaml.safe_dump(labels).encode()
     result = call('/channels/config/publish', dict(name='npm-labels', expected_current_revision=0, format='yaml',
-                  schema_id='flowsql.io/flow-labeling/v1alpha1', content_base64=base64.b64encode(content).decode()))
+                  schema_id='flowsql.io/flow-labeling', content_base64=base64.b64encode(content).decode()))
     return result['exact_reference']
 
 
@@ -533,7 +533,7 @@ def check_run(call, root, result):
                 all_ids.append({row['entity_instance_id'] for row in rows})
             assert all_ids[0] == all_ids[1] == all_ids[2]  # one event, three views
     # Read the actual object through the existing product query entry as well.
-    query = call('/scheduler/batch/execute', dict(sql='SELECT * FROM sqlite.example.npm_dns_transaction_ipv4_final_v1'))
+    query = call('/scheduler/batch/execute', dict(sql='SELECT * FROM sqlite.example.npm_dns_transaction_ipv4_final'))
     assert query['rows'] >= 8, query
     return context, descriptions
 

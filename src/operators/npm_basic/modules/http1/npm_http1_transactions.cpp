@@ -11,7 +11,7 @@
 namespace flowsql::npm {
 namespace {
 
-using Reason = NpmHttp1IncompleteReasonV1;
+using Reason = NpmHttp1IncompleteReason;
 
 size_t DirectionIndex(NpmPacketDirection direction) { return direction == NpmPacketDirection::kAToB ? 0 : 1; }
 
@@ -34,27 +34,27 @@ std::optional<int64_t> Latency(std::optional<int64_t> request_at_ns, std::option
     return static_cast<int64_t>(delta);
 }
 
-Reason FramingReason(NpmHttp1FramerErrorV1 error, bool response) {
-    if (error == NpmHttp1FramerErrorV1::kHeaderLimit) return Reason::kHeaderLimitExceeded;
-    if (error == NpmHttp1FramerErrorV1::kUnsupported) return Reason::kFramingUnsupported;
+Reason FramingReason(NpmHttp1FramerError error, bool response) {
+    if (error == NpmHttp1FramerError::kHeaderLimit) return Reason::kHeaderLimitExceeded;
+    if (error == NpmHttp1FramerError::kUnsupported) return Reason::kFramingUnsupported;
     return response ? Reason::kMalformedResponse : Reason::kFramingUnsupported;
 }
 
 }  // namespace
 
-const char* NpmHttp1OutcomeNameV1(NpmHttp1OutcomeV1 outcome) noexcept {
+const char* NpmHttp1OutcomeName(NpmHttp1Outcome outcome) noexcept {
     switch (outcome) {
-        case NpmHttp1OutcomeV1::kMatched:
+        case NpmHttp1Outcome::kMatched:
             return "matched";
-        case NpmHttp1OutcomeV1::kRequestOnly:
+        case NpmHttp1Outcome::kRequestOnly:
             return "request_only";
-        case NpmHttp1OutcomeV1::kResponseOnly:
+        case NpmHttp1Outcome::kResponseOnly:
             return "response_only";
     }
     return nullptr;
 }
 
-const char* NpmHttp1IncompleteReasonNameV1(NpmHttp1IncompleteReasonV1 reason) noexcept {
+const char* NpmHttp1IncompleteReasonName(NpmHttp1IncompleteReason reason) noexcept {
     switch (reason) {
         case Reason::kNone:
             return nullptr;
@@ -84,32 +84,32 @@ const char* NpmHttp1IncompleteReasonNameV1(NpmHttp1IncompleteReasonV1 reason) no
     return nullptr;
 }
 
-uint64_t NpmHttp1TransactionTrackerV1::NextId() noexcept {
+uint64_t NpmHttp1TransactionTracker::NextId() noexcept {
     if (next_id_ == 0) return 0;
     return next_id_++;
 }
 
-bool NpmHttp1TransactionTrackerV1::Reserve(uint64_t bytes) {
+bool NpmHttp1TransactionTracker::Reserve(uint64_t bytes) {
     return !budget_ || budget_->Reserve(NpmBudgetCategory::kModuleState, bytes) == NpmBudgetError::kNone;
 }
 
-void NpmHttp1TransactionTrackerV1::Release(uint64_t bytes) noexcept {
+void NpmHttp1TransactionTracker::Release(uint64_t bytes) noexcept {
     if (budget_ && bytes) budget_->Release(NpmBudgetCategory::kModuleState, bytes);
 }
 
-uint64_t NpmHttp1TransactionTrackerV1::SessionCharge() const noexcept { return 4096 + 4ULL * config_.max_header_bytes; }
+uint64_t NpmHttp1TransactionTracker::SessionCharge() const noexcept { return 4096 + 4ULL * config_.max_header_bytes; }
 
-uint64_t NpmHttp1TransactionTrackerV1::PendingCharge() const noexcept { return 1024 + 2ULL * config_.max_header_bytes; }
+uint64_t NpmHttp1TransactionTracker::PendingCharge() const noexcept { return 1024 + 2ULL * config_.max_header_bytes; }
 
-uint64_t NpmHttp1TransactionTrackerV1::EventCharge(size_t bytes) const noexcept {
+uint64_t NpmHttp1TransactionTracker::EventCharge(size_t bytes) const noexcept {
     // A minimum HTTP start line consumes far more than eight bytes; this also covers
     // the temporary vector, copied heads and result rows produced by one event.
     if (bytes > (std::numeric_limits<uint64_t>::max() - 4096) / 32) return 0;
     return 4096 + 32ULL * bytes;
 }
 
-NpmHttp1ResponseContextV1 NpmHttp1TransactionTrackerV1::ResponseContext(
-    const Session& session, const std::vector<NpmHttp1FramedMessageV1>& messages) const {
+NpmHttp1ResponseContext NpmHttp1TransactionTracker::ResponseContext(
+    const Session& session, const std::vector<NpmHttp1FramedMessage>& messages) const {
     size_t final_headers_in_batch = 0;
     for (const auto& message : messages) {
         if (message.headers_complete && message.head.is_response && message.head.status_code &&
@@ -129,17 +129,17 @@ NpmHttp1ResponseContextV1 NpmHttp1TransactionTrackerV1::ResponseContext(
     return {};
 }
 
-void NpmHttp1TransactionTrackerV1::Seal(uint64_t session_id, Session* session, Reason first_reason, Reason later_reason,
-                                        int64_t observed_at_ns, std::vector<NpmHttp1TransactionResultV1>* results) {
+void NpmHttp1TransactionTracker::Seal(uint64_t session_id, Session* session, Reason first_reason, Reason later_reason,
+                                      int64_t observed_at_ns, std::vector<NpmHttp1TransactionResult>* results) {
     if (session->sealed) return;
     bool first = true;
     while (!session->pending.empty()) {
         Pending pending = std::move(session->pending.front());
         session->pending.pop_front();
-        NpmHttp1TransactionResultV1 row;
+        NpmHttp1TransactionResult row;
         row.entity_instance_id = pending.entity_instance_id;
         row.session_id = session_id;
-        row.outcome = NpmHttp1OutcomeV1::kRequestOnly;
+        row.outcome = NpmHttp1Outcome::kRequestOnly;
         row.incomplete_reason = first ? first_reason : later_reason;
         row.observed_at_ns = observed_at_ns;
         row.request_direction = session->request_direction;
@@ -158,15 +158,15 @@ void NpmHttp1TransactionTrackerV1::Seal(uint64_t session_id, Session* session, R
     session->sealed = true;
 }
 
-int NpmHttp1TransactionTrackerV1::EmitReady(uint64_t session_id, Session* session, int64_t observed_at_ns,
-                                            std::vector<NpmHttp1TransactionResultV1>* results) {
+int NpmHttp1TransactionTracker::EmitReady(uint64_t session_id, Session* session, int64_t observed_at_ns,
+                                          std::vector<NpmHttp1TransactionResult>* results) {
     while (!session->pending.empty()) {
         Pending& pending = session->pending.front();
         if (!pending.request_body_complete || !pending.response || !pending.response_body_complete) break;
-        NpmHttp1TransactionResultV1 row;
+        NpmHttp1TransactionResult row;
         row.entity_instance_id = pending.entity_instance_id;
         row.session_id = session_id;
-        row.outcome = NpmHttp1OutcomeV1::kMatched;
+        row.outcome = NpmHttp1Outcome::kMatched;
         row.observed_at_ns = pending.response->complete_at_ns.value_or(observed_at_ns);
         row.request_direction = session->request_direction;
         row.response_direction = Opposite(*session->request_direction);
@@ -180,10 +180,10 @@ int NpmHttp1TransactionTrackerV1::EmitReady(uint64_t session_id, Session* sessio
         result_charges_ += PendingCharge();
     }
     if (session->orphan && session->orphan->body_complete) {
-        NpmHttp1TransactionResultV1 row;
+        NpmHttp1TransactionResult row;
         row.entity_instance_id = session->orphan->entity_instance_id;
         row.session_id = session_id;
-        row.outcome = NpmHttp1OutcomeV1::kResponseOnly;
+        row.outcome = NpmHttp1Outcome::kResponseOnly;
         row.incomplete_reason = Reason::kNoPendingRequest;
         row.observed_at_ns = session->orphan->response.complete_at_ns.value_or(observed_at_ns);
         row.response_direction = Opposite(*session->request_direction);
@@ -196,10 +196,10 @@ int NpmHttp1TransactionTrackerV1::EmitReady(uint64_t session_id, Session* sessio
     return 0;
 }
 
-int NpmHttp1TransactionTrackerV1::ProcessMessages(uint64_t session_id, Session* session, NpmPacketDirection direction,
-                                                  const std::vector<NpmHttp1FramedMessageV1>& messages,
-                                                  int64_t observed_at_ns,
-                                                  std::vector<NpmHttp1TransactionResultV1>* results) {
+int NpmHttp1TransactionTracker::ProcessMessages(uint64_t session_id, Session* session, NpmPacketDirection direction,
+                                                const std::vector<NpmHttp1FramedMessage>& messages,
+                                                int64_t observed_at_ns,
+                                                std::vector<NpmHttp1TransactionResult>* results) {
     for (const auto& message : messages) {
         if (session->sealed) break;
         if (message.headers_complete) {
@@ -253,7 +253,7 @@ int NpmHttp1TransactionTrackerV1::ProcessMessages(uint64_t session_id, Session* 
                 if (match) {
                     match->response_message_id = message.message_id;
                     match->response = message.head;
-                    match->response_body_complete = message.head.framing == NpmHttp1FramingV1::kCloseDelimited;
+                    match->response_body_complete = message.head.framing == NpmHttp1Framing::kCloseDelimited;
                 } else {
                     if (session->orphan) return EINVAL;
                     if (!Reserve(PendingCharge())) return ENOSPC;
@@ -266,7 +266,7 @@ int NpmHttp1TransactionTrackerV1::ProcessMessages(uint64_t session_id, Session* 
                     try {
                         orphan.message_id = message.message_id;
                         orphan.response = message.head;
-                        orphan.body_complete = message.head.framing == NpmHttp1FramingV1::kCloseDelimited;
+                        orphan.body_complete = message.head.framing == NpmHttp1Framing::kCloseDelimited;
                         session->orphan = std::move(orphan);
                     } catch (...) {
                         Release(PendingCharge());
@@ -307,15 +307,14 @@ int NpmHttp1TransactionTrackerV1::ProcessMessages(uint64_t session_id, Session* 
     return 0;
 }
 
-int NpmHttp1TransactionTrackerV1::OnStreamEvent(uint64_t session_id, NpmPacketDirection direction,
-                                                NpmTcpStreamOriginV1 origin, const NpmTcpStreamEventV1& event,
-                                                int64_t observed_at_ns,
-                                                std::vector<NpmHttp1TransactionResultV1>* results) {
+int NpmHttp1TransactionTracker::OnStreamEvent(uint64_t session_id, NpmPacketDirection direction,
+                                              NpmTcpStreamOrigin origin, const NpmTcpStreamEvent& event,
+                                              int64_t observed_at_ns, std::vector<NpmHttp1TransactionResult>* results) {
     if (aborted_ || !results || session_id == 0 ||
         (direction != NpmPacketDirection::kAToB && direction != NpmPacketDirection::kBToA))
         return EINVAL;
     try {
-        const uint64_t event_charge = EventCharge(event.kind == NpmTcpStreamEventKindV1::kData ? event.bytes.size : 0);
+        const uint64_t event_charge = EventCharge(event.kind == NpmTcpStreamEventKind::kData ? event.bytes.size : 0);
         if (!event_charge || !Reserve(event_charge)) return ENOSPC;
         struct EventRelease {
             const std::shared_ptr<INpmTaskBudget>& budget;
@@ -337,31 +336,31 @@ int NpmHttp1TransactionTrackerV1::OnStreamEvent(uint64_t session_id, NpmPacketDi
         }
         Session& session = found->second;
         if (session.sealed) return 0;
-        std::vector<NpmHttp1FramedMessageV1> messages;
+        std::vector<NpmHttp1FramedMessage> messages;
         auto response_context = [&] { return ResponseContext(session, messages); };
         const auto error =
             session.framers[DirectionIndex(direction)].Consume(event, origin, &messages, response_context);
         const int processed = ProcessMessages(session_id, &session, direction, messages, observed_at_ns, results);
         if (processed) return processed;
-        if (error == NpmHttp1FramerErrorV1::kAllocationFailed) return ENOMEM;
-        if (error == NpmHttp1FramerErrorV1::kInvalidOutput) return EINVAL;
+        if (error == NpmHttp1FramerError::kAllocationFailed) return ENOMEM;
+        if (error == NpmHttp1FramerError::kInvalidOutput) return EINVAL;
         if (session.sealed) return 0;
-        if (event.kind == NpmTcpStreamEventKindV1::kGap) {
+        if (event.kind == NpmTcpStreamEventKind::kGap) {
             const bool response = session.request_direction && direction != *session.request_direction;
             const Reason reason = event.includes_capture_truncation ? Reason::kCaptureTruncation
                                   : response                        ? Reason::kResponsePathGap
                                                                     : Reason::kRequestPathGap;
             Seal(session_id, &session, reason, reason, observed_at_ns, results);
-        } else if (error != NpmHttp1FramerErrorV1::kNone) {
+        } else if (error != NpmHttp1FramerError::kNone) {
             const bool response = session.request_direction && direction != *session.request_direction;
             const Reason reason =
-                event.kind == NpmTcpStreamEventKindV1::kEnd && error == NpmHttp1FramerErrorV1::kIncomplete && response
+                event.kind == NpmTcpStreamEventKind::kEnd && error == NpmHttp1FramerError::kIncomplete && response
                     ? Reason::kResponseStreamEnd
                     : FramingReason(error, response);
             Seal(session_id, &session, reason, reason, observed_at_ns, results);
-        } else if (event.kind == NpmTcpStreamEventKindV1::kEnd) {
+        } else if (event.kind == NpmTcpStreamEventKind::kEnd) {
             const bool response = session.request_direction && direction != *session.request_direction;
-            if (event.end_reason != NpmTcpStreamEndReasonV1::kFin) {
+            if (event.end_reason != NpmTcpStreamEndReason::kFin) {
                 Seal(session_id, &session, Reason::kSessionEnd, Reason::kSessionEnd, observed_at_ns, results);
             } else if (response) {
                 Seal(session_id, &session, Reason::kResponseStreamEnd, Reason::kResponseStreamEnd, observed_at_ns,
@@ -374,7 +373,7 @@ int NpmHttp1TransactionTrackerV1::OnStreamEvent(uint64_t session_id, NpmPacketDi
     }
 }
 
-std::optional<int64_t> NpmHttp1TransactionTrackerV1::NextEventDeadlineNs() const noexcept {
+std::optional<int64_t> NpmHttp1TransactionTracker::NextEventDeadlineNs() const noexcept {
     std::optional<int64_t> next;
     for (const auto& entry : sessions_) {
         const Session& session = entry.second;
@@ -386,8 +385,8 @@ std::optional<int64_t> NpmHttp1TransactionTrackerV1::NextEventDeadlineNs() const
     return next;
 }
 
-int NpmHttp1TransactionTrackerV1::OnCaptureWatermark(std::optional<int64_t> watermark_ns,
-                                                     std::vector<NpmHttp1TransactionResultV1>* results) {
+int NpmHttp1TransactionTracker::OnCaptureWatermark(std::optional<int64_t> watermark_ns,
+                                                   std::vector<NpmHttp1TransactionResult>* results) {
     if (aborted_ || !results) return EINVAL;
     if (!watermark_ns || (watermark_ns_ && *watermark_ns <= *watermark_ns_)) return 0;
     watermark_ns_ = watermark_ns;
@@ -407,8 +406,8 @@ int NpmHttp1TransactionTrackerV1::OnCaptureWatermark(std::optional<int64_t> wate
     }
 }
 
-int NpmHttp1TransactionTrackerV1::OnSessionEnd(uint64_t session_id, NpmSessionEndReason, int64_t observed_at_ns,
-                                               std::vector<NpmHttp1TransactionResultV1>* results) {
+int NpmHttp1TransactionTracker::OnSessionEnd(uint64_t session_id, NpmSessionEndReason, int64_t observed_at_ns,
+                                             std::vector<NpmHttp1TransactionResult>* results) {
     if (aborted_ || !results || session_id == 0) return EINVAL;
     const auto found = sessions_.find(session_id);
     if (found == sessions_.end()) return 0;
@@ -422,7 +421,7 @@ int NpmHttp1TransactionTrackerV1::OnSessionEnd(uint64_t session_id, NpmSessionEn
     }
 }
 
-void NpmHttp1TransactionTrackerV1::Abort() noexcept {
+void NpmHttp1TransactionTracker::Abort() noexcept {
     aborted_ = true;
     for (const auto& entry : sessions_) Release(entry.second.reserved_bytes);
     sessions_.clear();
@@ -430,7 +429,7 @@ void NpmHttp1TransactionTrackerV1::Abort() noexcept {
     result_charges_ = 0;
 }
 
-void NpmHttp1TransactionTrackerV1::ReleaseResults(std::vector<NpmHttp1TransactionResultV1>* results) noexcept {
+void NpmHttp1TransactionTracker::ReleaseResults(std::vector<NpmHttp1TransactionResult>* results) noexcept {
     if (results) results->clear();
     Release(result_charges_);
     result_charges_ = 0;

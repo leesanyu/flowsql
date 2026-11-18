@@ -819,6 +819,10 @@ void TestWebPcapMultipartUpload() {
         res.status = 200;
         res.set_content(R"({"ok":true})", "application/json");
     });
+    for (const char* route : {"/channels/dataframe/query", "/operators/list"}) {
+        scheduler.Post(
+            route, [](const httplib::Request&, httplib::Response& res) { res.set_content("[]", "application/json"); });
+    }
     const int scheduler_port = scheduler.bind_to_any_port("127.0.0.1");
     assert(scheduler_port > 0);
     std::thread scheduler_thread([&]() { assert(scheduler.listen_after_bind()); });
@@ -842,6 +846,22 @@ void TestWebPcapMultipartUpload() {
     WaitForHttpServer(web_port);
 
     httplib::Client client("127.0.0.1", web_port);
+    for (const char* path : {"/api/channels", "/api/operators"}) {
+        const auto result = client.Get(path);
+        assert(result && result->status == 404);
+    }
+    bool channels_list = false, operators_list = false;
+    web.EnumRoutes([&](const flowsql::RouteItem& route) {
+        assert(route.uri != "/api/channels" && route.uri != "/api/operators");
+        if (route.method == "GET" && route.uri == "/api/channels/list") channels_list = true;
+        if (route.method == "GET" && route.uri == "/api/operators/list") operators_list = true;
+    });
+    assert(channels_list && operators_list);
+    const auto channels = client.Get("/api/channels/list");
+    assert(channels && channels->status == 200 && channels->body == "[]");
+    const auto operators = client.Get("/api/operators/list");
+    assert(operators && operators->status == 200 && operators->body == "[]");
+
     const httplib::MultipartFormDataItems valid_fields = {
         {"name", "capture_01", "", ""},
         {"format", "pcap", "", ""},

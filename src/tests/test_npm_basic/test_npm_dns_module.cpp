@@ -37,7 +37,7 @@ class Budget final : public npm::INpmTaskBudget {
     uint64_t used = 0;
 };
 
-class Emitter final : public npm::INpmResultEmitterV1 {
+class Emitter final : public npm::INpmResultEmitter {
  public:
     int Emit(std::string_view entity, const arrow::RecordBatch& batch) override {
         assert(entity == (family == flowsql::packet::AddressFamily::kIPv4 ? "dns_transaction_ipv4"
@@ -65,12 +65,12 @@ class Emitter final : public npm::INpmResultEmitterV1 {
     std::vector<std::string> reasons;
 };
 
-class Cursor final : public npm::INpmTcpStreamCursorV1 {
+class Cursor final : public npm::INpmTcpStreamCursor {
  public:
     explicit Cursor(const Bytes& bytes, int64_t time) : bytes_(bytes), time_(time) {}
-    bool Peek(npm::NpmTcpStreamEventV1* event) const override {
+    bool Peek(npm::NpmTcpStreamEvent* event) const override {
         if (consumed_) return false;
-        event->kind = npm::NpmTcpStreamEventKindV1::kData;
+        event->kind = npm::NpmTcpStreamEventKind::kData;
         event->bytes = {bytes_.data(), bytes_.size()};
         event->captured_at_ns = time_;
         return true;
@@ -146,14 +146,14 @@ KeyType Key(uint8_t transport) {
     return key;
 }
 
-int Send(npm::NpmDnsProtocolModuleV1* module, const npm::NpmSessionView& session, const Bytes& bytes,
+int Send(npm::NpmDnsProtocolModule* module, const npm::NpmSessionView& session, const Bytes& bytes,
          npm::NpmPacketDirection direction, int64_t time, Emitter* emitter) {
     npm::NpmPacketView packet;
     packet.direction = direction;
     packet.payload = {bytes.data(), bytes.size()};
     packet.packet.meta.timestamp_ns = time;
-    npm::NpmInputEventV1 input;
-    input.kind = npm::NpmInputKindV1::kUdpDatagram;
+    npm::NpmInputEvent input;
+    input.kind = npm::NpmInputKind::kUdpDatagram;
     input.session = &session;
     input.transport = &packet;
     input.packet = packet.packet;
@@ -164,7 +164,7 @@ int Send(npm::NpmDnsProtocolModuleV1* module, const npm::NpmSessionView& session
 template <typename KeyType>
 void TestUdpTimeEndAndFailure() {
     auto budget = std::make_shared<Budget>();
-    npm::NpmDnsProtocolModuleV1 module({{1001}, 1'000'000, 2}, budget);
+    npm::NpmDnsProtocolModule module({{1001}, 1'000'000, 2}, budget);
     auto key = Key<KeyType>(17);
     auto session = Session(&key, 7);
     Emitter emitter;
@@ -185,7 +185,7 @@ void TestUdpTimeEndAndFailure() {
     assert(emitter.reasons.back() == "session_end");
     assert(module.Finish(500, emitter) == 0 && budget->used == 0);
 
-    npm::NpmDnsProtocolModuleV1 failing({{1001}, 1'000'000, 2}, budget);
+    npm::NpmDnsProtocolModule failing({{1001}, 1'000'000, 2}, budget);
     assert(Send(&failing, session, Message<KeyType>(4), npm::NpmPacketDirection::kAToB, 600, &emitter) == 0);
     emitter.error = EIO;
     assert(Send(&failing, session, Message<KeyType>(4, true), npm::NpmPacketDirection::kBToA, 700, &emitter) == EIO);
@@ -196,15 +196,15 @@ void TestUdpTimeEndAndFailure() {
 template <typename KeyType>
 void TestTcpStreamAndBudget() {
     auto budget = std::make_shared<Budget>();
-    npm::NpmDnsProtocolModuleV1 module({{1001}, 1'000'000, 2}, budget);
+    npm::NpmDnsProtocolModule module({{1001}, 1'000'000, 2}, budget);
     auto key = Key<KeyType>(6);
     auto session = Session(&key, 8);
     Emitter emitter;
     emitter.family =
         sizeof(key.a_ip) == 4 ? flowsql::packet::AddressFamily::kIPv4 : flowsql::packet::AddressFamily::kIPv6;
-    npm::NpmTcpStreamContextV1 context;
+    npm::NpmTcpStreamContext context;
     context.session = &session;
-    context.origin = npm::NpmTcpStreamOriginV1::kSyn;
+    context.origin = npm::NpmTcpStreamOrigin::kSyn;
     context.direction = npm::NpmPacketDirection::kAToB;
     context.observed_at_ns = 100;
     const auto query = Message<KeyType>(5);
@@ -225,13 +225,13 @@ void TestTcpStreamAndBudget() {
     assert(module.Finish(200, emitter) == 0 && budget->used == 0);
 
     budget->limit = 1;
-    npm::NpmDnsProtocolModuleV1 rejected({{1001}, 1'000'000, 2}, budget);
+    npm::NpmDnsProtocolModule rejected({{1001}, 1'000'000, 2}, budget);
     assert(Send(&rejected, session, Message<KeyType>(6), npm::NpmPacketDirection::kAToB, 300, &emitter) == ENOSPC);
     rejected.Abort();
     assert(budget->used == 0);
 
     budget->limit = 4608;
-    npm::NpmDnsProtocolModuleV1 output_rejected({{1001}, 1'000'000, 2}, budget);
+    npm::NpmDnsProtocolModule output_rejected({{1001}, 1'000'000, 2}, budget);
     auto udp_key = Key<KeyType>(17);
     auto udp_session = Session(&udp_key, 9);
     assert(Send(&output_rejected, udp_session, Message<KeyType>(7), npm::NpmPacketDirection::kAToB, 400, &emitter) ==
