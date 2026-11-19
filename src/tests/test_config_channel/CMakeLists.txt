@@ -69,6 +69,11 @@ add_test(NAME test_data_semantics_api COMMAND ${Python3_EXECUTABLE}
 set_tests_properties(test_data_semantics_api PROPERTIES TIMEOUT 180 RESOURCE_LOCK semantics_http)
 
 find_program(FLOWSQL_SEMANTICS_NODE NAMES node nodejs REQUIRED)
+add_test(NAME test_metadata_reading_frontend COMMAND ${FLOWSQL_SEMANTICS_NODE} --test
+    ${CMAKE_SOURCE_DIR}/frontend/src/utils/dataSemantics.test.js
+    ${CMAKE_SOURCE_DIR}/frontend/src/utils/operatorDescriptionNotes.test.js
+    ${CMAKE_SOURCE_DIR}/frontend/src/utils/channelDescriptionTime.test.js)
+set_tests_properties(test_metadata_reading_frontend PROPERTIES TIMEOUT 30)
 add_test(NAME test_data_semantics_browser COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_data_semantics_browser.py $<TARGET_FILE:test_data_semantics_host> ${FLOWSQL_SEMANTICS_NODE})
 set_tests_properties(test_data_semantics_browser PROPERTIES TIMEOUT 180 RESOURCE_LOCK "semantics_http;visualization_browser")
@@ -278,6 +283,7 @@ add_test(NAME test_metadata_description_client COMMAND ${Python3_EXECUTABLE}
 set_tests_properties(test_metadata_description_client PROPERTIES TIMEOUT 240 RESOURCE_LOCK "semantics_http;visualization_browser")
 
 add_executable(test_npm_data_contract test_npm_data_contract.cpp
+    ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_registry.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/operator_data_contract_model.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/data_semantics_model.cpp
     ${CMAKE_SOURCE_DIR}/channels/config/config_content_validator.cpp)
@@ -294,12 +300,20 @@ foreach(npm_contract_source IN LISTS npm_contract_sources)
     target_sources(test_npm_data_contract PRIVATE "${npm_contract_source}")
 endforeach()
 target_include_directories(test_npm_data_contract PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/channels/config)
-add_thirddepen(test_npm_data_contract rapidjson yaml-cpp arrow)
+add_thirddepen(test_npm_data_contract rapidjson yaml-cpp arrow sqlite)
 target_link_libraries(test_npm_data_contract flowsql_npm_basic OpenSSL::Crypto)
 target_compile_options(test_npm_data_contract PRIVATE -UNDEBUG)
 set_target_properties(test_npm_data_contract PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 add_test(NAME test_npm_data_contract COMMAND $<TARGET_FILE:test_npm_data_contract>)
 set_tests_properties(test_npm_data_contract PROPERTIES TIMEOUT 30)
+
+# Explicit opt-in: the frozen baseline directory is supplied at runtime, never captured by CMake.
+add_custom_target(benchmark_semantics_reads
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/benchmark_semantics_reads.py
+        --candidate ${CMAKE_BINARY_DIR}/output
+        --destination ${CMAKE_SOURCE_DIR}/../evidence/data-semantics-read-optimization/performance
+    DEPENDS test_operator_contract_host test_npm_data_contract benchmark_npm_throughput
+    USES_TERMINAL)
 
 add_executable(test_npm_result_semantics test_npm_result_semantics.cpp
     ${CMAKE_SOURCE_DIR}/framework/core/packet_codec.cpp

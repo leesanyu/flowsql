@@ -16,6 +16,7 @@ struct OperatorContractSnapshot {
     std::string exact_reference;
     std::string sha256;
     std::shared_ptr<const std::string> document_json;
+    std::shared_ptr<const rapidjson::Document> document;
 };
 
 // Methods are thread safe, return zero on success, and clear outputs on failure.

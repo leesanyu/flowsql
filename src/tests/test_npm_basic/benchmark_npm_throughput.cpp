@@ -27,6 +27,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -517,6 +518,13 @@ struct BenchmarkCapability {
     }
 };
 
+std::string BenchmarkPlugin(const char* configured) {
+    const char* root = std::getenv("FLOWSQL_BENCH_PLUGIN_ROOT");
+    return root
+               ? std::string(root) + '/' + std::string(configured).substr(std::string(configured).find_last_of('/') + 1)
+               : configured;
+}
+
 void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader, flowsql::IProtocol* protocol,
                   std::string_view family, std::string_view pattern, int namespace_length, int cardinality,
                   int64_t time_step, std::string_view mode, int source_count,
@@ -524,10 +532,13 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
     // The source and production plugins belong to the frozen workspace. Only this harness is added.
     double decode_ms = 0, process_ms = 0, validation_ms = 0, release_ms = 0, input_release_ms = 0, flush_ms = 0;
     uint64_t digest = 14695981039346656037ULL, output_rows = 0, input_capacity = 0, heap_peak = 0;
+    const bool realtime = std::getenv("FLOWSQL_BENCH_REALTIME") != nullptr;
+    const bool common_domain = realtime || std::getenv("FLOWSQL_BENCH_COMMON_DOMAIN") != nullptr;
     uint64_t wire_digest = 14695981039346656037ULL;
     BenchmarkConfigRegistry registry;
     BenchmarkQuerier querier(loader, &registry);
-    flowsql::test::ScopedSharedLibrary library(FLOWSQL_NPM_BASIC_PLUGIN_PATH);
+    const auto plugin_path = BenchmarkPlugin(FLOWSQL_NPM_BASIC_PLUGIN_PATH);
+    flowsql::test::ScopedSharedLibrary library(plugin_path.c_str());
     Require(static_cast<bool>(library), "npm.basic library loading failed");
     const auto create = reinterpret_cast<flowsql::CppOperatorPluginCreateCapabilityFn>(
         library.Symbol(flowsql::kCppOperatorPluginCreateCapabilitySymbol));
@@ -542,7 +553,7 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
     std::string domains;
     for (int i = 0; i < source_count; ++i) {
         if (i) domains += ';';
-        domains += std::to_string(i) + ':' + std::to_string(i + 7);
+        domains += std::to_string(i) + ':' + std::to_string(common_domain ? 7 : i + 7);
     }
     const bool protocol_pattern = pattern == "dns" || pattern == "http1" || pattern == "tls" || pattern == "icmp";
     const std::string entity_base = !protocol_pattern    ? "basic"
@@ -571,6 +582,26 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
     config.with_params_json = params.c_str();
     config.pushed_filter_plan_json = R"({"version":1,"root":null})";
     Require(capability.provider->CreateTask(config, &capability.task) == 0 && capability.task, "CreateTask failed");
+    auto* capture = dynamic_cast<flowsql::IBlockTransformCaptureFactTask*>(capability.task);
+    auto* clock = dynamic_cast<flowsql::IBlockTransformTimeDrivenTask*>(capability.task);
+    if (realtime) {
+        Require(capture && clock, "realtime interfaces missing");
+        flowsql::CaptureSourceSet sources;
+        sources.limits.max_packets_per_batch = batch_rows;
+        sources.limits.max_bytes_per_batch = 64 * 1024 * 1024;
+        sources.limits.max_wait_ms = 10;
+        sources.limits.max_outstanding_batches = 1;
+        for (int i = 0; i < source_count; ++i) {
+            flowsql::CaptureQueueIdentity identity;
+            identity.source_name = "controlled.capture";
+            identity.source_id = i;
+            identity.observation_domain_id = 7;
+            identity.generation = 1;
+            identity.link_type = 1;
+            sources.inputs.push_back(identity);
+        }
+        Require(capture->BindCaptureSources(sources) == 0, "controlled capture binding failed");
+    }
     flowsql::IBlockTransformManagedSinkTask* managed_task = nullptr;
     std::string managed_target;
     if (managed_channel) {
@@ -589,10 +620,36 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
     const int open_rc = capability.task->Open(input->schema(), &schema);
     Require(open_rc == 0, "Open failed: " + capability.task->LastError());
     std::vector<flowsql::BlockTransformOutput> outputs;
+    const auto drive = [&](int64_t tick, uint64_t sequence, int64_t capture_time) {
+        std::vector<flowsql::CaptureProgress> facts;
+        for (int i = 0; i < source_count; ++i) {
+            flowsql::CaptureProgress fact;
+            fact.source_id = i;
+            fact.generation = 1;
+            fact.fact_sequence = sequence;
+            fact.capture_time_ns = capture_time - (sequence == 1 ? 0 : (batch_rows - 1 - i) % source_count * time_step);
+            fact.packet_observed = true;
+            fact.backlog = flowsql::CaptureBacklog::kEmpty;
+            facts.push_back(fact);
+        }
+        Require(capture->AcceptCaptureFacts(facts) == 0, "capture progress failed");
+        flowsql::BlockTransformTimeEvent event{};
+        event.struct_size = flowsql::kBlockTransformTimeEventSize;
+        event.contract_version = flowsql::kBlockTransformTimeDriveVersion;
+        event.monotonic_now_ns = tick;
+        event.wall_now_ns = 1000000000LL + tick;
+        std::vector<flowsql::BlockTransformOutput> timed;
+        Require(clock->OnTime(event, &timed) == 0, "controlled realtime delivery failed");
+        outputs.insert(outputs.end(), std::make_move_iterator(timed.begin()), std::make_move_iterator(timed.end()));
+    };
+    std::vector<double> block_samples, periodic_samples;
+    const auto first_start = std::chrono::steady_clock::now();
     // Warm-up belongs to the same task. ACK cardinality is established by this batch.
     Require(capability.task->ProcessBlock(input, 1000, &outputs) ==
                 static_cast<int>(flowsql::BlockTransformStatus::kContinue),
             "warm-up failed");
+    if (realtime) drive(1, 1, 1000000000LL);
+    double first_packet_ms = outputs.empty() ? -1 : Milliseconds(first_start);
     output_rows += DigestOutputs(outputs, schema, &digest);
     outputs.clear();
     if (auto* probe = dynamic_cast<DatabaseCostProbe*>(managed_channel)) probe->BeginMeasurement();
@@ -607,7 +664,14 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
         input_capacity = std::max(input_capacity, BufferBytes(*batch));
         started = std::chrono::steady_clock::now();
         const int rc = capability.task->ProcessBlock(batch, 1000, &outputs);
-        process_ms += Milliseconds(started);
+        if (realtime)
+            drive(base + (batch_rows - 1LL) * time_step - 1000000000LL + 1, i + 2,
+                  base + (batch_rows - 1LL) * time_step);
+        const auto block_ms = Milliseconds(started);
+        if (first_packet_ms < 0 && !outputs.empty()) first_packet_ms = Milliseconds(first_start);
+        block_samples.push_back(block_ms);
+        if (periodic && !outputs.empty()) periodic_samples.push_back(block_ms);
+        process_ms += block_ms;
         Require(rc == static_cast<int>(flowsql::BlockTransformStatus::kContinue),
                 "ProcessBlock failed: " + capability.task->LastError());
         started = std::chrono::steady_clock::now();
@@ -624,6 +688,7 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
     }
     auto started = std::chrono::steady_clock::now();
     Require(capability.task->Flush(&outputs) == 0, "Flush failed: " + capability.task->LastError());
+    if (first_packet_ms < 0 && !outputs.empty()) first_packet_ms = Milliseconds(first_start);
     flush_ms = Milliseconds(started);
     const auto final_heap = mallinfo2();
     heap_peak = std::max(heap_peak, static_cast<uint64_t>(final_heap.uordblks + final_heap.hblkhd));
@@ -661,6 +726,14 @@ void RunBenchmark(int batch_rows, int iterations, flowsql::PluginLoader* loader,
               << packets * 1000 / historical << ',' << packets * 1000 / end_to_end << ',' << output_rows << ','
               << digest << ',' << cpu(after) - cpu(before) << ',' << heap_peak << ',' << after.ru_maxrss * 1024 << ','
               << input_capacity << ',' << wire_digest << ',' << input_release_ms << '\n';
+    const auto p95 = [](std::vector<double> samples) {
+        if (samples.empty()) return 0.0;
+        std::sort(samples.begin(), samples.end());
+        return samples[(samples.size() * 95 + 99) / 100 - 1];
+    };
+    std::cout << "latency,{\"realtime\":" << (realtime ? "true" : "false") << ",\"first_packet_ms\":" << first_packet_ms
+              << ",\"block_p95_ms\":" << p95(block_samples) << ",\"periodic_p95_ms\":" << p95(periodic_samples)
+              << ",\"periodic_samples\":" << periodic_samples.size() << "}\n";
     if (managed_task) {
         const auto result_json = managed_task->ManagedSinkResultJson();
         std::cout << "managed_result," << result_json << '\n';
@@ -800,12 +873,16 @@ int main(int argc, char* argv[]) {
             return 0;
         }
         const std::string npi_option = std::string("{\"ldfile\":\"") + FLOWSQL_NPI_PROTOCOLS_PATH + "\"}";
-        std::vector<const char*> libraries{FLOWSQL_NPI_PLUGIN_PATH}, options{npi_option.c_str()};
+        const auto npi_path = BenchmarkPlugin(FLOWSQL_NPI_PLUGIN_PATH);
+#ifdef FLOWSQL_FLOW_LABELING_PLUGIN_PATH
+        const auto labeling_path = BenchmarkPlugin(FLOWSQL_FLOW_LABELING_PLUGIN_PATH);
+#endif
+        std::vector<const char*> libraries{npi_path.c_str()}, options{npi_option.c_str()};
         const bool labeling = (pattern == "dns" || pattern == "http1" || pattern == "tls") || mode == "labels-zero" ||
                               mode == "labels-dense";
         if (labeling) {
 #ifdef FLOWSQL_FLOW_LABELING_PLUGIN_PATH
-            libraries.push_back(FLOWSQL_FLOW_LABELING_PLUGIN_PATH);
+            libraries.push_back(labeling_path.c_str());
             options.push_back(nullptr);
 #else
             throw std::runtime_error("frozen label/protocol workload requires the real flow-labeling plugin");

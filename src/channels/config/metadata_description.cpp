@@ -7,7 +7,7 @@
 #include <common/channel_dataset.hpp>
 #include <limits>
 #include <set>
-#include "data_semantics_api_schema.h"
+#include "compiled_semantics_schema.h"
 #include "metadata_description_time.h"
 #include "operator_usage.h"
 
@@ -35,11 +35,7 @@ int Error(const DataSemanticsError& e, std::string* response) {
 }
 int Parse(const char* text, const std::string& key, Json* req, DataSemanticsError* e) {
     if (ParseSemanticsJson(text ? text : "", req, e)) return -1;
-    Json s;
-    s.Parse(kSemanticsApiSchema);
-    Set(s, "$ref", "#/%24defs/" + key, s.GetAllocator());
-    rapidjson::SchemaDocument schema(s);
-    rapidjson::SchemaValidator validator(schema);
+    rapidjson::SchemaValidator validator(CompiledSemanticsApiSchema(key));
     if (req->Accept(validator)) return 0;
     return Fail(e, "INVALID_DOCUMENT", "payload does not match " + key);
 }
@@ -292,28 +288,38 @@ int MetadataDescriptionService::Describe(const char* text, std::string* response
         if (!c.contract_ref.empty()) Set(basis, "contract_ref", c.contract_ref, basis.GetAllocator());
         if (c.contract_state != "missing" && c.contract_state != "declared")
             return Error({"SOURCE_UNAVAILABLE", "declared contract unavailable", ""}, response);
+        DataSemanticsSnapshot definition;
         if (c.contract_state == "declared") {
-            Json r(rapidjson::kObjectType);
-            Set(r, "exact_reference", c.contract_ref, r.GetAllocator());
-            std::string resolved;
-            const int rc = registry_.Control("resolve", Encode(r), resolved);
-            if (rc) {
-                *response = resolved;
-                return rc;
-            }
-            Json result;
-            result.Parse(resolved.c_str());
+            if (registry_.Resolve(c.contract_ref.c_str(), &definition, &e)) return Error(e, response);
             Set(contract, "state", "declared", a);
-            Set(contract, "document", Copy(result["data"]["document"], a), a);
-            context.CopyFrom(result["data"], a);
-            context.RemoveMember("document");
-            Set(description, "origin", "component_author", a);
-            Value author(rapidjson::kObjectType);
-            for (const char* key : {"title", "operator", "limitations"})
-                if (contract["document"].HasMember(key))
-                    author.AddMember(Value(key, a), Copy(contract["document"][key], a), a);
-            Set(description, "document", std::move(author), a);
-            Set(description, "state", "present", a);
+            if (Get(req, "view", "usage") == "usage") {
+                // Keep exact dependency failures visible without materializing or reparsing the full contract.
+                for (const auto& reference : *definition.references) {
+                    DataSemanticsSnapshot dependency;
+                    if (registry_.Resolve(reference.c_str(), &dependency, &e)) return Error(e, response);
+                }
+            } else {
+                Json r(rapidjson::kObjectType);
+                Set(r, "exact_reference", c.contract_ref, r.GetAllocator());
+                std::string resolved;
+                const int rc = registry_.Control("resolve", Encode(r), resolved);
+                if (rc) {
+                    *response = resolved;
+                    return rc;
+                }
+                Json result;
+                result.Parse(resolved.c_str());
+                Set(contract, "document", Copy(result["data"]["document"], a), a);
+                context.CopyFrom(result["data"], a);
+                context.RemoveMember("document");
+                Set(description, "origin", "component_author", a);
+                Value author(rapidjson::kObjectType);
+                for (const char* key : {"title", "operator", "limitations"})
+                    if (contract["document"].HasMember(key))
+                        author.AddMember(Value(key, a), Copy(contract["document"][key], a), a);
+                Set(description, "document", std::move(author), a);
+                Set(description, "state", "present", a);
+            }
         }
         Json notes;
         std::string ref;
@@ -333,7 +339,9 @@ int MetadataDescriptionService::Describe(const char* text, std::string* response
             return Error({"SOURCE_CHANGED", "component changed while describing", ""}, response);
         if (Get(req, "view", "usage") == "usage") {
             if (!remaining()) return Error({"SOURCE_TIMEOUT", "metadata deadline exceeded", ""}, response);
-            auto usage = operator_usage::Build(req["target"], basis, contract, notes, context);
+            const Value& document =
+                definition.document ? static_cast<const Value&>(*definition.document) : contract["document"];
+            auto usage = operator_usage::Build(req["target"], basis, document, c.contract_state, notes, context);
             const auto rc = Finish(usage, response);
             if (!remaining()) return Error({"SOURCE_TIMEOUT", "metadata deadline exceeded", ""}, response);
             return rc;

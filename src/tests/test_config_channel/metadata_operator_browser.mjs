@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
 import { writeFile } from 'node:fs/promises'
+import { json, parseJson } from '../../frontend/src/utils/dataSemantics.js'
+import { downloads } from './semantics_browser_download.mjs'
 import { openBrowser } from '../test_visualization/browser_support.mjs'
 const [base, evidence, replacement, broken, multi] = process.argv.slice(2)
 const b = await openBrowser(base), { evaluate: ev, wait, send, pause } = b
+const download = downloads(b, evidence)
 const body = () => ev('document.body.innerText')
 const text = value => wait(async () => (await body()).includes(value), value)
 await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__requests=[];const f=window.fetch;window.fetch=function(u,o){window.__requests.push({url:String(u),body:o?.body});return f.apply(this,arguments)};const x=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){this.__url=u;return x.apply(this,arguments)};const s=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(body){window.__requests.push({url:this.__url,body});return s.apply(this,arguments)}` })
@@ -20,7 +23,7 @@ async function mouse(expression) {
 }
 const click = async (label,scope='document') => {await wait(()=>ev(`!!(${find(label,scope)})`),label);await mouse(find(label,scope))}
 const set = async (label,value) => ev(`(()=>{const e=document.querySelector(${JSON.stringify('[aria-label="'+label+'"]')});if(!e||e.disabled)throw Error('missing input '+${JSON.stringify(label)});e.value=${JSON.stringify(value)};e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}))})()`)
-const api = async (path,payload,status=200) => {const r=await fetch(base+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();assert.equal(r.status,status,JSON.stringify(d));return d.data||d}
+const api = async (path,payload,status=200) => {const r=await fetch(base+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:json(payload)});const d=parseJson(await r.text());assert.equal(r.status,status,json(d));return d.data||d}
 const hold = async path => ev(`(()=>{const f=window.fetch;window.__held=false;window.fetch=async function(u,o){const response=await f.apply(this,arguments);if(String(u).endsWith(${JSON.stringify(path)})){window.fetch=f;window.__held=true;await new Promise(resolve=>window.__release=resolve)}return response}})()`)
 const release = () => ev('window.__release()')
 const requestLog = () => ev('window.__requests')
@@ -36,7 +39,7 @@ const technicalJson = async expected => {
   assert.equal(await ev('document.querySelectorAll("[data-testid=contract-technical] pre").length'),1,'one complete JSON block')
   assert.equal(await ev('[...document.querySelectorAll("[data-testid=contract-technical] button")].filter(e=>/^复制.*JSON$/.test(e.textContent.trim())).length'),1,'one JSON copy button')
   assert.equal(await ev('document.querySelectorAll("[data-testid=contract-configuration]").length'),0,'no duplicated configuration fragment')
-  assert.deepEqual(JSON.parse(await ev('document.querySelector("[data-testid=contract-full]").textContent')),expected)
+  assert.deepEqual(parseJson(await ev('document.querySelector("[data-testid=contract-full]").textContent')),expected)
 }
 const editNotes = async () => { await wait(()=>ev('!!document.querySelector("[aria-label=算子用途]")'),'inline notes') }
 const history = async () => { await click('技术详情（已保存内容）',panel);await click('历史版本',panel) }
@@ -209,7 +212,8 @@ try {
         await open(name,type);await contractLayout()
         if(type==='Python 算子') await keyboardNotes()
         if(type==='C++ 插件') {
-          assert.ok((await value('输出说明')).includes('仅配置 model_output 时产生'),'conditional model output is directly editable')
+          assert.equal(await value('输出说明'),'','local notes do not inherit conditional author prose')
+          assert.ok(await ev('[...document.querySelectorAll(".author-output")].some(e=>e.textContent.includes("仅配置 model_output 时产生"))'),'conditional author output stays readable')
           await mouse('document.querySelector("[data-testid=usage-conditions] > summary")')
           assert.equal(await ev('document.querySelector("[data-testid=usage-conditions]").open'),true,'usage restrictions expand with a real mouse click')
           await contractLayout()
@@ -270,7 +274,7 @@ try {
   assert.equal(await ev('navigator.clipboard.readText()'),'SELECT * FROM dataframe.input USING builtin.passthrough INTO dataframe.out')
   await set('算子用途','Unsaved purpose excluded from JSON');await set('输入 1 说明','Unsaved input conditions excluded from JSON')
   await click('技术详情（已保存内容）',panel);await technicalJson(await describe('explore.chisquare'));await click('复制 JSON',panel)
-  const copied = JSON.parse(await wait(async()=>{const value=await ev('navigator.clipboard.readText()');return value.startsWith('{') ? value : null},'copied saved JSON'))
+  const copied = parseJson(await wait(async()=>{const value=await ev('navigator.clipboard.readText()');return value.startsWith('{') ? value : null},'copied saved JSON'))
   assert.deepEqual(copied,await describe('explore.chisquare'),'copied complete JSON excludes all unsaved drafts')
   await ev('document.querySelector("[data-testid=contract-full]").scrollIntoView({block:"center"})')
   await writeFile(evidence+'/single-current-json.png',Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
@@ -302,28 +306,69 @@ try {
   assert.ok(await ev('[...document.querySelectorAll("button")].find(e=>e.textContent.trim()==="保存说明").disabled'))
   assert.equal(await ev('document.querySelectorAll("[data-testid^=description-]").length'),0,'historical author record excludes current local table drafts')
   const historical=await api('semantics/v1/resolve',{exact_reference:'operator_contract.browser.history@1'})
+  const oldDownload=await download(()=>click('下载契约 JSON',panel))
+  assert.equal(oldDownload.value.source_reference,historical.exact_reference)
+  assert.deepEqual(oldDownload.value.document,historical.document)
+  assert.equal(oldDownload.value.document.resources.integer_boundaries.max,18446744073709551615n)
   await click('技术详情（已保存内容）',panel);await technicalJson(historical)
   await ev('navigator.clipboard.writeText("")');await click('复制 JSON',panel)
-  assert.deepEqual(JSON.parse(await wait(async()=>{const value=await ev('navigator.clipboard.readText()');return value.startsWith('{') ? value : null},'copied historical JSON')),historical,'copy preserves exact historical record')
+  assert.deepEqual(parseJson(await wait(async()=>{const value=await ev('navigator.clipboard.readText()');return value.startsWith('{') ? value : null},'copied historical JSON')),historical,'copy preserves exact historical record')
   await ev('document.querySelector("[data-testid=contract-full]").scrollIntoView({block:"center"})')
   await writeFile(evidence+'/single-historical-json.png',Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
   await click('返回当前版本');await text('History fixture release 12')
-  await click('技术详情（已保存内容）',panel);await technicalJson(await describe('browser.history'));await close()
+  const currentHistory=await describe('browser.history')
+  await set('算子用途','未保存的下载隔离草稿')
+  const currentDownload=await download(()=>click('下载契约 JSON',panel))
+  assert.equal(currentDownload.value.source_reference,currentHistory.basis.contract_ref)
+  assert.deepEqual(currentDownload.value.document,currentHistory.contract.document)
+  assert.ok(!currentDownload.content.includes('未保存的下载隔离草稿'))
+  assert.equal(await value('算子用途'),'未保存的下载隔离草稿')
+  await click('技术详情（已保存内容）',panel);await technicalJson(currentHistory);await close()
   for(const [file,name] of [['baseliner.so','explore.baseliner'],['npm.so','npm.basic']]) {
     await open(file,'C++ 插件')
     const full=await describe(name),doc=full.contract.document
-    assert.equal(await value('算子用途'),doc.description)
-    assert.equal(await value('输入说明'),doc.inputs[0].description)
-    assert.equal(await value('参数说明'),doc.configuration.description)
+    assert.equal(await value('算子用途'),'')
+    assert.equal(await value('输入说明'),'')
+    assert.equal(await value('参数说明'),'')
     const outputText=doc.outputs.map(o=>o.port_id+'：'+o.description).join('\n\n')
-    assert.equal(await value('输出说明'),outputText)
-    assert.equal(await ev('document.querySelectorAll("[data-testid=author-purpose],[data-testid=author-input],[data-testid=author-parameters],.author-output").length'),0,'author text appears once inside the editor')
-    assert.equal(await ev('document.querySelectorAll(".declaration .role,.declaration .contract-table,.declaration [data-resource-pointer]").length'),0,'complex author declarations stay out of the default view')
+    assert.equal(await value('输出说明'),'')
+    assert.equal(await ev('document.querySelector("[data-testid=author-purpose]").textContent'),doc.description)
+    assert.equal(await ev('document.querySelector("[data-testid=author-input]").textContent'),doc.inputs[0].description)
+    assert.equal(await ev('document.querySelector("[data-testid=author-parameters]").textContent'),doc.configuration.description)
+    assert.equal(await ev('document.querySelectorAll("[data-usage-section=parameters] .contract-table > table > tbody > tr").length'),Object.keys(doc.configuration.invocation_schema.properties).length,'all author parameters remain visible with prose')
+    assert.ok(await ev('document.querySelectorAll("[data-usage-section=inputs] [data-resource-pointer]").length')>0,'input resources are reachable')
+    assert.equal(await ev('document.querySelectorAll("details[data-contract-output]").length'),doc.outputs.length,'each output retains its own structured group')
+    const readRequests = await counts(); assert.equal(readRequests.rows,0); assert.equal(readRequests.consume,0)
     assert.equal(await ev('document.querySelectorAll("[data-testid=contract-full]").length'),0,'full declaration is loaded on demand')
+    assert.ok(!(await requestLog()).some(r=>r.url.endsWith('/semantics/v1/describe') && JSON.parse(r.body).target?.name===name && JSON.parse(r.body).view==='full'),'default reading does not fetch a full contract')
+    if(name==='npm.basic') {
+      const file=await download(()=>click('下载契约 JSON',panel))
+      assert.equal(file.value.source_reference,full.basis.contract_ref)
+      assert.deepEqual(file.value.document,doc)
+      assert.equal(await ev('document.querySelectorAll("[data-usage-section=parameters] .contract-table > table > tbody > tr").length'),5)
+      await ev('document.querySelector("details[data-contract-output=managed_results]").open=true')
+      await mouse('document.querySelector("[data-resource-pointer=\\"/resources/managed_results\\"] > summary")')
+      await wait(()=>ev('document.querySelectorAll(".entity-group article").length===12'),'twelve entities grouped by module')
+      await mouse('document.querySelector("[data-resource-pointer=\\"/resources/basic_ipv4\\"] > summary")')
+      await wait(()=>ev('document.querySelector("[data-resource-pointer=\\"/resources/basic_ipv4\\"] table tbody tr") !== null'),'known Basic fields')
+      for(const entity of ['basic_ipv6','session_ipv4','session_ipv6','dns_transaction_ipv4','dns_transaction_ipv6','http1_transaction_ipv4','http1_transaction_ipv6','tls_handshake_ipv4','tls_handshake_ipv6','icmp_event_ipv4','icmp_event_ipv6']) {
+        assert.ok(await ev('document.querySelector('+JSON.stringify('[data-resource-pointer="/resources/'+entity+'"]')+') !== null'),entity+' resource reachable')
+      }
+      for(const [width,height] of [[1440,1000],[1024,768],[390,844]]) {
+        await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false})
+        await pause(150)
+        const layout=await ev(`(()=>{const p=${panel},d=p.closest('.el-dialog'),r=d.getBoundingClientRect();return {overflow:document.documentElement.scrollWidth>innerWidth+1,dialog:r.width<=innerWidth && r.left>=0,tables:[...p.querySelectorAll('.contract-table table,.schema-scroll table')].filter(t=>t.getBoundingClientRect().width>0).every(t=>{const h=[...t.querySelector('thead tr').children],r=[...t.querySelector('tbody tr').children];return h.every((x,i)=>Math.abs(x.getBoundingClientRect().width-r[i].getBoundingClientRect().width)<2)})}})()`)
+        assert.ok(!layout.overflow && layout.dialog && layout.tables,JSON.stringify({width,...layout}))
+        await writeFile(evidence+'/npm-reading-'+width+'.png',Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
+      }
+      await send('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false})
+    }
     await ev('document.querySelector("[data-testid=operator-contract]").scrollIntoView({block:"start"})')
     await writeFile(evidence+'/'+name+'-compact.png',Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
-    await click('使用限制',panel);assert.equal(await value('算子使用注意'),doc.limitations.join('\n\n'))
-    await click('调用示例',panel);assert.equal(await value('算子调用示例'),doc.examples.join('\n\n'))
+    await click('使用限制',panel);assert.equal(await value('算子使用注意'),'')
+    for(const limitation of doc.limitations) assert.ok((await body()).includes(limitation))
+    await click('调用示例',panel);assert.equal(await value('算子调用示例'),'')
+    for(const example of doc.examples) assert.ok((await body()).includes(example))
     await click('技术详情（已保存内容）',panel);await technicalJson(full)
     const raw=await ev('document.querySelector("[data-testid=contract-full]").textContent')
     if(name==='explore.baseliner')for(const fact of ['row_cases','must_be_null','context_semantics','normalized_config_schema'])assert.ok(raw.includes(fact))

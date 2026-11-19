@@ -19,7 +19,132 @@ std::string ReadFile(const std::string& path) {
     assert(stream.good());
     return {std::istreambuf_iterator<char>(stream), {}};
 }
+void TestDefinitionCache() {
+    char file[] = "/tmp/flowsql_semantics_cache_XXXXXX";
+    const int fd = mkstemp(file);
+    assert(fd >= 0);
+    close(fd);
+    DataSemanticsError error;
+    DataSemanticsRegistry registry;
+    assert(registry.Open(file, &error) == 0);
+    SemanticsSaveResult saved;
+    for (const auto& request : std::vector<SemanticsSaveRequest>{
+             {"standard", "request.duration", ReadFile(FLOWSQL_SOURCE_ROOT "/examples/semantics/standard.json")},
+             {"dictionary", "app.requests", ReadFile(FLOWSQL_SOURCE_ROOT "/examples/semantics/dictionary.json")},
+             {"operator_contract", "npm.basic",
+              ReadFile(FLOWSQL_SOURCE_ROOT "/src/operators/npm_basic/npm_data_contract.json")}}) {
+        assert(registry.Save(request, &saved, &error) == 0);
+        assert(saved.snapshot.document && SemanticsJson(*saved.snapshot.document) == *saved.snapshot.document_json);
+    }
+    const auto warm = registry.Statistics();
+    for (unsigned i = 0; i < 100; ++i) {
+        for (const char* ref :
+             {"standard.request.duration@1", "dictionary.app.requests@1", "operator_contract.npm.basic@1"}) {
+            DataSemanticsSnapshot snapshot;
+            assert(registry.Resolve(ref, &snapshot, &error) == 0);
+            assert(snapshot.exact_reference == ref && snapshot.document);
+        }
+    }
+    const auto hot = registry.Statistics();
+    assert(hot.body_queries == warm.body_queries && hot.parses == warm.parses && hot.digests == warm.digests);
+    assert(hot.retained_bytes <= DataSemanticsRegistry::kDefinitionCacheBudget && hot.hits >= warm.hits + 300);
+    const auto publications = registry.Statistics().publications;
+    std::vector<SemanticsSaveResult> failed_batch;
+    const auto small_document = R"({"schema_id":"flowsql.data-standard","title":"next"})";
+    SemanticsSaveRequest first{"standard", "rolled_back", small_document};
+    SemanticsSaveRequest conflict{"standard", "request.duration", small_document};
+    conflict.expected_current_revision = 99;
+    assert(registry.SaveBatch({first, conflict}, &failed_batch, &error) != 0);
+    assert(error.code == "REVISION_CONFLICT" && failed_batch.empty());
+    assert(registry.Statistics().publications == publications);
+    DataSemanticsSnapshot missing;
+    assert(registry.Resolve("standard.rolled_back@1", &missing, &error) != 0 && error.code == "NOT_FOUND");
+    const auto held = saved.snapshot;
+    registry.Close();
+    assert(registry.Statistics().retained_bytes == 0);
+    assert(held.document && !held.document->IsNull());
+    assert(registry.Open(file, &error) == 0);
+    const auto cold = registry.Statistics();
+    std::atomic<unsigned> ready{0};
+    std::atomic<bool> start{false};
+    std::vector<std::thread> readers;
+    std::vector<DataSemanticsSnapshot> snapshots(8);
+    for (unsigned i = 0; i < 8; ++i)
+        readers.emplace_back([&, i] {
+            ++ready;
+            while (!start.load()) std::this_thread::yield();
+            DataSemanticsError e;
+            for (unsigned n = 0; n < 16; ++n) {
+                assert(registry.Resolve("operator_contract.npm.basic@1", &snapshots[i], &e) == 0);
+            }
+        });
+    while (ready != 8) std::this_thread::yield();
+    start = true;
+    for (auto& reader : readers) reader.join();
+    for (const auto& snapshot : snapshots) {
+        assert(snapshot.document == snapshots[0].document && snapshot.document_json == snapshots[0].document_json);
+        assert(*snapshot.document_json == *held.document_json);
+    }
+    std::vector<std::thread> mixed;
+    for (unsigned i = 0; i < 8; ++i)
+        mixed.emplace_back([&, i] {
+            DataSemanticsSnapshot snapshot;
+            DataSemanticsError e;
+            const char* ref = i % 2 ? "standard.request.duration@1" : "dictionary.app.requests@1";
+            for (unsigned n = 0; n < 16; ++n) {
+                assert(registry.Resolve(ref, &snapshot, &e) == 0);
+                assert(snapshot.exact_reference == ref);
+                assert(snapshot.schema_id == (i % 2 ? "flowsql.data-standard" : "flowsql.data-dictionary"));
+            }
+        });
+    for (auto& reader : mixed) reader.join();
+    const auto loaded = registry.Statistics();
+    assert(loaded.body_queries == cold.body_queries + 3 && loaded.parses == cold.parses + 3 &&
+           loaded.digests == cold.digests + 3 && loaded.publications == cold.publications + 3);
+    // Independent instances never share a trusted allocation, even for identical content.
+    DataSemanticsRegistry second;
+    assert(second.Open(file, &error) == 0);
+    DataSemanticsSnapshot independent;
+    assert(second.Resolve("operator_contract.npm.basic@1", &independent, &error) == 0);
+    assert(independent.document != snapshots[0].document && *independent.document_json == *held.document_json);
+    second.Close();
+    registry.Close();
+    // One small definition fits, two cannot. An oversize contract is returned but never retained.
+    DataSemanticsRegistry bounded(128 * 1024);
+    assert(bounded.Open(file, &error) == 0);
+    assert(bounded.Resolve("operator_contract.npm.basic@1", &independent, &error) == 0);
+    assert(bounded.Statistics().retained_bytes == 0);
+    std::vector<DataSemanticsSnapshot> retained;
+    for (unsigned n = 0; n < 8; ++n) {
+        SemanticsSaveRequest request{"standard", "budget" + std::to_string(n),
+                                     "{\"schema_id\":\"flowsql.data-standard\",\"title\":\"budget\",\"definition\":{"
+                                     "\"state\":\"declared\",\"origin\":\"manual\",\"value\":\"" +
+                                         std::string(20000, 'x') + "\"}}"};
+        assert(bounded.Save(request, &saved, &error) == 0);
+        retained.push_back(saved.snapshot);
+        assert(bounded.Statistics().retained_bytes <= 128 * 1024);
+    }
+    assert(bounded.Statistics().evictions > 0);
+    const auto before_reload = bounded.Statistics();
+    assert(bounded.Resolve("standard.budget0@1", &independent, &error) == 0);
+    assert(bounded.Statistics().body_queries == before_reload.body_queries + 1);
+    assert(*retained.front().document_json == *independent.document_json);
+    bounded.Close();
+    // Cold integrity failures cannot reuse the prior instance's successful content.
+    sqlite3* db = nullptr;
+    assert(sqlite3_open(file, &db) == SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE semantics_revision SET sha256='corrupt' WHERE kind='operator_contract'", nullptr,
+                        nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close(db);
+    assert(registry.Open(file, &error) == 0);
+    assert(registry.Resolve("operator_contract.npm.basic@1", &independent, &error) != 0);
+    assert(error.code == "STORAGE_ERROR" && !independent.document && !independent.document_json);
+    registry.Close();
+    assert(*held.document_json == *snapshots[0].document_json);
+    unlink(file);
+}
 int main() {
+    TestDefinitionCache();
     {
         rapidjson::Document document;
         DataSemanticsError error;

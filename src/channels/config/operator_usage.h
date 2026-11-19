@@ -155,6 +155,7 @@ inline void Outputs(Value& data, Value& usage, const Value& doc, Alloc& a) {
             const auto ref = Get(output, "structure_ref");
             if (ref.rfind("#/", 0) == 0) {
                 const auto path = ref.substr(1);
+                Set(item, "structure_pointer", path, a);
                 const auto* structure = rapidjson::Pointer(path.c_str()).Get(doc);
                 assert(structure);
                 summary = Get(*structure, "description");
@@ -219,14 +220,14 @@ inline void Outputs(Value& data, Value& usage, const Value& doc, Alloc& a) {
         usage["outputs"].PushBack(item, a);
     }
 }
-inline Json Build(const Value& subject, const Value& basis, const Value& contract, const Value& notes,
-                  const Value& context) {
+inline Json Build(const Value& subject, const Value& basis, const Value& doc, const std::string& contract_state,
+                  const Value& notes, const Value& context) {
     Json data(rapidjson::kObjectType);
     auto& a = data.GetAllocator();
     Set(data, "subject", Copy(subject, a), a);
     Set(data, "view", "usage", a);
     Set(data, "basis", Copy(basis, a), a);
-    Set(data, "contract_state", Get(contract, "state"), a);
+    Set(data, "contract_state", contract_state, a);
     for (const auto* key : {"gaps", "details", "required_context_refs"})
         data.AddMember(Value(key, a), Value(rapidjson::kArrayType), a);
     if (context.HasMember("required_context_refs"))
@@ -259,10 +260,9 @@ inline Json Build(const Value& subject, const Value& basis, const Value& contrac
             TextItem(usage["examples"], Text(example), "local", "/description/notes/examples/" + std::to_string(i++),
                      a);
     }
-    if (Get(contract, "state") == "missing") {
+    if (contract_state == "missing") {
         Gap(data, "inputs", "CONTRACT_MISSING", "算子尚未声明结构化契约；输入、参数与输出要求未知", a);
     } else {
-        const auto& doc = contract["document"];
         Set(usage["identity"], "title", Get(doc, "title"), a);
         Set(usage["identity"], "author_version", Get(doc["operator"], "version"), a);
         TextItem(usage["identity"]["purposes"], Get(doc, "description"), "author", "/description", a);

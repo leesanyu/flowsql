@@ -6,6 +6,7 @@
 #include <sqlite3.h>
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <unordered_set>
@@ -34,6 +35,63 @@ std::string Digest(const std::string& text) {
         hex += "0123456789abcdef"[b & 15];
     }
     return hex;
+}
+int Definition(const std::string& reference, const std::string& digest, std::shared_ptr<const std::string> text,
+               std::shared_ptr<rapidjson::Document> document, const std::vector<SemanticsReference>& references,
+               DataSemanticsSnapshot* out, DataSemanticsError* error) {
+    std::shared_ptr<rapidjson::Document> dictionaries;
+    if (std::string((*document)["schema_id"].GetString()) == "flowsql.operator-data-contract" &&
+        document->HasMember("resources") && (*document)["resources"].IsObject()) {
+        dictionaries = std::make_shared<rapidjson::Document>(rapidjson::kObjectType);
+        std::function<int(const rapidjson::Value&, const rapidjson::Pointer&)> visit;
+        visit = [&](const auto& resource, const auto& path) {
+            if (resource.IsObject()) {
+                if (resource.HasMember("dictionary")) {
+                    const auto& dictionary = resource["dictionary"];
+                    if (dictionary.IsObject() && dictionary.HasMember("schema_id") &&
+                        dictionary["schema_id"].IsString() &&
+                        std::string(dictionary["schema_id"].GetString()) == "flowsql.data-dictionary") {
+                        rapidjson::Document normalized;
+                        std::vector<SemanticsReference> refs;
+                        if (NormalizeSemantics("dictionary", SemanticsJson(dictionary), &normalized, &refs, error))
+                            return -1;
+                        path.Set(*dictionaries, static_cast<const rapidjson::Value&>(normalized));
+                        return 0;
+                    }
+                }
+                for (const auto& member : resource.GetObject())
+                    if (visit(member.value, path.Append(member.name.GetString(), member.name.GetStringLength())))
+                        return -1;
+            } else if (resource.IsArray()) {
+                for (rapidjson::SizeType i = 0; i < resource.Size(); ++i)
+                    if (visit(resource[i], path.Append(i))) return -1;
+            }
+            return 0;
+        };
+        if (visit((*document)["resources"], rapidjson::Pointer("/resources"))) return -1;
+    }
+    auto targets = std::make_shared<std::vector<std::string>>();
+    std::unordered_set<std::string> seen;
+    for (const auto& ref : references)
+        if (seen.insert(ref.target).second) targets->push_back(ref.target);
+    const size_t capacity = document->GetAllocator().Capacity();
+    size_t bytes = text->capacity() + 1 + capacity + (capacity / 65536 + 1) * 64 + sizeof(rapidjson::Document) +
+                   sizeof(std::string) + 128 + sizeof(std::vector<std::string>) +
+                   targets->capacity() * sizeof(std::string);
+    for (const auto& ref : *targets) bytes += ref.capacity() + 1;
+    if (dictionaries) {
+        const auto size = dictionaries->GetAllocator().Capacity();
+        bytes += size + (size / 65536 + 1) * 64 + sizeof(rapidjson::Document) + 64;
+    }
+    *out = {reference,
+            (*document)["schema_id"].GetString(),
+            digest,
+            std::move(text),
+            std::move(document),
+            bytes,
+            std::move(targets),
+            std::move(dictionaries)};
+    return 0;
 }
 bool MarkObserved(sqlite3* db, const std::string& exact, bool observed) {
     if (!observed) return true;
@@ -103,12 +161,65 @@ int DataSemanticsRegistry::Open(const std::string& path, DataSemanticsError* e) 
         db_ = nullptr;
         return -1;
     }
-    return 0;
+    return RefreshCache(e);
 }
 void DataSemanticsRegistry::Close() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (db_) sqlite3_close(db_);
     db_ = nullptr;
+    ++generation_;
+    std::lock_guard<std::mutex> cache_lock(cache_mutex_);
+    cache_index_.clear();
+    cache_.clear();
+    statistics_.retained_bytes = 0;
+    data_version_ = 0;
+}
+int DataSemanticsRegistry::RefreshCache(DataSemanticsError* e) {
+    if (!db_) return SemanticsFail(e, "UNAVAILABLE", "semantics registry is closed");
+    auto version = Prepare(db_, "PRAGMA data_version");
+    if (!version || sqlite3_step(version.get()) != SQLITE_ROW) return StorageError(e);
+    const int current = sqlite3_column_int(version.get(), 0);
+    if (data_version_ && current != data_version_) {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        cache_index_.clear();
+        cache_.clear();
+        statistics_.retained_bytes = 0;
+        ++generation_;
+    }
+    data_version_ = current;
+    return 0;
+}
+DataSemanticsRegistry::ReadStatistics DataSemanticsRegistry::Statistics() const {
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    return statistics_;
+}
+bool DataSemanticsRegistry::Cached(const std::string& reference, DataSemanticsSnapshot* out) {
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    const auto found = cache_index_.find(reference);
+    if (found == cache_index_.end()) return false;
+    cache_.splice(cache_.begin(), cache_, found->second);
+    *out = found->second->snapshot;
+    ++statistics_.hits;
+    return true;
+}
+void DataSemanticsRegistry::PublishDefinition(const DataSemanticsSnapshot& snapshot) {
+    // DOM allocator capacity is captured before converting to const ownership.
+    const size_t bytes = snapshot.document_bytes + sizeof(CacheEntry) + 2 * (snapshot.exact_reference.capacity() + 1) +
+                         snapshot.schema_id.capacity() + 1 + snapshot.sha256.capacity() + 1 +
+                         sizeof(std::pair<const std::string, void*>) + 128;
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    if (bytes > cache_budget_ || cache_index_.count(snapshot.exact_reference)) return;
+    while (statistics_.retained_bytes + bytes > cache_budget_) {
+        const auto& entry = cache_.back();
+        statistics_.retained_bytes -= entry.bytes;
+        cache_index_.erase(entry.snapshot.exact_reference);
+        cache_.pop_back();
+        ++statistics_.evictions;
+    }
+    cache_.push_front({snapshot, bytes});
+    cache_index_.emplace(snapshot.exact_reference, cache_.begin());
+    statistics_.retained_bytes += bytes;
+    ++statistics_.publications;
 }
 int DataSemanticsRegistry::Read(const std::string& reference, DataSemanticsSnapshot* out, DataSemanticsError* e) {
     *out = {};
@@ -116,6 +227,23 @@ int DataSemanticsRegistry::Read(const std::string& reference, DataSemanticsSnaps
     if (!ParseSemanticsReference(reference, &id))
         return SemanticsFail(e, "INVALID_REFERENCE", "exact reference required");
     if (!db_) return SemanticsFail(e, "UNAVAILABLE", "semantics registry is closed");
+    if (RefreshCache(e)) return -1;
+    if (Cached(reference, out)) return 0;
+    std::string content, digest;
+    if (ReadBody(reference, &content, &digest, e)) return -1;
+    // Internal transaction reads may see staged rows: never publish them here.
+    return Decode(reference, std::move(content), digest, out, e);
+}
+int DataSemanticsRegistry::ReadBody(const std::string& reference, std::string* content, std::string* digest,
+                                    DataSemanticsError* e) {
+    SemanticsIdentity id;
+    if (!ParseSemanticsReference(reference, &id))
+        return SemanticsFail(e, "INVALID_REFERENCE", "exact reference required");
+    if (!db_) return SemanticsFail(e, "UNAVAILABLE", "semantics registry is closed");
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        ++statistics_.body_queries;
+    }
     auto s = Prepare(db_, "SELECT document,sha256 FROM semantics_revision WHERE kind=? AND name=? AND revision=?");
     if (!s) return StorageError(e);
     Bind(s.get(), 1, id.kind);
@@ -124,19 +252,59 @@ int DataSemanticsRegistry::Read(const std::string& reference, DataSemanticsSnaps
     const int rc = sqlite3_step(s.get());
     if (rc == SQLITE_DONE) return SemanticsFail(e, "NOT_FOUND", "exact revision not found");
     if (rc != SQLITE_ROW) return StorageError(e);
-    const auto content = Text(s.get(), 0), digest = Text(s.get(), 1);
-    rapidjson::Document d;
-    if (ParseSemanticsJson(content, &d, e) || !d.IsObject() || !d.HasMember("schema_id") ||
-        !d["schema_id"].IsString() || Digest(content) != digest)
-        return SemanticsFail(e, "STORAGE_ERROR", "revision content integrity failure");
-    *out = {reference, d["schema_id"].GetString(), digest, std::make_shared<const std::string>(content)};
+    *content = Text(s.get(), 0);
+    *digest = Text(s.get(), 1);
     return 0;
+}
+int DataSemanticsRegistry::Decode(const std::string& reference, std::string content, const std::string& digest,
+                                  DataSemanticsSnapshot* out, DataSemanticsError* e) {
+    auto document = std::make_shared<rapidjson::Document>();
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        ++statistics_.parses;
+        ++statistics_.digests;
+    }
+    SemanticsIdentity id;
+    ParseSemanticsReference(reference, &id);
+    std::vector<SemanticsReference> references;
+    if (Digest(content) != digest || NormalizeSemantics(id.kind, content, document.get(), &references, e))
+        return SemanticsFail(e, "STORAGE_ERROR", "revision content integrity failure");
+    return Definition(reference, digest, std::make_shared<const std::string>(std::move(content)), std::move(document),
+                      references, out, e);
 }
 int DataSemanticsRegistry::Resolve(const char* reference, DataSemanticsSnapshot* out, DataSemanticsError* e) {
     if (e) *e = {};
     if (!out) return SemanticsFail(e, "INVALID_REFERENCE", "snapshot is required");
-    std::lock_guard<std::mutex> lock(mutex_);
-    return Read(reference ? reference : "", out, e);
+    *out = {};
+    const std::string exact = reference ? reference : "";
+    SemanticsIdentity id;
+    if (!ParseSemanticsReference(exact, &id)) return SemanticsFail(e, "INVALID_REFERENCE", "exact reference required");
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (RefreshCache(e)) return -1;
+        if (Cached(exact, out)) return 0;
+    }
+    std::lock_guard<std::mutex> cold_lock(cold_mutex_);
+    std::string content, digest;
+    uint64_t generation;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (RefreshCache(e)) return -1;
+        if (Cached(exact, out)) return 0;
+        generation = generation_;
+        if (ReadBody(exact, &content, &digest, e)) return -1;
+    }
+    DataSemanticsSnapshot decoded;
+    if (Decode(exact, std::move(content), digest, &decoded, e)) return -1;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (RefreshCache(e)) return -1;
+        if (!db_ || generation != generation_)
+            return SemanticsFail(e, "UNAVAILABLE", "registry changed during definition load");
+        PublishDefinition(decoded);
+    }
+    *out = std::move(decoded);
+    return 0;
 }
 int DataSemanticsRegistry::ValidateLinks(const std::string& kind, const rapidjson::Value& d,
                                          const std::vector<SemanticsReference>& refs, std::string* check,
@@ -152,12 +320,10 @@ int DataSemanticsRegistry::ValidateLinks(const std::string& kind, const rapidjso
             return -1;
         }
         if (kind == "binding") {
-            rapidjson::Document td;
-            td.Parse(target.document_json->c_str());
+            const auto& td = *target.document;
             if (CheckSemanticsBinding(d, td, check, e)) return -1;
         } else if (kind == "dictionary" && ref.target.compare(0, 11, "dictionary.") == 0) {
-            rapidjson::Document td;
-            td.Parse(target.document_json->c_str());
+            const auto& td = *target.document;
             std::unordered_set<std::string> target_ids;
             for (const auto& f : td["fields"].GetArray()) target_ids.insert(f["field_id"].GetString());
             const auto slash = ref.path.rfind('/');
@@ -195,23 +361,46 @@ int DataSemanticsRegistry::WriteBatch(const std::vector<SemanticsSaveRequest>& r
     if (e) *e = {};
     if (!out) return SemanticsFail(e, "INVALID_DOCUMENT", "batch output required");
     out->clear();
+    // Expensive definition work is independent of current pointers and runs outside the storage lock.
+    std::vector<DataSemanticsSnapshot> definitions;
+    std::vector<std::vector<SemanticsReference>> references(requests.size());
+    for (size_t i = 0; i < requests.size(); ++i) {
+        auto document = std::make_shared<rapidjson::Document>();
+        {
+            std::lock_guard<std::mutex> lock(cache_mutex_);
+            ++statistics_.parses;
+        }
+        if (NormalizeSemantics(requests[i].kind, requests[i].document_json, document.get(), &references[i], e))
+            return -1;
+        auto content = std::make_shared<const std::string>(SemanticsJson(*document));
+        const auto digest = Digest(*content);
+        {
+            std::lock_guard<std::mutex> lock(cache_mutex_);
+            ++statistics_.digests;
+        }
+        DataSemanticsSnapshot definition;
+        if (Definition("", digest, std::move(content), std::move(document), references[i], &definition, e)) return -1;
+        definitions.push_back(std::move(definition));
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     if (!db_) return SemanticsFail(e, "UNAVAILABLE", "semantics registry is closed");
     if (sqlite3_exec(db_, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK) return StorageError(e);
     Rollback rollback{db_};
     std::vector<SemanticsSaveResult> staged;
-    for (const auto& request : requests) {
+    for (size_t i = 0; i < requests.size(); ++i) {
         SemanticsSaveResult result;
-        if (SaveUnlocked(request, execution_owned, &result, e)) return -1;
+        if (SaveUnlocked(requests[i], definitions[i], references[i], execution_owned, &result, e)) return -1;
         staged.push_back(std::move(result));
     }
     if (sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) return StorageError(e);
     rollback.db = nullptr;
+    for (const auto& result : staged) PublishDefinition(result.snapshot);
     *out = std::move(staged);
     return 0;
 }
-int DataSemanticsRegistry::SaveUnlocked(const SemanticsSaveRequest& r, bool execution_owned, SemanticsSaveResult* out,
-                                        DataSemanticsError* e) {
+int DataSemanticsRegistry::SaveUnlocked(const SemanticsSaveRequest& r, const DataSemanticsSnapshot& definition,
+                                        const std::vector<SemanticsReference>& refs, bool execution_owned,
+                                        SemanticsSaveResult* out, DataSemanticsError* e) {
     if (e) *e = {};
     if (!out) return SemanticsFail(e, "INVALID_DOCUMENT", "save output required");
     *out = {};
@@ -220,15 +409,14 @@ int DataSemanticsRegistry::SaveUnlocked(const SemanticsSaveRequest& r, bool exec
     if (!SemanticsName(r.name) || r.expected_current_revision > kSemanticsMaxRevision ||
         r.base_revision > kSemanticsMaxRevision || r.change_note.size() > 4096)
         return SemanticsFail(e, "INVALID_DOCUMENT", "invalid identity or revision");
-    rapidjson::Document d;
-    std::vector<SemanticsReference> refs;
-    if (NormalizeSemantics(r.kind, r.document_json, &d, &refs, e)) return -1;
+    const auto& d = *definition.document;
     if (r.kind == "operator_contract" &&
         r.name != std::string(d["operator"]["category"].GetString()) + "." + d["operator"]["name"].GetString())
         return SemanticsFail(e, "CONTRACT_INVALID", "contract name must match its operator identity", "/operator");
     if (r.source_observed && r.kind != "binding")
         return SemanticsFail(e, "INVALID_DOCUMENT", "observed binding required");
-    const auto content = SemanticsJson(d), digest = Digest(content);
+    const auto& content = *definition.document_json;
+    const auto& digest = definition.sha256;
     std::string binding_check;
     if (ValidateLinks(r.kind, d, refs, &binding_check, e)) return -1;
     uint64_t current = 0;
@@ -251,8 +439,7 @@ int DataSemanticsRegistry::SaveUnlocked(const SemanticsSaveRequest& r, bool exec
         DataSemanticsSnapshot previous;
         if (Read(Exact(r.kind, r.name, current), &previous, e)) return -1;
         if (r.kind == "binding") {
-            rapidjson::Document prior;
-            prior.Parse(previous.document_json->c_str());
+            const auto& prior = *previous.document;
             if (prior["object_key"] != d["object_key"])
                 return SemanticsFail(e, "BINDING_MISMATCH", "object_key is immutable", "/object_key");
         }
@@ -324,7 +511,8 @@ int DataSemanticsRegistry::SaveUnlocked(const SemanticsSaveRequest& r, bool exec
         if (sqlite3_step(s.get()) != SQLITE_DONE) return StorageError(e);
     }
     if (!MarkObserved(db_, exact, r.source_observed)) return StorageError(e);
-    out->snapshot = {exact, d["schema_id"].GetString(), digest, std::make_shared<const std::string>(content)};
+    out->snapshot = definition;
+    out->snapshot.exact_reference = exact;
     out->created_revision = true;
     out->structure_check = binding_check;
     return 0;

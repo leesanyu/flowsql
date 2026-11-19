@@ -366,7 +366,7 @@
     <el-dialog
       v-model="detailDialogVisible"
       :title="isCppDetail ? '查看 C++ 插件详情' : (detailMode === 'view' ? '查看算子' : '编辑算子')"
-      :width="detailDialogFullscreen ? '100%' : '900px'"
+      :width="detailDialogFullscreen ? '100%' : 'min(900px, calc(100vw - 24px))'"
       :fullscreen="detailDialogFullscreen"
       :close-on-click-modal="false"
       @closed="onDetailDialogClosed"

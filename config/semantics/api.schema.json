@@ -3721,6 +3721,9 @@
                 "mismatch",
                 "needs_confirmation"
               ]
+            },
+            "binding_state": {
+              "$ref": "#/%24defs/channelCheckResult/properties/state"
             }
           },
           "required": [
@@ -3732,7 +3735,8 @@
             "differences",
             "required_confirmations",
             "semantic_gaps",
-            "state"
+            "state",
+            "binding_state"
           ],
           "additionalProperties": false
         }
@@ -6166,6 +6170,10 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 30000
+        },
+        "structure_pointer": {
+          "type": "string",
+          "pattern": "^(/([^~/]|~[01])*)+$"
         }
       },
       "required": [

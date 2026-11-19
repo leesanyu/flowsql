@@ -218,4 +218,12 @@ onUnmounted(() => clearInterval(timer))
   background-color: var(--bg-page);
 }
 .app-main.exploration-active { overflow: hidden; padding: 0; min-height: 0; }
+@media (max-width: 700px) {
+  .app-nav { padding: 0 12px; gap: 12px; }
+  .nav-menu { min-width: 0; overflow-x: auto; overflow-y: hidden; }
+  .nav-menu .el-menu-item { flex-shrink: 0; padding: 0 12px; }
+  .nav-right { gap: 8px; }
+  .nav-user, .nav-version, .gateway-status { display: none; }
+  .app-main { min-width: 0; padding: 12px; }
+}
 </style>

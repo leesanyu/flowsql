@@ -304,7 +304,7 @@ int OperatorContractService::Resolve(const char* ref, OperatorContractSnapshot* 
         return dataset::Fail(e, "INVALID_REFERENCE", "exact operator contract required");
     DataSemanticsSnapshot snapshot;
     if (registry_.Resolve(ref, &snapshot, e)) return -1;
-    *out = {snapshot.exact_reference, snapshot.sha256, snapshot.document_json};
+    *out = {snapshot.exact_reference, snapshot.sha256, snapshot.document_json, snapshot.document};
     return 0;
 }
 int OperatorContractService::CheckAndDerive(const char* text, std::string* out, DataSemanticsError* e) {
@@ -315,8 +315,7 @@ int OperatorContractService::CheckAndDerive(const char* text, std::string* out, 
     if (ParseSemanticsJson(text ? text : "", &invocation, e) || Validate(invocation, e)) return -1;
     OperatorContractSnapshot snapshot;
     if (Resolve(Get(invocation, "contract_ref").c_str(), &snapshot, e)) return -1;
-    Json contract;
-    contract.Parse(snapshot.document_json->c_str());
+    const auto& contract = *snapshot.document;
     Check check(registry_, invocation);
     check.refs.insert(snapshot.exact_reference);
     for (rapidjson::SizeType i = 0; i < invocation["config_refs"].Size(); ++i) {

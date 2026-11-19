@@ -363,8 +363,7 @@ int32_t DataSemanticsRegistry::Control(const std::string& op, const std::string&
     } else if (op == "resolve" || op == "export") {
         DataSemanticsSnapshot snap;
         if (Resolve(String(r, "exact_reference").c_str(), &snap, &e)) return Error(e, response);
-        Document d;
-        d.Parse(snap.document_json->c_str());
+        const auto& d = *snap.document;
         const auto operator_view = String(r, "view");
         if (op == "resolve" && (operator_view == "summary" || operator_view == "resource")) {
             if (String(d, "schema_id") != "flowsql.operator-data-contract")
@@ -380,14 +379,17 @@ int32_t DataSemanticsRegistry::Control(const std::string& op, const std::string&
             Add(data, "view", operator_view, a);
             Add(data, "resource_pointer", pointer, a);
             Value resource;
-            resource.CopyFrom(*value, a);
             if (operator_view == "summary") {
-                resource.RemoveMember("resources");
-                resource.RemoveMember("configuration");
+                resource.SetObject();
+                for (const auto& member : d.GetObject())
+                    if (member.name != "resources" && member.name != "configuration")
+                        resource.AddMember(Value(member.name, a), Value(member.value, a), a);
                 Value names(rapidjson::kArrayType);
                 if (d.HasMember("resources"))
                     for (const auto& m : d["resources"].GetObject()) names.PushBack(Value(m.name, a), a);
                 resource.AddMember("resource_names", names, a);
+            } else {
+                resource.CopyFrom(*value, a);
             }
             data.AddMember("resource", resource, a);
             Value contexts(rapidjson::kArrayType);
@@ -424,28 +426,22 @@ int32_t DataSemanticsRegistry::Control(const std::string& op, const std::string&
             Add(data, "data_validation", "not_run", a);
             data.AddMember("semantic_gaps", Value(SemanticsGaps(d), a), a);
             Value context(rapidjson::kArrayType), required(rapidjson::kArrayType);
-            std::vector<SemanticsReference> refs;
-            Document ignored;
-            if (NormalizeSemantics(id.kind, *snap.document_json, &ignored, &refs, &e)) return Error(e, response);
+            std::vector<std::string> refs = *snap.references;
             std::unordered_set<std::string> seen;
             if (id.kind == "binding") {
                 DataSemanticsSnapshot dictionary;
                 if (Resolve(String(d, "dictionary_ref").c_str(), &dictionary, &e)) return Error(e, response);
-                Document dd;
-                dd.Parse(dictionary.document_json->c_str());
+                const auto& dd = *dictionary.document;
                 std::string check;
                 if (CheckSemanticsBinding(d, dd, &check, &e)) return Error(e, response);
                 Add(data, "structure_check", check, a);
-                std::vector<SemanticsReference> dictionary_refs;
-                if (NormalizeSemantics("dictionary", *dictionary.document_json, &ignored, &dictionary_refs, &e))
-                    return Error(e, response);
-                refs.insert(refs.end(), dictionary_refs.begin(), dictionary_refs.end());
+                refs.insert(refs.end(), dictionary.references->begin(), dictionary.references->end());
             }
             size_t context_bytes = view == "document" ? snap.document_json->size() : 0;
             for (const auto& ref : refs)
-                if (seen.insert(ref.target).second) {
+                if (seen.insert(ref).second) {
                     DataSemanticsSnapshot target;
-                    if (Resolve(ref.target.c_str(), &target, &e)) return Error(e, response);
+                    if (Resolve(ref.c_str(), &target, &e)) return Error(e, response);
                     if (target.document_json->size() > 12 * 1024 * 1024 - context_bytes)
                         return Error({"LIMIT_EXCEEDED", "reference context exceeds 12 MiB", ""}, response);
                     context_bytes += target.document_json->size();
@@ -453,8 +449,7 @@ int32_t DataSemanticsRegistry::Control(const std::string& op, const std::string&
                     Add(item, "exact_reference", target.exact_reference, a);
                     Add(item, "schema_id", target.schema_id, a);
                     Add(item, "sha256", target.sha256, a);
-                    Document td;
-                    td.Parse(target.document_json->c_str());
+                    const auto& td = *target.document;
                     item.AddMember("document", Value(td, a), a);
                     context.PushBack(item, a);
                 }

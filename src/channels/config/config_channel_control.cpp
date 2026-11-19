@@ -288,29 +288,18 @@ int ConfigChannelPlugin::DescribeDataset(const ChannelDatasetRequest& request, C
     if (LookupDescriptionOperator(Get(origin, "operator"), static_cast<uint32_t>(left), &component, error)) return -1;
     if (component.contract_state != "declared")
         return Fail(error, "UNAVAILABLE", "producer default dictionary contract is not declared");
-    std::shared_ptr<const Json> document;
-    {
-        std::lock_guard<std::mutex> lock(producer_contract_mutex_);
-        // Exact revisions are immutable. Retain one validated producer contract;
-        // every request still checks the current component and physical object.
-        if (!producer_contract_ || producer_contract_ref_ != component.contract_ref) {
-            DataSemanticsSnapshot contract;
-            if (DataSemanticsRegistry::Resolve(component.contract_ref.c_str(), &contract, error)) return -1;
-            auto parsed = std::make_shared<Json>();
-            parsed->Parse(contract.document_json->c_str());
-            producer_contract_ref_ = component.contract_ref;
-            producer_contract_ = std::move(parsed);
-        }
-        document = producer_contract_;
-    }
+    DataSemanticsSnapshot contract;
+    if (DataSemanticsRegistry::Resolve(component.contract_ref.c_str(), &contract, error)) return -1;
+    const auto& document = contract.document;
     rapidjson::Pointer pointer(Get(origin, "resource").c_str());
     const auto* entry = pointer.IsValid() ? pointer.Get(*document) : nullptr;
     if (!entry || !entry->IsObject() || !entry->HasMember("dictionary") ||
         Get(*entry, "schema_canonical") != Get(origin, "schema_canonical"))
         return Fail(error, "SOURCE_CHANGED", "producer catalog does not match its static dictionary resource");
     Json dictionary;
-    std::vector<SemanticsReference> references;
-    if (NormalizeSemantics("dictionary", Encode((*entry)["dictionary"]), &dictionary, &references, error)) return -1;
+    const auto* normalized = contract.dictionary_resources ? pointer.Get(*contract.dictionary_resources) : nullptr;
+    if (!normalized) return Fail(error, "SOURCE_UNAVAILABLE", "producer dictionary resource is not a dictionary");
+    dictionary.CopyFrom(*normalized, dictionary.GetAllocator());
     auto& fields = dictionary["fields"];
     if (fields.Size() != source["fields"].Size())
         return Fail(error, "SOURCE_CHANGED", "producer dictionary fields do not match the physical object");
@@ -323,10 +312,8 @@ int ConfigChannelPlugin::DescribeDataset(const ChannelDatasetRequest& request, C
     }
     Set(dictionary, "title", Get(source["locator"], "table", Get(source["locator"], "name")),
         dictionary.GetAllocator());
-    Json normalized;
-    if (NormalizeSemantics("dictionary", Encode(dictionary), &normalized, &references, error)) return -1;
     auto& a = source.GetAllocator();
-    Set(metadata, "default_dictionary", Copy(normalized, a), a);
+    Set(metadata, "default_dictionary", Copy(dictionary, a), a);
     Set(metadata, "default_contract_ref", component.contract_ref, a);
     Set(metadata, "default_component_revision", component.component_revision, a);
     Set(source, "source_revision", Hash(Get(source, "source_revision") + "\n" + Canonical(metadata)), a);

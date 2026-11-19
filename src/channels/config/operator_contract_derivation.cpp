@@ -448,8 +448,7 @@ int OperatorContractService::RecordUse(const char* text, OperatorContractSnapsho
     auto& a = document.GetAllocator();
     OperatorContractSnapshot contract_snapshot;
     if (Resolve(Get(document, "contract_ref").c_str(), &contract_snapshot, e)) return -1;
-    Json contract;
-    contract.Parse(contract_snapshot.document_json->c_str());
+    const auto& contract = *contract_snapshot.document;
     if (document["operator_ref"] != contract["operator"])
         return Fail(e, "COMPONENT_CHANGED", "observed operator differs from declaration");
     Json invocation(rapidjson::kObjectType);
@@ -560,7 +559,7 @@ int OperatorContractService::RecordUse(const char* text, OperatorContractSnapsho
     std::vector<SemanticsSaveResult> saved;
     if (registry_.SaveBatch(writes, &saved, e)) return -1;
     const auto& snapshot = saved.back().snapshot;
-    *out = {snapshot.exact_reference, snapshot.sha256, snapshot.document_json};
+    *out = {snapshot.exact_reference, snapshot.sha256, snapshot.document_json, snapshot.document};
     return 0;
 }
 }  // namespace flowsql::channels::config

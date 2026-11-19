@@ -12,7 +12,7 @@ from test_metadata_description_api import describe
 
 
 def main():
-    evidence = ROOT / 'evidence/operator-description-refinement/inline-editors/operator-browser'
+    evidence = ROOT / 'evidence/data-semantics-read-optimization/operator-browser'
     evidence.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='flowsql-object-operators-') as temporary:
         directory = Path(temporary)
@@ -25,6 +25,7 @@ def main():
                 legacy='from flowsql import OperatorBase, register_operator\n@register_operator(category="browser",name='+repr(name)+')\nclass Legacy(OperatorBase):\n def work(self,df): return df\n'
                 api(base,'operators/upload',dict(type='python',filename=name+'.py',content=legacy))
             history_contract = json.loads((ROOT/'config/semantics/examples/operator-contract-passthrough.json').read_text())
+            history_contract['resources'] = {'integer_boundaries': {'min': -9223372036854775808, 'max': 18446744073709551615}}
             for revision in range(1,13):
                 history_contract['operator'] = dict(category='browser',name='history',version=str(revision))
                 history_contract['title'] = 'History fixture release '+str(revision)

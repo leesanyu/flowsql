@@ -12,7 +12,7 @@ from test_data_semantics_api import ROOT, request
 
 
 def main():
-    evidence = ROOT / 'evidence/channel-description-refinement/t2-browser'
+    evidence = ROOT / 'evidence/data-semantics-read-optimization/channel-browser'
     evidence.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='flowsql-object-channels-') as temporary:
         directory = Path(temporary)

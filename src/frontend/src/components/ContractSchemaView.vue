@@ -17,8 +17,9 @@
 </template>
 <script setup>
 import { computed } from 'vue'
+import { prettyJson } from '../utils/dataSemantics.js'
 const props = defineProps({ schema: { type: [Object, Boolean], required: true } })
-const format = value => JSON.stringify(value)
+const format = value => prettyJson(value)
 const branchLabels = { oneOf: '只满足一个条件分支', anyOf: '至少满足一个条件分支', allOf: '同时满足的约束' }
 const branches = computed(() => Object.keys(branchLabels).filter(k => props.schema?.[k]?.length))
 const constraints = computed(() => {

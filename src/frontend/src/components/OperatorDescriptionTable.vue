@@ -16,7 +16,7 @@
               <select v-else-if="section === 'parameters' && field.key === 'type'" :aria-label="label(index,field)" :value="row.type" @change="update(index,field.key,$event.target.value)">
                 <option value=""></option><option value="string">字符串</option><option value="integer">整数</option><option value="number">数值</option><option value="boolean">布尔</option><option value="json">JSON</option>
               </select>
-              <textarea v-else-if="field.key === 'description'" :aria-label="label(index,field)" :value="row.description" rows="1" maxlength="30000" @input="update(index,field.key,$event.target.value)" />
+              <textarea v-else-if="field.key === 'description'" v-auto-grow :aria-label="label(index,field)" :value="row.description" rows="1" maxlength="30000" @input="update(index,field.key,$event.target.value)" />
               <input v-else :aria-label="label(index,field)" :value="row[field.key]" :maxlength="field.key === 'default' ? 30000 : 256" @input="update(index,field.key,$event.target.value)" />
             </td>
             <td class="actions"><button type="button" :aria-label="'删除' + rowTitle(index)" @click="remove(index)">删除</button></td>
@@ -29,6 +29,7 @@
 </template>
 <script setup>
 import { computed } from 'vue'
+import { autoGrow as vAutoGrow } from '../utils/dataSemantics.js'
 const props = defineProps({ section: { type: String, required: true }, modelValue: { type: Array, required: true } })
 const emit = defineEmits(['update:modelValue'])
 const title = computed(() => ({ inputs: '输入', parameters: '参数', outputs: '输出' })[props.section])

@@ -1333,6 +1333,12 @@ onMounted(() => { reloadAll() })
 }
 
 @media (max-width: 900px) {
+  .browser-layout { flex-direction: column; gap: 12px; }
+  .browser-tables { width: 100%; max-height: 128px; border-right: 0; border-bottom: 1px solid var(--border-color); }
+  .browser-content { padding: 0; min-height: 0; }
+  .card-header, .header-actions { flex-wrap: wrap; }
+  .header-left { min-width: 0; max-width: 100%; }
+  .header-left :deep(.el-input) { max-width: 100%; }
   .channel-layout {
     flex-direction: column;
     gap: 12px;

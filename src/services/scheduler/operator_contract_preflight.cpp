@@ -101,20 +101,21 @@ int32_t SchedulerPlugin::HandleOperatorContractCheck(const std::string&, const s
                 return Failure({"CONTRACT_INVALID", "operator rejected algorithm parameter", "/parameters"}, &rsp);
         adapter = dynamic_cast<IOperatorConfigAdapter*>(holder.get());
     }
-    Json contract, inputs(rapidjson::kArrayType), context(rapidjson::kObjectType);
+    OperatorContractSnapshot definition;
+    Json inputs(rapidjson::kArrayType), context(rapidjson::kObjectType);
+    const Value unknown_contract;
     auto& a = inputs.GetAllocator();
     auto& ca = context.GetAllocator();
     if (invocation.component.contract_state == "declared") {
         auto* service =
             querier_ ? static_cast<IOperatorDataContract*>(querier_->First(IID_OPERATOR_DATA_CONTRACT)) : nullptr;
-        OperatorContractSnapshot definition;
         if (!service) return Failure({"UNAVAILABLE", "declared contract service unavailable", ""}, &rsp);
         if (service->Resolve(invocation.component.contract_ref.c_str(), &definition, &issue))
             return Failure(issue, &rsp);
-        contract.Parse(definition.document_json->c_str());
     } else if (invocation.component.contract_state == "unavailable") {
         return Failure({"UNAVAILABLE", "declared contract unavailable", ""}, &rsp);
     }
+    const Value& contract = definition.document ? static_cast<const Value&>(*definition.document) : unknown_contract;
     Value shapes(rapidjson::kArrayType);
     size_t port_index = 0, port_count = 0;
     for (rapidjson::SizeType index = 0; index < request["inputs"].Size(); ++index) {

@@ -54,6 +54,7 @@ int main() {
     auto description = call("describe", req);
     assert(description["data"]["source_snapshot"]["fields"].Size() == 2);
     auto preview = call("preview", req);
+    assert(Get(preview["data"], "binding_state") == "unbound");
     assert(preview["data"]["dictionary"]["fields"].Size() == 2);
     assert(preview["data"]["dictionary"]["entity"]["row_meaning"]["state"] == "unknown");
     assert(preview["data"]["dictionary"]["fields"][1]["unit"]["state"] == "unknown");
@@ -90,15 +91,30 @@ int main() {
     assert(!same["data"]["created_revision"].GetBool());
     assert(Get(call("check", req)["data"], "state") == "matched");
     const auto first_binding = Get(applied["data"], "exact_reference");
+    const auto before_preview = calls;
     auto p2 = call("preview", req);
+    assert(calls == before_preview + 1 && Get(p2["data"], "binding_state") == "matched");
     assert(Get(p2["data"]["dictionary"]["fields"][1], "field_id") == duration_id);
     assert(Get(p2["data"]["dictionary"]["fields"][1]["definition"], "value") == "人工请求耗时说明");
+    Json alternate;
+    alternate.CopyFrom(dictionary, alternate.GetAllocator());
+    alternate["fields"][1]["type"]["name"].SetString("int64", alternate.GetAllocator());
+    SemanticsSaveResult alternate_saved;
+    assert(registry.Save({"dictionary", "alternate", Encode(alternate)}, &alternate_saved, &error) == 0);
+    Json alternate_request;
+    alternate_request.CopyFrom(req, alternate_request.GetAllocator());
+    Set(alternate_request, "base_dictionary_ref", alternate_saved.snapshot.exact_reference,
+        alternate_request.GetAllocator());
+    const auto alternate_preview = call("preview", alternate_request);
+    assert(Get(alternate_preview["data"], "binding_state") == "matched");
+    assert(Get(alternate_preview["data"], "state") == "needs_confirmation");
     // Source mutation after a preview cannot be applied with its stale basis.
     fields[1]["type"]["name"].SetString("int64", fa);
     source = Snapshot("dataframe", "persistent-id", locator, fields, metadata, "1");
     call("apply", apply, false, "SOURCE_CHANGED");
     assert(Get(call("check", req)["data"], "state") == "mismatch");
     auto changed = call("preview", req);
+    assert(Get(changed["data"], "binding_state") == "mismatch");
     assert(changed["data"]["required_confirmations"].Size() == 1);
     assert(changed["data"]["differences"][0]["kind"] == "type_changed");
     assert(changed["data"]["dictionary"]["fields"][1]["definition"] == manual);

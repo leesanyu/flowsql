@@ -134,3 +134,28 @@ node --test --test-isolation=none src/frontend/src/utils/dataSemantics.test.js s
 ```
 
 该清单覆盖 A1～A8、两个 HTTP 客户端并发、引用事务中途失败、跨进程恢复、HTTP/IID 摘要一致、旧配置字节保持及 OpenAPI 普通客户端消费。只使用临时 SQLite、随机回环端口与缓存 Chromium；无外部数据库/Kafka、模型或容器依赖。产物/源码摘要和页面诊断放在 `evidence/data-semantics-registry/`，标准 runner 清单位于 `evidence/test-environment/<run_id>/`，均不提交。
+
+## 静态说明读取与展示
+
+`test_metadata_reading_frontend` 将无损 JSON、作者/本地补充分离和时间说明的16条 Node 断言接入标准 runner。
+需要本地 Node 和前端依赖；无外部服务。真实页面由 `test_metadata_channel_browser`、`test_metadata_operator_browser`、`test_npm_semantics_http` 覆盖，
+使用已构建前端、本地 Chromium、临时 SQLite/PCAP 和回环端口，包含三视口、草稿/历史、完整语义及真实 JSON 下载。
+
+```bash
+cmake -B build src
+cmake --build build --target test_channel_dictionary_host test_operator_contract_host -j4
+tools/test.sh all --location native --filter '^(test_metadata_reading_frontend|test_metadata_channel_browser|test_metadata_operator_browser|test_npm_semantics_http)$' --jobs 1
+```
+
+`benchmark_semantics_reads` 是显式选择的性能 target，不纳入常规单测计时阈值。先构建
+`test_operator_contract_host`、`test_npm_data_contract`、`benchmark_npm_throughput`；准备同构建类型、同依赖的优化前基线，并验证宿主加载路径和依赖确实指向冻结产物。
+需要 GDB/ptrace、本地 Worker 依赖和 socket 权限；不访问外部数据库/Kafka。功能测试结束后独占运行，计时期间不构建或运行其他测试：
+
+```bash
+FLOWSQL_SEMANTICS_BASELINE_ROOT=/absolute/path/to/frozen/output \
+  cmake --build build --target benchmark_semantics_reads -j4
+```
+
+该 target 完整验证 HTTP/IID、首次与重复任务准备、离线/受控实时数据面及工作计数，失败非零退出；缺少基线不能算通过。
+源码/产物摘要、原始计时和审计保存在忽略提交的 `evidence/data-semantics-read-optimization/`。
+计时口径、历史结果与使用边界见[说明文档](data-semantics.md#静态读取性能与测量边界)；共享契约回归按实际影响另行选择，不默认要求全量测试或外部后端矩阵。

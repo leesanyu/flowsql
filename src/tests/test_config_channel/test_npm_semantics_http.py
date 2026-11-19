@@ -188,7 +188,7 @@ def static_existing_case(executable, source_root, backend, evidence, node=None):
 
 def main():
     executable = Path(sys.argv[1]).resolve()
-    evidence = ROOT / 'evidence/npm-data-semantics/t5-completion'
+    evidence = ROOT / 'evidence/data-semantics-read-optimization/npm-http'
     evidence.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='flowsql-npm-http-') as temporary:
         root = Path(temporary)

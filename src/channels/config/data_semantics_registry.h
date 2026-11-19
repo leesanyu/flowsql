@@ -1,6 +1,8 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
+#include <list>
+#include <map>
 #include <mutex>
 #include "data_semantics_model.h"
 struct sqlite3;
@@ -23,7 +25,14 @@ struct SemanticsReferenceItem {
 };
 class DataSemanticsRegistry : public IDataSemanticsRegistry {
  public:
-    DataSemanticsRegistry() = default;
+    // Includes owned text/DOM allocations and conservative index/node overhead.
+    static constexpr size_t kDefinitionCacheBudget = 64 * 1024 * 1024;
+    struct ReadStatistics {
+        uint64_t body_queries = 0, parses = 0, digests = 0, publications = 0, hits = 0, evictions = 0;
+        size_t retained_bytes = 0;
+    };
+    explicit DataSemanticsRegistry(size_t budget = kDefinitionCacheBudget) : cache_budget_(budget) {}
+    ReadStatistics Statistics() const;
     ~DataSemanticsRegistry() override;
     DataSemanticsRegistry(const DataSemanticsRegistry&) = delete;
     DataSemanticsRegistry& operator=(const DataSemanticsRegistry&) = delete;
@@ -45,7 +54,8 @@ class DataSemanticsRegistry : public IDataSemanticsRegistry {
                    DataSemanticsError* error);
 
  private:
-    int SaveUnlocked(const SemanticsSaveRequest& request, bool execution_owned, SemanticsSaveResult* out,
+    int SaveUnlocked(const SemanticsSaveRequest& request, const DataSemanticsSnapshot& definition,
+                     const std::vector<SemanticsReference>& references, bool execution_owned, SemanticsSaveResult* out,
                      DataSemanticsError* error);
     int WriteBatch(const std::vector<SemanticsSaveRequest>& requests, bool execution_owned,
                    std::vector<SemanticsSaveResult>* out, DataSemanticsError* error);
@@ -53,8 +63,27 @@ class DataSemanticsRegistry : public IDataSemanticsRegistry {
                       const std::vector<SemanticsReference>& references, std::string* structure_check,
                       DataSemanticsError* error);
     int Read(const std::string& reference, DataSemanticsSnapshot* out, DataSemanticsError* error);
+    int ReadBody(const std::string& reference, std::string* content, std::string* digest, DataSemanticsError* error);
+    int Decode(const std::string& reference, std::string content, const std::string& digest, DataSemanticsSnapshot* out,
+               DataSemanticsError* error);
+    bool Cached(const std::string& reference, DataSemanticsSnapshot* out);
+    int RefreshCache(DataSemanticsError* error);
+    void PublishDefinition(const DataSemanticsSnapshot& snapshot);
     int StorageError(DataSemanticsError* error);
     std::mutex mutex_;
     sqlite3* db_ = nullptr;
+    uint64_t generation_ = 0;
+    int data_version_ = 0;
+    // Lock order: mutex_ -> cache_mutex_. Cold loading never holds cache_mutex_ while acquiring mutex_.
+    std::mutex cold_mutex_;
+    mutable std::mutex cache_mutex_;
+    struct CacheEntry {
+        DataSemanticsSnapshot snapshot;
+        size_t bytes;
+    };
+    const size_t cache_budget_;
+    std::list<CacheEntry> cache_;
+    std::map<std::string, std::list<CacheEntry>::iterator> cache_index_;
+    ReadStatistics statistics_;
 };
 }  // namespace flowsql::channels::config

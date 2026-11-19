@@ -688,6 +688,12 @@
         "visualization_browser"
       ]
     },
+    "test_metadata_reading_frontend": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
     "test_metadata_description_client": {
       "services": [],
       "role": "source",

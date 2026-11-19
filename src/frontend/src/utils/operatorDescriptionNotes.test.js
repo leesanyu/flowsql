@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { reactive } from 'vue'
 import { operatorDescriptionNotes } from './operatorDescriptionNotes.js'
+import { parseJson, prettyJson, json } from './dataSemantics.js'
 
 function observed() {
   return {
@@ -18,14 +19,14 @@ function observed() {
   }
 }
 
-test('author descriptions initialize all editable text without inventing field rows', () => {
+test('author descriptions remain separate from empty local notes', () => {
   const result = operatorDescriptionNotes(observed())
-  assert.equal(result.purpose, '按配置评估时间序列')
-  assert.equal(result.input_description, '由配置选择数据集、时间列和指标')
-  assert.equal(result.parameter_description, 'config 与 parameters 二选一')
-  assert.equal(result.output_description, 'results：评估与预测结果\n\nmodels：仅配置模型目标时产生')
-  assert.equal(result.usage_notes, '预测行的观测值为空')
-  assert.deepEqual(result.examples, ["SELECT * FROM source USING operator WITH config='config.demo@1'"])
+  assert.equal(result.purpose, '')
+  assert.equal(result.input_description, '')
+  assert.equal(result.parameter_description, '')
+  assert.equal(result.output_description, '')
+  assert.equal(result.usage_notes, '')
+  assert.deepEqual(result.examples, [])
   for (const section of ['inputs', 'parameters', 'outputs']) assert.deepEqual(result[section], [])
 })
 
@@ -43,14 +44,14 @@ test('saved edits and explicit clearing override author descriptions', () => {
   assert.deepEqual(result.examples, [])
 })
 
-test('previously saved empty text receives author defaults while existing row edits survive', () => {
+test('previously saved empty text stays empty while existing row edits survive', () => {
   const data = observed()
   data.basis.description_ref = 'config.notes@1'
   data.usage.annotations.inputs = [{ name: 'bucket', description: '手工维护的时间列', type: 'int64', requirement: 'optional' }]
   const result = operatorDescriptionNotes(data)
-  assert.equal(result.purpose, '按配置评估时间序列')
-  assert.equal(result.usage_notes, '预测行的观测值为空')
-  assert.ok(result.examples[0].startsWith('SELECT'))
+  assert.equal(result.purpose, '')
+  assert.equal(result.usage_notes, '')
+  assert.deepEqual(result.examples, [])
   assert.deepEqual(result.inputs, data.usage.annotations.inputs)
   data.usage.identity.purposes.push({ origin: 'local', text: '原有用途' })
   assert.equal(operatorDescriptionNotes(data).purpose, '原有用途')
@@ -78,4 +79,13 @@ test('undeclared descriptions stay empty without name-based defaults', () => {
   const result = operatorDescriptionNotes(data)
   for (const key of ['purpose', 'input_description', 'parameter_description', 'output_description', 'usage_notes']) assert.equal(result[key], '')
   assert.deepEqual(result.examples, [])
+})
+
+test('pretty rules and copies preserve signed and unsigned 64 bit integers', () => {
+  const raw = '{"min":-9223372036854775808,"max":18446744073709551615,"quoted":"18446744073709551615","nested":[{"s":"a\\\"b"}]}'
+  const document = parseJson(raw)
+  assert.equal(document.min, -9223372036854775808n)
+  assert.equal(document.max, 18446744073709551615n)
+  assert.deepEqual(parseJson(prettyJson(document)), document)
+  assert.deepEqual(parseJson(json(document)), document)
 })

@@ -51,7 +51,7 @@ def call(base, operation, payload, expected=200):
 
 
 @contextlib.contextmanager
-def running_contract_host(host, directory, provider=True, npm=False):
+def running_contract_host(host, directory, provider=True, npm=False, startup_budget=25):
     used = set()
     ports = [port(used) for _ in range(4)]
     base = 'http://127.0.0.1:' + str(ports[2])
@@ -79,7 +79,7 @@ def running_contract_host(host, directory, provider=True, npm=False):
                                             *(['--npm-http'] if npm else [] if provider else ['without-provider'])],
                                            cwd=host.parent, env=dict(os.environ, FLOWSQL_GATEWAY_ADDR=''), stdin=subprocess.PIPE, stdout=log, stderr=log, text=True)
                 try:
-                    deadline = time.monotonic() + 25
+                    deadline = time.monotonic() + startup_budget
                     while 'CONTRACT_HOST_READY' not in host_log.read_text():
                         assert process.poll() is None and time.monotonic() < deadline, host_log.read_text()
                         time.sleep(.05)

@@ -27,8 +27,7 @@ struct BlockInvocation {
             OperatorContractSnapshot definition;
             if (!service) return Fail(&error, "UNAVAILABLE", "declared operator contract service unavailable");
             if (service->Resolve(invocation.component.contract_ref.c_str(), &definition, &error)) return -1;
-            Json document;
-            document.Parse(definition.document_json->c_str());
+            const auto& document = *definition.document;
             if (!document["inputs"].Empty()) {
                 Json snapshot;
                 std::string binding;

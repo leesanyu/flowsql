@@ -36,7 +36,7 @@ const Value* NamedField(const Value& fields, const std::string& name) {
 int Bind(IQuerier* querier, const Value& locator, const Value* domain, const std::string& view,
          const std::string& marker, const std::string& run_dictionary, const std::string& session_target,
          Value* relation, Alloc& a, DataSemanticsError* error) {
-    Json request(rapidjson::kObjectType), preview, check;
+    Json request(rapidjson::kObjectType), preview;
     request.AddMember("locator", Copy(locator, request.GetAllocator()), request.GetAllocator());
     if (contracts::Control(querier, "channels/preview", request, &preview, error)) return -1;
     const auto& data = preview["data"];
@@ -46,11 +46,10 @@ int Bind(IQuerier* querier, const Value& locator, const Value* domain, const std
     const bool bound = data["binding_ref"].IsString();
     const auto& old = data["dictionary"];
     if (bound) {
-        if (contracts::Control(querier, "channels/check", request, &check, error)) return -1;
         const auto& metadata = source["producer_metadata"];
         const bool same_component =
             Get(metadata, "default_contract_ref") + " / " + Get(metadata, "default_component_revision") == marker;
-        if (Get(check["data"], "state") != "matched" || !same_component)
+        if (Get(data, "binding_state") != "matched" || !same_component)
             return Fail(error, "SOURCE_CHANGED", "existing NPM description requires source/component review");
     }
     if (domain && source["fields"].Size() != (*domain)["fields"].Size() + 3)
@@ -84,8 +83,7 @@ int Bind(IQuerier* querier, const Value& locator, const Value* domain, const std
     auto& sa = save.GetAllocator();
     const auto dictionary_name = "npm." + Hash(Canonical(source["object_key"]) + Canonical(dictionary));
     const auto candidate_reference = "dictionary." + dictionary_name + "@1";
-    if (bound && Get(check["data"], "binding_ref") == Get(data, "binding_ref") &&
-        Get(data, "base_dictionary_ref") == candidate_reference && data["field_map"] == field_map) {
+    if (bound && Get(data, "base_dictionary_ref") == candidate_reference && data["field_map"] == field_map) {
         // The live source/component checks above still run for every invocation.
         // An identical content-addressed declaration needs no new save/apply transaction.
         relation->SetObject();
@@ -140,8 +138,8 @@ int PublishNpmResultSemantics(IQuerier* querier, const OperatorComponentContract
     if (!service) return Fail(error, "UNAVAILABLE", "NPM contract service unavailable");
     OperatorContractSnapshot snapshot;
     if (service->Resolve(component.contract_ref.c_str(), &snapshot, error)) return -1;
-    Json contract, result;
-    contract.Parse(snapshot.document_json->c_str());
+    const auto& contract = *snapshot.document;
+    Json result;
     result.Parse(actual_result_json.c_str());
     if (!result.IsObject() || Get(result, "run_id").empty() || !result.HasMember("entities") ||
         !result["entities"].IsArray())

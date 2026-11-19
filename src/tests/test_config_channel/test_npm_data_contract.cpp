@@ -1,6 +1,7 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 #include <arrow/api.h>
+#include <channels/config/data_semantics_registry.h>
 #include <channels/config/operator_data_contract_model.h>
 #include <channels/config/operator_usage.h>
 #include <framework/interfaces/iflow_labeling.h>
@@ -9,9 +10,14 @@
 #include <operators/npm_basic/npm_basic_operator.h>
 #include <operators/npm_basic/npm_family_result_contract.h>
 #include <rapidjson/pointer.h>
+#include <unistd.h>
+#include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <iostream>
+#include <map>
 #include <set>
+#include <thread>
 
 extern "C" const char* flowsql_operator_data_contract(int index);
 using namespace flowsql;
@@ -267,7 +273,7 @@ void CheckProtocolDictionary(const Value& dictionary, const npm::NpmEntityDescri
 }
 }  // namespace
 
-int main() {
+int main(int argc, char* argv[]) {
     CheckConfigAdapter();
     const char* text = flowsql_operator_data_contract(0);
     assert(text && *text);
@@ -279,6 +285,70 @@ int main() {
     const int rc = NormalizeSemantics("operator_contract", text, &doc, &references, &error);
     if (rc) std::cerr << error.field_path << " " << error.message << '\n';
     assert(rc == 0);
+    std::shared_ptr<const Json> resource_projections;
+    // Audit the real generated contract, not the smaller source template.
+    {
+        assert(std::strlen(text) > 2 * 1024 * 1024);
+        DataSemanticsRegistry registry;
+        char file[] = "/tmp/flowsql-contract-hot-XXXXXX";
+        const auto fd = mkstemp(file);
+        assert(fd >= 0);
+        close(fd);
+        assert(registry.Open(file, &error) == 0);
+        SemanticsSaveResult saved;
+        assert(registry.Save({"standard", "bench", R"({"schema_id":"flowsql.data-standard","title":"bench"})"}, &saved,
+                             &error) == 0);
+        assert(registry.Save({"dictionary", "bench",
+                              R"({"schema_id":"flowsql.data-dictionary","title":"bench","entity":{},"fields":[]})"},
+                             &saved, &error) == 0);
+        assert(registry.Save({"operator_contract", "npm.basic", text}, &saved, &error) == 0);
+        assert(saved.snapshot.dictionary_resources &&
+               (*saved.snapshot.dictionary_resources)["resources"]["managed_dictionaries"].MemberCount() == 50);
+        resource_projections = saved.snapshot.dictionary_resources;
+        IDataSemanticsRegistry& iid = registry;
+        const auto warm = registry.Statistics();
+        std::map<std::string, std::vector<double>> samples;
+        for (int i = 0; i < 100; ++i) {
+            for (const char* reference : {"standard.bench@1", "dictionary.bench@1", "operator_contract.npm.basic@1"}) {
+                DataSemanticsSnapshot snapshot;
+                const auto start = std::chrono::steady_clock::now();
+                assert(iid.Resolve(reference, &snapshot, &error) == 0);
+                samples[reference].push_back(
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+                assert(snapshot.exact_reference == reference);
+                if (snapshot.exact_reference == "operator_contract.npm.basic@1")
+                    assert(snapshot.document == saved.snapshot.document &&
+                           snapshot.document_json == saved.snapshot.document_json);
+            }
+        }
+        std::vector<std::thread> readers;
+        for (int i = 0; i < 8; ++i)
+            readers.emplace_back([&] {
+                DataSemanticsError e;
+                for (int n = 0; n < 16; ++n) {
+                    DataSemanticsSnapshot snapshot;
+                    assert(iid.Resolve("operator_contract.npm.basic@1", &snapshot, &e) == 0);
+                    assert(snapshot.document == saved.snapshot.document);
+                }
+            });
+        for (auto& reader : readers) reader.join();
+        const auto hot = registry.Statistics();
+        assert(hot.body_queries == warm.body_queries && hot.parses == warm.parses && hot.digests == warm.digests);
+        assert(hot.retained_bytes <= DataSemanticsRegistry::kDefinitionCacheBudget);
+        if (argc == 2) {
+            assert(std::string(argv[1]) == "--performance");
+            for (auto& [reference, times] : samples) {
+                std::sort(times.begin(), times.end());
+                std::cout << "IID reference=" << reference << " p95_ms=" << times[94]
+                          << " contract_bytes=" << std::strlen(text) << " retained_bytes=" << hot.retained_bytes
+                          << '\n';
+                assert(times[94] <= 1.0);
+            }
+        } else
+            assert(argc == 1);
+        registry.Close();
+        unlink(file);
+    }
     assert(Get(doc["operator"], "category") == "npm" && Get(doc["operator"], "name") == "basic");
     assert(doc["configuration"]["invocation_schema"]["properties"].MemberCount() == 5);
     assert(doc["outputs"].Size() == 2 && doc["outputs"][0]["variants"].Size() == 13);
@@ -291,6 +361,10 @@ int main() {
         std::vector<SemanticsReference> links;
         assert(item.value.HasMember("schema_canonical"));
         assert(NormalizeSemantics("dictionary", Encode(item.value["dictionary"]), &dictionary, &links, &error) == 0);
+        const auto* projection =
+            rapidjson::Pointer((std::string("/resources/managed_dictionaries/") + item.name.GetString()).c_str())
+                .Get(*resource_projections);
+        assert(projection && *projection == dictionary);
         for (const auto& field : dictionary["fields"].GetArray()) {
             assert(field["definition"]["state"] == "declared");
             const auto& time = field["time_semantics"];
@@ -380,7 +454,7 @@ int main() {
     basis.Parse(R"({"contract_ref":"operator_contract.npm.basic@1"})");
     contract.Parse(R"({"state":"declared"})");
     Set(contract, "document", Copy(doc, contract.GetAllocator()), contract.GetAllocator());
-    auto usage = operator_usage::Build(subject, basis, contract, notes, context);
+    auto usage = operator_usage::Build(subject, basis, contract["document"], Get(contract, "state"), notes, context);
     assert(usage["usage"]["identity"]["purposes"][0]["text"] == doc["description"]);
     assert(usage["usage"]["parameters"]["description"] == doc["configuration"]["description"]);
     assert(usage["usage"]["inputs"][0]["description"] == doc["inputs"][0]["description"]);

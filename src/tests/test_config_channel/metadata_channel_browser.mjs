@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict'
 import { mkdir, writeFile } from 'node:fs/promises'
+import { json, parseJson, blankDocument, semanticKeys } from '../../frontend/src/utils/dataSemantics.js'
+import { downloads } from './semantics_browser_download.mjs'
 import { openBrowser } from '../test_visualization/browser_support.mjs'
 const [base, evidence] = process.argv.slice(2)
-const sourceDiffEvidence = `${evidence}/../source-diff-dialog`
+const sourceDiffEvidence = `${evidence}/source-diff-dialog`
 await mkdir(sourceDiffEvidence, { recursive: true })
-const dataframeLoadEvidence = `${evidence}/../dataframe-auto-load`
+const dataframeLoadEvidence = `${evidence}/dataframe-pending`
 await mkdir(dataframeLoadEvidence, { recursive: true })
 const b = await openBrowser(base), { evaluate: ev, wait, send, pause } = b
+const download = downloads(b, evidence)
 const body = () => ev('document.body.innerText')
 const text = value => wait(async () => (await body()).includes(value), value)
 const ready = () => wait(()=>ev('!!document.querySelector("[aria-label=对象说明]:enabled")'),'editable description')
@@ -24,10 +27,11 @@ async function mouse(expression) {
 }
 const click = async (label,scope='document') => {await wait(()=>ev(`!!(${find(label,scope)})`),label);await mouse(find(label,scope))}
 const set = async (label,value) => ev(`(()=>{const e=document.querySelector(${JSON.stringify('[aria-label="'+label+'"]')});if(!e||e.disabled)throw Error('missing input '+${JSON.stringify(label)});e.value=${JSON.stringify(value)};e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}))})()`)
-const api = async (path,payload,status=200) => {const r=await fetch(base+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();assert.equal(r.status,status,JSON.stringify(d));return d.data||d}
-async function seedCompleteDictionary(locator, before, edits, name) {
+const api = async (path,payload,status=200) => {const r=await fetch(base+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:json(payload)});const d=parseJson(await r.text());assert.equal(r.status,status,json(d));return d.data||d}
+async function seedCompleteDictionary(locator, before, edits, name, entity = {}) {
   const document = structuredClone(before.description.document)
   for (const field of document.fields) Object.assign(field, edits[field.name] || {})
+  Object.assign(document.entity, entity)
   const saved = await api('semantics/v1/save', { kind: 'dictionary', name, expected_current_revision: 0, document })
   const observed = await api('semantics/v1/channels/describe', { locator })
   const reference = before.basis.binding_ref?.match(/^binding\.(.+)@(\d+)$/)
@@ -56,9 +60,9 @@ const descriptionActions = "document.querySelector('[data-testid=channel-descrip
 const saveDescription = () => click('保存',descriptionActions)
 const toggleFields = () => mouse("document.querySelector('[data-testid=channel-description] .field-header-actions button')")
 async function collapseFields(width,theme) {
-  const read = () => ev(`(()=>{const p=document.querySelector('[data-testid=channel-description]'),buttons=[...p.querySelectorAll('.heading-actions button')];return {draft:[...p.querySelectorAll('.fields input,.fields textarea,.fields select')].map(e=>[e.getAttribute('aria-label'),e.value]),filter:p.querySelector('[aria-label=搜索字段名]').value,visibleRows:[...p.querySelectorAll('.fields tbody tr')].filter(e=>e.getClientRects().length).length,searchVisible:!!p.querySelector('.field-toolbar').getClientRects().length,expanded:p.querySelector('.field-header-actions button').getAttribute('aria-expanded'),bottom:p.querySelector('details').getBoundingClientRect().top-p.getBoundingClientRect().top,actions:buttons.map(e=>({label:e.textContent,disabled:e.disabled,center:e.getBoundingClientRect().y+e.getBoundingClientRect().height/2})),saveCount:[...p.querySelectorAll('button')].filter(e=>e.textContent==='保存').length}})()`)
+  const read = () => ev(`(()=>{const p=document.querySelector('[data-testid=channel-description]'),buttons=[...p.querySelectorAll('.heading-actions button')];return {draft:[...p.querySelectorAll('.fields input,.fields textarea,.fields select')].map(e=>[e.getAttribute('aria-label'),e.value]),filter:p.querySelector('[aria-label=搜索字段名]').value,visibleRows:[...p.querySelectorAll('.fields tbody tr')].filter(e=>e.getClientRects().length).length,searchVisible:!!p.querySelector('.field-toolbar').getClientRects().length,expanded:p.querySelector('.field-header-actions button').getAttribute('aria-expanded'),bottom:p.querySelector('[data-testid=description-json]').parentElement.getBoundingClientRect().top-p.getBoundingClientRect().top,actions:buttons.map(e=>({label:e.textContent,disabled:e.disabled,center:e.getBoundingClientRect().y+e.getBoundingClientRect().height/2})),saveCount:[...p.querySelectorAll('button')].filter(e=>e.textContent==='保存').length}})()`)
   const before=await read(), requests=await counts()
-  assert.deepEqual(before.actions.map(e=>e.label),['保存','刷新']);assert.equal(before.saveCount,1)
+  assert.deepEqual(before.actions.map(e=>e.label),['下载 JSON','保存','刷新']);assert.equal(before.saveCount,1)
   assert.ok(before.actions.every(e=>!e.disabled));assert.ok(Math.abs(before.actions[0].center-before.actions[1].center)<1)
   assert.ok(before.visibleRows>0);assert.equal(before.expanded,'true')
   await toggleFields()
@@ -99,35 +103,29 @@ try {
     await navigate(); assert.deepEqual(await counts(),{describe:0,rows:0,consume:0});await layout()
     await writeFile(`${evidence}/dataframe-${width}.png`,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
     const before=await counts()
-    if(width===1280)await ev(`window.__dataframePreview=()=>new Promise(resolve=>{window.__completeDfLoad=()=>resolve(new Response(JSON.stringify({error:'fixture load failure'}),{status:503}))})`)
     await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='sample')`)
     await text('数据说明')
-    if(width===1280){
-      await text('正在加载 DataFrame…')
-      assert.equal((await counts()).rows,before.rows+1)
-      assert.deepEqual(await ev(`(()=>{const p=document.querySelector('[data-testid=channel-description]');return {disabled:[...p.querySelectorAll('.heading-actions button')].every(e=>e.disabled),form:!!p.querySelector('fieldset')}})()`),{disabled:true,form:false})
-      await writeFile(`${dataframeLoadEvidence}/loading.png`,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
-      await ev('window.__completeDfLoad()');await text('加载 DataFrame 结构失败')
+    if(width===1280) {
+      await text('结构尚未加载')
+      assert.equal((await counts()).rows, before.rows)
       assert.equal(await ev('!!document.querySelector("[aria-label=对象说明]")'),false)
+      await click('刷新',descriptionActions);await text('结构尚未加载')
+      assert.equal((await counts()).rows,before.rows,'刷新说明不加载业务行')
       assert.equal(await descriptionWrites(),0)
-      await writeFile(`${dataframeLoadEvidence}/failed.png`,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
-      await ev('window.__dataframePreview=next=>new Promise(resolve=>{window.__completeDfLoad=()=>{delete window.__dataframePreview;resolve(next())}})')
-      await click('刷新',descriptionActions);await text('正在加载 DataFrame…')
-      assert.equal((await counts()).rows,before.rows+2)
-      await ev('document.querySelector("[data-testid=channel-description] .heading-actions button:last-child").click()')
-      assert.equal((await counts()).rows,before.rows+2,'加载中不重复请求')
-      await ev('window.__completeDfLoad()')
+      await writeFile(`${dataframeLoadEvidence}/pending.png`,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
+      await closeDialog()
+      await click('预览',`[...document.querySelectorAll('.el-table__body tr')].find(r=>r.querySelector('.object-name')?.textContent.trim()==='sample')`)
+      await wait(()=>ev('document.querySelector(".el-pagination__total")?.textContent.includes("45")'),'explicit DataFrame preview')
+      await closeDrawer()
+      await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='sample')`)
     }
     await ready()
-    assert.equal((await counts()).rows,before.rows+(width===1280?2:0));assert.equal((await counts()).consume,0)
-    assert.ok(!(await ev('document.querySelector("[data-testid=channel-description]").innerText')).includes('显式加载 DataFrame 结构'))
+    assert.equal((await counts()).rows,before.rows+(width===1280?1:0));assert.equal((await counts()).consume,0)
     if(width===1280){
-      assert.equal(await descriptionWrites(),0,'进入说明只加载来源，不保存说明')
-      assert.deepEqual(await ev('window.__requests.filter(r=>r.url.endsWith("/dataframe/preview")).map(r=>JSON.parse(r.body))'),[{name:'sample',page:1,page_size:1},{name:'sample',page:1,page_size:1}])
+      assert.equal(await descriptionWrites(),0,'读取说明不保存说明')
       await writeFile(`${dataframeLoadEvidence}/ready.png`,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
       const loaded=await counts()
       await closeDialog()
-      await wait(()=>ev(`[...document.querySelectorAll('.el-table__body tr')].find(r=>r.querySelector('.object-name')?.textContent.trim()==='sample')?.textContent.includes('已加载')`),'loaded list state')
       await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='sample')`);await ready()
       assert.equal((await counts()).rows,loaded.rows,'已加载实例重新进入不重复预览')
       await saveMeaning('value','CSV object meaning')
@@ -148,10 +146,57 @@ try {
       assert.ok(!(await ev('document.querySelector("[data-testid=description-json]").textContent')).includes('search draft'))
       await saveMeaning('value','CSV object meaning')
       const locator={kind:'dataframe',name:'sample'}, before=await api('semantics/v1/describe',{target:{kind:'channel',locator}})
-      await seedCompleteDictionary(locator,before,{value:{null_meaning:{state:'declared',origin:'imported',value:'not measured'},validity:{state:'declared',origin:'manual',value:{mode:'descriptive',description:'positive values only',field_ids:[]}}}},'fixture.channel.advanced')
+      const declaration = (value, origin = 'imported') => ({ state:'declared', value, origin })
+      const standard = blankDocument('standard');standard.title='Reading fixture standard'
+      const standardRef=(await api('semantics/v1/save',{kind:'standard',name:'fixture.reading',expected_current_revision:0,document:standard})).exact_reference
+      const ids=Object.fromEntries(before.description.document.fields.map(f=>[f.name,f.field_id]))
+      await seedCompleteDictionary(locator,before,{value:{
+        title:'完整字段标题与长名称说明'.repeat(6), role:declaration('measure'),measure_kind:declaration('cumulative'),
+        unit:{state:'not_applicable',origin:'producer',value:null}, null_meaning:declaration('not measured'),
+        validity:declaration({mode:'descriptive',description:'positive values only',field_ids:[ids.id]},'manual'),
+        aggregation:declaration([{operation:'sum',condition:{mode:'descriptive',description:'only within one identity',field_ids:[ids.id]}}]),
+        value_domain:declaration({kind:'range',min:-9223372036854775808n,max:18446744073709551615n,min_inclusive:true,max_inclusive:true}),
+        standard_refs:declaration([standardRef]),
+        time_semantics:declaration({kind:'duration',unit:declaration({code:'ns',label:'纳秒'}),description:declaration('完整复杂时间含义')})
+      }},'fixture.channel.advanced',{
+        row_semantics:declaration('cumulative'),identity_fields:declaration([ids.id]),revision_field:declaration(ids.value_extra),
+        time_fields:declaration([ids.id]),limitations:declaration(['限定同一身份及窗口阅读'.repeat(15)])
+      })
       await click('刷新',descriptionActions);await text('not measured');await text('positive values only')
-      assert.equal(await ev('document.querySelector("[aria-label=\\"value 字段说明\\"]").value'),'CSV object meaning')
-      assert.ok(await ev('!document.querySelector("[data-testid=channel-description] [aria-label*=来源], [data-testid=channel-description] [aria-label*=状态]")'))
+      assert.equal(await ev(`document.querySelector('[aria-label="value 字段说明"]').value`),'CSV object meaning')
+      await mouse(`document.querySelector('[data-testid=object-semantics] > summary')`)
+      for(const [key,value] of [['identity_fields','id'],['revision_field','value_extra'],['time_fields','id'],['limitations','限定同一身份及窗口阅读']])
+        assert.ok((await ev('document.querySelector('+JSON.stringify('[data-entity-semantic="'+key+'"]')+').innerText')).includes(value))
+      await mouse(`document.querySelector('[data-field-semantics="value"] > summary')`)
+      assert.equal(await ev(`document.querySelectorAll('[data-field-semantics="value"] [data-field-semantic]').length`),semanticKeys.field.length)
+      for(const [key,value] of [['role','measure'],['measure_kind','cumulative'],['standard_refs',standardRef],['unit','不适用'],['time_semantics','完整复杂时间含义'],['value_domain','18446744073709551615']])
+        assert.ok((await ev('document.querySelector('+JSON.stringify('[data-field-semantics="value"] [data-field-semantic="'+key+'"]')+').innerText')).includes(value),key)
+      assert.ok((await ev(`document.querySelector('[data-field-semantics="id"] [data-field-semantic="role"]').textContent`)).includes('未知'))
+      const precise=await api('semantics/v1/describe',{target:{kind:'channel',locator}})
+      const longDraft='未保存的很长说明，用于验证随内容增高且不会混入下载。'.repeat(30)
+      await set('value 字段说明',longDraft)
+      for(const [w,h] of [[1440,1000],[1024,768],[390,844]]) {
+        await send('Emulation.setDeviceMetricsOverride',{width:w,height:h,deviceScaleFactor:1,mobile:false});await pause(200)
+        const r=await ev(`(()=>{const p=document.querySelector('[data-testid=channel-description]'),d=p.closest('.el-dialog').getBoundingClientRect(),t=p.querySelector('.fields'),header=[...t.querySelector('thead tr').children],row=[...t.querySelector('tbody tr').children],editor=p.querySelector('[aria-label="value 字段说明"]');return {overflow:document.documentElement.scrollWidth>innerWidth+1,dialog:d.left>=0&&d.right<=innerWidth,aligned:header.every((x,i)=>Math.abs(x.getBoundingClientRect().width-row[i].getBoundingClientRect().width)<2),grown:editor.clientHeight>=editor.scrollHeight-1}})()`)
+        assert.ok(!r.overflow&&r.dialog&&r.aligned&&r.grown,JSON.stringify({w,...r}))
+        await mouse(`document.querySelector('[data-testid=object-semantics] > summary')`);await mouse(`document.querySelector('[data-testid=object-semantics] > summary')`)
+        await writeFile(`${evidence}/complete-semantics-${w}.png`,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
+      }
+      await send('Emulation.setDeviceMetricsOverride',{width:1280,height:800,deviceScaleFactor:1,mobile:false})
+      const exported=await download(()=>click('下载 JSON',descriptionActions))
+      assert.equal(exported.value.source_reference,precise.basis.dictionary_ref)
+      assert.deepEqual(exported.value.document,precise.description.document)
+      assert.ok(exported.content.includes('18446744073709551615')&&exported.content.includes('-9223372036854775808'))
+      assert.ok(!exported.content.includes(longDraft),'download excludes current drafts')
+      await ev('navigator.clipboard.writeText=async value=>{window.__copied=value}')
+      await click('复制 JSON');assert.deepEqual(parseJson(await ev('window.__copied')).description.document,precise.description.document)
+      assert.equal(await ev(`document.querySelector('[aria-label="value 字段说明"]').value`),longDraft,'download/copy preserve draft')
+      await set('value 字段说明','CSV object meaning')
+      const beforeSave=precise.description.document
+      await saveMeaning('value','CSV object meaning')
+      const afterSave=(await api('semantics/v1/describe',{target:{kind:'channel',locator}})).description.document
+      assert.deepEqual(afterSave,beforeSave,'ordinary save preserves every declared field and object semantic')
+      assert.deepEqual((await api('semantics/v1/resolve',{exact_reference:precise.basis.dictionary_ref})).document,beforeSave,'historical dictionary is unchanged')
       const current=await api('semantics/v1/describe',{target:{kind:'channel',locator}})
       await ev(`sessionStorage.setItem('flowsql.channel-description.'+JSON.stringify(${JSON.stringify(locator)}),JSON.stringify({basis:${JSON.stringify(current.basis)},editor_changes:{fields:{value:{definition:'restored draft'}}}}))`)
       await closeDialog();await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='sample')`)
@@ -194,11 +239,15 @@ try {
       await saveMeaning('value','CSV object meaning')
       const linked=await api('semantics/v1/describe',{target:{kind:'channel',locator}}), relationships=linked.description.document.entity.relations.value
       assert.equal(relationships.length,2);assert.equal(Object.keys(relationships[1].field_map).length,2)
+      assert.equal(await ev('document.querySelectorAll("[data-joint-relation]").length'),2)
+      for(const name of ['id','value'])assert.ok(await ev(`document.querySelector(${JSON.stringify('[data-description-field="'+name+'"]')}).nextElementSibling.querySelector('a[href="#object-relation-1"]') !== null`))
+      await mouse(`document.querySelector('[data-description-field="value"]').nextElementSibling.querySelector('a[href="#object-relation-1"]')`)
+      assert.equal(await ev('document.querySelector("[data-testid=object-semantics]").open'),true)
       const targetRevision=relationships[0].dictionary_ref
       await set('搜索字段名','value');await set('搜索字段名','');await saveMeaning('value','CSV object meaning')
       assert.equal((await api('semantics/v1/describe',{target:{kind:'channel',locator}})).description.document.entity.relations.value[0].dictionary_ref,targetRevision)
       await ev(`(()=>{const f=window.fetch;let once=true;window.fetch=function(u,o){if(once&&String(u).endsWith('/semantics/v1/resolve')){once=false;return Promise.resolve(new Response(JSON.stringify({error:{code:'NOT_FOUND',message:'fixture unavailable',field_path:''}}),{status:404}))}return f.apply(this,arguments)}})()`)
-      await closeDialog();await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='sample')`);await ready();await text('目标暂不可读，原关系已保留')
+      await closeDialog();await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='sample')`);await ready();await mouse(`document.querySelector('[data-testid=object-semantics] > summary')`);await text('目标暂不可读，原关系已保留')
       await saveMeaning('value','CSV object meaning')
       assert.deepEqual((await api('semantics/v1/describe',{target:{kind:'channel',locator}})).description.document.entity.relations.value,relationships)
       const listRequests=await ev('window.__requests.length')
@@ -322,7 +371,7 @@ try {
   const locator={kind:'dataframe',name:'sample'}, d=await api('semantics/v1/describe',{target:{kind:'channel',locator}})
   await api('semantics/v1/channels/save-description',{locator,basis:d.basis,editor_changes:{description:'external edit'}})
   await saveDescription();await text('REVISION_CONFLICT');assert.equal(await ev('document.querySelector("[aria-label=\\"value 字段说明\\"]").value'),'retained conflict draft')
-  await closeDialog();await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim().startsWith('long_channel_name'))`)
+  await closeDialog();await click('预览',`[...document.querySelectorAll('.el-table__body tr')].find(r=>r.querySelector('.object-name')?.textContent.trim().startsWith('long_channel_name'))`);await wait(()=>ev('document.querySelector(".el-pagination__total")?.textContent.includes("45")'),'load isolated object');await closeDrawer();await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim().startsWith('long_channel_name'))`)
   await ready();assert.equal(await ev('document.querySelector("[aria-label=对象说明]").value'),'');await closeDialog()
   // Retained management actions use the same actual mouse/hit checks as the new entry.
   const dfRow=name=>`[...document.querySelectorAll('.el-table__body tr')].find(r=>r.querySelector('.object-name')?.textContent.trim()===${JSON.stringify(name)})`

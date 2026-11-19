@@ -25,8 +25,8 @@
 
 下一阶段围绕“在具体通道/算子上维护说明，并为未来大模型调用提供可理解接口”推进，目标不再是独立标准数据字典产品。
 `data-semantics-dictionary` Epic 的 F1～F3 已交付，作为版本、来源和执行契约基础保留；新入口及未实施范围见 [Epic 调整](specs/epic-data-semantics-dictionary.md)。
-优先顺序为 `metadata-description-query` → `npm-data-semantics` 的 DNS 及必要上下文交付 → `llm-skill-diagnosis`；
-模型诊断不等待全部 NPM 实体说明、SQL DESC 或查询/图表语义增强。后续领域说明仍由 F4 完成，F5 降为 P2 独立增强，其余规划保持原业务边界。
+对象说明管理及 `npm-data-semantics` 全部实体已完成；`data-semantics-read-optimization` 的静态读取性能、通用 Web 展示与 JSON 下载也已完成并归档。
+`llm-skill-diagnosis` 继续复用相同说明接口，模型工具接入保持独立边界，不等待 SQL DESC 或查询/图表语义增强；F5 仍为 P2 独立增强，其余规划保持原业务边界。
 长期任务恢复、探索成果保存与原始报文调查已移至长远规划，不作为首期模型诊断的前置条件。
 
 | 状态 | Feature | 优先级 | 目标 | 规格 |
@@ -41,6 +41,7 @@
 | [x] | 通道说明默认初始化 (`channel-description-default-initialization`) | P1 | 让配置通道字段关联的用户直接选择已知结构目标，系统建立默认说明并提供精确目标字段；已有关联优先展示管理列表，字段设置和辅助说明分别对齐，减少页面切换及误操作。 | [规格](archive/feat-channel-description-default-initialization.md) |
 | [x] | 算子契约说明重构与精简 (`operator-description-refinement`) | P1 | 让 Python、内置及 C++ 算子的使用者和未来模型依据与真实实现核对后的契约，通过同一精简接口理解用途、输入、参数、输出、限制与示例，并在简洁页面直接维护说明；纠正有证据的声明错误，完整机器契约与本地文字分别保存，复杂规则按需读取、未知保持明确，Python 源码在前、契约入口在后，本次重构不要求向后兼容。 | [规格](archive/feat-operator-description-refinement.md) |
 | [x] | NPM 数据与算子说明 (`npm-data-semantics`) | P1 | 让查询 NPM 结果的用户及未来诊断程序，从具体结果对象取得经生产实现核对的字段、时间、方向、NULL/有效性、修订及必要关联说明，减少误判和重复累计；优先复用已交付模型和机制，提供十二个实体的默认领域内容及有限 PCAP/PCAPNG→SQLite/MySQL/PostgreSQL/ClickHouse 托管结果关联，说明机制通过通用结构接口支持后端扩展；初始构建阶段不承担与当前代码的兼容，不扩展公共语义系统、协议指标或实时/容器矩阵。 | [归档](archive/feat-npm-data-semantics.md)；[拆分边界](specs/epic-data-semantics-dictionary.md#npm-data-semantics) |
+| [x] | 静态说明读取与展示优化 (`data-semantics-read-optimization`) | P1 | 让频繁阅读标准、字典和算子契约的用户、任务执行器及未来模型调用方，快速取得静态定义与同版本局部说明，消除小摘要因反复处理大契约造成的秒级等待并降低任务准备开销；通过通用分层页面完整展示字段、参数、条件和关联，提供对象内 JSON 下载，保留实时来源核验、人工补充与精确历史，使程序读取和日常阅读共用可靠内容。 | [归档](archive/feat-data-semantics-read-optimization.md)；[责任边界](specs/epic-data-semantics-dictionary.md#data-semantics-read-optimization) |
 | [ ] | 大模型与 Skills 交互式异常诊断 (`llm-skill-diagnosis`) | P1 | 让网络分析用户针对选定问题、时间窗和数据范围，借助大模型与可复用诊断 skills 获得有证据支持的分析及后续验证建议；首期使用已有 NPM DNS 结果，依赖 SQL 指引、通道/算子描述接口及已验收的 DNS 必要说明，组织发现→描述→按需预检→受控查询→解释，输出事实、候选原因和证据不足；模型工具适配归本 Feature，不等待完整语义 Epic、DESC/图表集成、探索持久化、长期任务恢复或包回溯，不包含自动修复或无证据根因承诺。 | 待创建 |
 | [ ] | 工作台与探索中的说明增强 (`data-semantics-consumption`) | P2 | 让频繁编写 SQL、查询及绘图的用户在使用数据时就地查阅说明，减少页面切换；复用对象描述接口提供同步 DESC 快捷查询、结果/探索字段说明及可追溯的已支持来源关系，未知表达式保持未知；作为独立体验增强，不作为普通程序或模型调用的前置条件。 | 待创建；[拆分边界](specs/epic-data-semantics-dictionary.md#data-semantics-consumption) |
 

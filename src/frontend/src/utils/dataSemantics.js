@@ -30,7 +30,45 @@ export function json(value) {
   if (value && typeof value === 'object') return '{' + Object.entries(value).map(([k, v]) => JSON.stringify(k) + ':' + json(v)).join(',') + '}'
   return JSON.stringify(value)
 }
+export const prettyJson = value => {
+  const compact = json(value)
+  if (compact === undefined) return ''
+  let depth = 0
+  let output = ''
+  let quoted = false
+  let escaped = false
+  for (const char of compact) {
+    if (quoted) {
+      output += char
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') quoted = false
+      continue
+    }
+    if (char === '"') { quoted = true; output += char }
+    else if (char === '{' || char === '[') { output += char + '\n' + '  '.repeat(++depth) }
+    else if (char === '}' || char === ']') { output += '\n' + '  '.repeat(--depth) + char }
+    else if (char === ',') output += ',\n' + '  '.repeat(depth)
+    else if (char === ':') output += ': '
+    else output += char
+  }
+  return output
+}
+const grow = element => { element.style.height = 'auto'; element.style.height = element.scrollHeight + 2 + 'px' }
+const growthObservers = new WeakMap()
+export const autoGrow = {
+  mounted(element) { const observer = new ResizeObserver(() => grow(element)); observer.observe(element); growthObservers.set(element, observer); grow(element) },
+  updated: grow,
+  unmounted(element) { growthObservers.get(element).disconnect(); growthObservers.delete(element) }
+}
 export const clone = v => parseJson(json(v))
+export function downloadJson(filename, content) {
+  const url = URL.createObjectURL(new Blob([content], { type: 'application/json;charset=utf-8' }))
+  const link = document.createElement('a')
+  link.href = url; link.download = filename.replace(/[\\/:*?"<>|]/g, '_') + '.json'
+  document.body.append(link); link.click(); link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
 const structure = d => (d.fields || []).map(({ field_id, name, type, nullable }) => ({ field_id, name, type, nullable }))
 export function structuralDiff(before, after) {
   const a = json(structure(before)), b = json(structure(after))

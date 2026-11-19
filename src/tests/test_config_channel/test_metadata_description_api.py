@@ -94,6 +94,8 @@ def check_usage(base,evidence):
         assert [p['text'] for p in data['usage']['identity']['purposes'] if p['origin']=='author'] == ([doc['description']] if 'description' in doc else [])
         for original, projected in zip(doc['outputs'], data['usage']['outputs']):
             assert projected.get('description') == original.get('description')
+            if original.get('structure_ref', '').startswith('#/'):
+                assert projected['structure_pointer'] == original['structure_ref'][1:]
         if name=='npm.basic':
             assert len(doc['outputs'])==2 and len(doc['outputs'][0]['variants'])==13
             assert len(doc['resources']['managed_results']['entities'])==12

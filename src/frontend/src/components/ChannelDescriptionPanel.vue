@@ -1,24 +1,38 @@
 <template>
   <section class="channel-description" data-testid="channel-description">
-    <div class="heading"><h3>数据说明</h3><div class="heading-actions"><button :disabled="busy || observation?.structure.state !== 'known'" @click="save">保存</button><button :disabled="busy" @click="refresh">刷新</button></div></div>
+    <div class="heading"><h3>数据说明</h3><div class="heading-actions"><button :disabled="busy || !observation?.description.document" @click="download">下载 JSON</button><button :disabled="busy || observation?.structure.state !== 'known'" @click="save">保存</button><button :disabled="busy" @click="refresh">刷新</button></div></div>
     <p class="subject">{{ locator.name }}<template v-if="locator.table"> / {{ locator.schema ? locator.schema + '.' : '' }}{{ locator.table }}</template></p>
     <p v-if="error" role="alert">{{ error }}</p><p v-if="notice" role="status">{{ notice }}</p>
     <p v-if="busy && !observation" role="status">正在读取当前结构与说明…</p>
-    <p v-if="busy && observation?.structure.state === 'pending' && locator.kind === 'dataframe'" role="status">正在加载 DataFrame…</p>
+    <p v-if="observation?.structure.state === 'pending'" role="status">结构尚未加载；可从对象的“预览”入口显式加载后刷新说明。</p>
+    <p v-if="observation" class="reading-basis">{{ descriptionSource }}<template v-if="observation.basis.dictionary_ref"> · {{ observation.basis.dictionary_ref }}</template> · {{ descriptionState }}</p>
     <p v-if="observation?.structure.state === 'unsupported'">{{ observation.structure.reason }}</p>
     <p v-if="observation?.description.state === 'needs_review'" role="status">来源或绑定需要核对；已有说明与草稿已保留。</p>
     <template v-if="observation?.structure.state === 'known'">
       <fieldset :disabled="busy || observation.structure.state !== 'known'">
         <div class="object-notes">
-          <div><label for="object-description">对象说明</label><div class="description-editor"><textarea id="object-description" aria-label="对象说明" :value="value('description')" @input="edit('description', $event.target.value)" /><p v-for="note in entityNotes('limitations')" :key="note" class="supplement">{{ note }}</p></div></div>
-          <div><label for="row-meaning">一行表示什么（可选）</label><div class="description-editor"><textarea id="row-meaning" aria-label="一行表示什么" :value="value('row_meaning')" @input="edit('row_meaning', $event.target.value)" /><p v-for="note in entityNotes('row_semantics')" :key="note" class="supplement">{{ note }}</p></div></div>
+          <div><label for="object-description">对象说明</label><div class="description-editor"><textarea v-auto-grow id="object-description" aria-label="对象说明" :value="value('description')" @input="edit('description', $event.target.value)" /></div></div>
+          <div><label for="row-meaning">一行表示什么（可选）</label><div class="description-editor"><textarea v-auto-grow id="row-meaning" aria-label="一行表示什么" :value="value('row_meaning')" @input="edit('row_meaning', $event.target.value)" /></div></div>
         </div>
+        <div class="object-summary"><span>行语义</span><SemanticValue :value="observation.description.document?.entity?.row_semantics" /></div>
+        <details ref="objectDetails" class="object-semantics" data-testid="object-semantics" @toggle="readObjectDetails">
+          <summary>对象语义与关联<template v-if="relations.length">（{{ relations.length }}）</template></summary>
+          <dl><template v-for="k in ['identity_fields','revision_field','time_fields','limitations']" :key="k"><dt>{{ labels[k] }}</dt><dd :data-entity-semantic="k"><SemanticValue :value="observation.description.document?.entity?.[k]" :field-names="fieldNames" /></dd></template></dl>
+          <h4>关联关系</h4>
+          <SemanticValue v-if="!relations.length" :value="observation.description.document?.entity?.relations" />
+          <small v-else>{{ declarationStatus(observation.description.document?.entity?.relations) }}</small>
+          <article v-for="(relation,i) in relations" :id="'object-relation-' + i" :key="i" class="object-relation" :data-joint-relation="i"><strong>关联 {{ i + 1 }} · {{ relationTargets[relation.dictionary_ref]?.document?.title || relation.dictionary_ref }}</strong>
+            <p v-if="relationTargets[relation.dictionary_ref]?.error" role="status">目标暂不可读，原关系已保留：{{ relationTargets[relation.dictionary_ref].error }}</p>
+            <p v-for="(id,name) in relation.field_map" :key="name">{{ name }} → {{ relationTargets[relation.dictionary_ref]?.document?.fields.find(f => f.field_id === id)?.name || id }}</p>
+            <code>{{ relation.dictionary_ref }}</code>
+          </article>
+        </details>
         <div v-show="!fieldsCollapsed" class="field-toolbar"><input v-model="filter" type="search" aria-label="搜索字段名" placeholder="搜索字段名…" /><span>{{ visibleFields.length }} / {{ observation.structure.fields?.length || 0 }} 字段</span></div>
         <div class="fields-scroll">
           <table class="fields"><thead><tr><th>字段 / 类型</th><th>单位</th><th>时间</th><th><div class="field-header-actions"><span>关联</span><button type="button" :title="fieldsCollapsed ? '展开字段表' : '收起字段表'" :aria-label="fieldsCollapsed ? '展开字段表' : '收起字段表'" :aria-expanded="!fieldsCollapsed" @click="fieldsCollapsed = !fieldsCollapsed"><el-icon aria-hidden="true"><ArrowDown v-if="fieldsCollapsed" /><ArrowUp v-else /></el-icon></button></div></th></tr></thead>
             <tbody v-show="!fieldsCollapsed"><template v-for="f in visibleFields" :key="f.name">
               <tr class="field-main-row" :data-description-field="f.name">
-                <td><strong>{{ f.name }}</strong></td>
+                <td><strong>{{ f.name }}</strong><span v-if="originalField(f.name)?.title" class="field-title">{{ originalField(f.name).title }}</span><span v-for="k in ['role','measure_kind']" :key="k" class="semantic-tag" v-show="originalField(f.name)?.[k]?.state === 'declared'">{{ labels[k] }}：{{ declared(originalField(f.name)?.[k]) }}</span></td>
                 <td class="field-unit">
                   <select v-if="['unix_timestamp', 'duration'].includes(timeConfig(f.name).mode)" :aria-label="f.name + ' 时间单位'" :value="timeConfig(f.name).unit || ''" @change="editTime(f.name, 'unit', $event.target.value)"><option value="">请选择单位</option><option v-for="unit in ['s','ms','us','ns']" :key="unit" :value="unit">{{ unit }}</option></select>
                   <span v-else-if="timeConfig(f.name).mode === 'datetime'">{{ fieldValue(f.name, 'unit') || '精度未指定' }}</span>
@@ -40,9 +54,9 @@
                   <p v-if="timeFacts(f.name).conflict" role="status">来源时间事实与已有声明不同；原声明保留，请核对后修改。</p>
                   <details v-if="timeConfig(f.name).unsupported" class="time-definition"><summary>查看时间定义</summary><p class="supplement">{{ timeSummary(effectiveTime(f.name)) }}</p></details>
                 </td>
-                <td class="field-relation"><p v-for="(relation, i) in fieldRelations(f.name)" :key="i" class="supplement">{{ relationTitle(relation) }}</p></td>
+                <td class="field-relation"><a v-for="i in fieldRelationIndices(f.name)" :key="i" :href="'#object-relation-' + i" @click.prevent="openRelation(i)">查看关联 {{ i + 1 }}</a></td>
               </tr>
-              <tr class="field-description-row"><td colspan="4"><div class="description-editor"><textarea :aria-label="f.name + ' 字段说明'" placeholder="字段说明" :value="fieldValue(f.name, 'definition')" @input="editField(f.name, 'definition', $event.target.value)" /><p v-if="timeDescription(effectiveTime(f.name), fieldValue(f.name, 'definition'))" class="supplement">时间含义：{{ timeDescription(effectiveTime(f.name), fieldValue(f.name, 'definition')) }}</p><p v-for="note in fieldNotes(f.name, ['value_domain', 'aggregation'])" :key="note" class="supplement">{{ note }}</p></div><p v-for="note in fieldNotes(f.name, ['null_meaning', 'validity'])" :key="note" class="supplement">{{ note }}</p></td></tr>
+              <tr class="field-description-row"><td colspan="4"><div class="description-editor"><textarea v-auto-grow :aria-label="f.name + ' 字段说明'" placeholder="字段说明" :value="fieldValue(f.name, 'definition')" @input="editField(f.name, 'definition', $event.target.value)" /><p v-if="timeDescription(effectiveTime(f.name), fieldValue(f.name, 'definition'))" class="supplement">时间含义：{{ timeDescription(effectiveTime(f.name), fieldValue(f.name, 'definition')) }}</p><p v-for="note in fieldNotes(f.name, ['value_domain', 'aggregation'])" :key="note" class="supplement">{{ note }}</p></div><p v-for="note in fieldNotes(f.name, ['null_meaning', 'validity'])" :key="note" class="supplement">{{ note }}</p><details class="field-semantics" :data-field-semantics="f.name"><summary>完整字段语义</summary><dl><template v-for="k in semanticKeys.field" :key="k"><dt>{{ labels[k] }}</dt><dd :data-field-semantic="k"><SemanticValue :value="originalField(f.name)?.[k]" :field-names="fieldNames" /></dd></template></dl></details></td></tr>
             </template></tbody>
           </table>
           <p v-if="!fieldsCollapsed && !visibleFields.length && filter">没有匹配的字段；清空搜索可恢复全部字段。</p>
@@ -56,7 +70,7 @@
         <ChannelRelationEditor :model-value="relations" :source-fields="observation.structure.fields" :field-name="relationField" :targets="relationTargets" :draft-key="key()" start-new @update:model-value="changes.relations = $event" @target="rememberTarget" />
       </div>
     </div>
-    <details v-if="observation"><summary>技术详情（最近读取结果）</summary><p class="supplement">以下 JSON 为最近读取结果，不包含未保存草稿。</p><button @click="copy">复制 JSON</button><pre data-testid="description-json">{{ json(observation) }}</pre></details>
+    <details v-if="observation"><summary>技术详情（最近读取结果）</summary><p class="supplement">以下 JSON 为最近读取结果，不包含未保存草稿。</p><button @click="copy">复制 JSON</button><pre data-testid="description-json">{{ prettyJson(observation) }}</pre></details>
   </section>
 </template>
 <script setup>
@@ -64,11 +78,16 @@ import { computed, h, onMounted, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp } from '@element-plus/icons-vue'
 import ChannelRelationEditor from './ChannelRelationEditor.vue'
-import { semanticsCall as call, clone, json, parseJson, labels } from '../utils/dataSemantics.js'
+import SemanticValue from './SemanticValue.vue'
+import { semanticsCall as call, clone, json, parseJson, labels, semanticKeys, prettyJson, downloadJson, autoGrow as vAutoGrow } from '../utils/dataSemantics.js'
 import { timeEditorConfig, timeDescription, timeSummary } from '../utils/channelDescriptionTime.js'
 const props = defineProps({ locator: { type: Object, required: true } })
 const observation = ref(null), basis = ref(null), changes = ref({}), busy = ref(false), error = ref(''), notice = ref(''), filter = ref(''), confirmations = ref([]), relationField = ref(''), relationTargets = ref({})
-const fieldsCollapsed = ref(false)
+const fieldsCollapsed = ref(false), objectDetails = ref(null)
+const fieldNames = computed(() => Object.fromEntries((observation.value?.description.document?.fields || []).map(f => [f.field_id, observation.value?.context.binding?.field_map?.[f.field_id] || f.name])))
+const descriptionSource = computed(() => ({ bound_dictionary: '已保存绑定字典', producer_default: '生产者默认说明 · 未独立保存' }[observation.value?.description.origin] || '当前读取说明'))
+const descriptionState = computed(() => ({ present: '已有说明', missing: '尚无说明', needs_review: '待核对' }[observation.value?.description.state]))
+const declarationStatus = v => ({ declared: '已声明', unknown: '未知', not_applicable: '不适用' }[v?.state || 'unknown']) + ' · ' + ({ manual: '人工填写', imported: '导入', producer: '生产者声明', derived: '派生' }[v?.origin] || '来源未声明')
 const key = () => 'flowsql.channel-description.' + json(props.locator)
 const changedBasis = computed(() => !!basis.value && !!observation.value && json(basis.value) !== json(observation.value.basis))
 const visibleFields = computed(() => (observation.value?.structure.fields || []).filter(f => f.name.toLowerCase().includes(filter.value.toLowerCase())))
@@ -88,7 +107,6 @@ const fieldValue = (name, k) => {
 const value = k => own(changes.value, k) ? changes.value[k] ?? '' : declared(k === 'description' ? observation.value?.description.document?.description : observation.value?.description.document?.entity?.[k])
 const readable = v => typeof v === 'string' ? v : Array.isArray(v) ? v.map(readable).join('；') : v && typeof v === 'object' ? typeof v.description === 'string' ? v.description : v.label && v.code ? `${v.label}（${v.code}）` : Object.entries(v).map(([k, x]) => `${k}: ${readable(x)}`).join('；') : String(v ?? '')
 const notes = (object, keys) => keys.filter(k => object?.[k]?.state === 'declared').map(k => `${labels[k]}：${readable(object[k].value)}`)
-const entityNotes = key => notes(observation.value?.description.document?.entity, [key])
 const fieldNotes = (name, keys) => notes(originalField(name), keys)
 const typeSummary = type => type ? type.name + (Object.keys(type.parameters || {}).length ? ' ' + readable(type.parameters) : '') : '类型未知'
 const relations = computed(() => {
@@ -98,16 +116,22 @@ const relations = computed(() => {
   return Array.isArray(saved) ? saved.map(relation => ({ dictionary_ref: relation.dictionary_ref, field_map: Object.fromEntries(Object.entries(relation.field_map).map(([id, target]) => [map[id] || observation.value.description.document.fields.find(f => f.field_id === id)?.name || id, target])) })) : []
 })
 const fieldRelations = name => relations.value.filter(r => own(r.field_map, name))
-const relationTitle = relation => {
-  const target = relationTargets.value[relation.dictionary_ref]
-  return (target?.document?.title || '历史关联') + ' · ' + Object.entries(relation.field_map).map(([name, id]) => `${name} → ${target?.document?.fields.find(f => f.field_id === id)?.name || '目标字段'}`).join('；') + (target?.error ? ' · 目标暂不可读，原关系已保留' : '')
+const fieldRelationIndices = name => relations.value.flatMap((r, i) => own(r.field_map, name) ? [i] : [])
+function openRelation(index) {
+  objectDetails.value.open = true
+  document.getElementById('object-relation-' + index).scrollIntoView({ block: 'center', inline: 'nearest' })
 }
+function readObjectDetails(event) { if (event.target.open) readRelationTargets() }
 function rememberTarget(exact, document) { relationTargets.value[exact] = { document } }
 async function readRelationTargets() {
   const refs = [...new Set(relations.value.map(r => r.dictionary_ref))]
   await Promise.allSettled(refs.map(async exact => {
     if (relationTargets.value[exact]?.document) return
-    try { const result = await call('resolve', { exact_reference: exact }); rememberTarget(exact, result.document) }
+    try {
+      const field_ids = [...new Set(relations.value.filter(r => r.dictionary_ref === exact).flatMap(r => Object.values(r.field_map)))]
+      const result = await call('resolve', { exact_reference: exact, view: 'fields', field_ids })
+      rememberTarget(exact, { fields: result.fields, title: exact })
+    }
     catch (e) { relationTargets.value[exact] = { error: e.message } }
   }))
 }
@@ -185,19 +209,25 @@ async function refresh() {
   busy.value = true; error.value = ''; confirmations.value = []
   try {
     observation.value = await call('describe', { target: { kind: 'channel', locator: props.locator } })
-    if (props.locator.kind === 'dataframe' && observation.value.structure.state === 'pending') {
-      await load()
-      observation.value = await call('describe', { target: { kind: 'channel', locator: props.locator } })
-    }
     if (!basis.value || !Object.keys(changes.value).length) basis.value = clone(observation.value.basis)
     if (changedBasis.value) notice.value = '当前来源或说明版本已变化；原稿保留，请核对差异后继续。'
-    await readRelationTargets()
+    if (objectDetails.value?.open) await readRelationTargets()
     await inspectSource()
   } catch (e) { error.value = e.message } finally { busy.value = false }
 }
-async function load() {
-  const r = await fetch('/api/channels/dataframe/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: json({ name: props.locator.name, page: 1, page_size: 1 }), signal: AbortSignal.timeout(30000) })
-  if (!r.ok) throw Error('加载 DataFrame 结构失败，请点击“刷新”重试。')
+async function download() {
+  busy.value = true; error.value = ''
+  const observed = observation.value
+  try {
+    const reference = observed.basis.dictionary_ref
+    if (reference) {
+      const exported = await call('export', { exact_reference: reference, format: 'json' })
+      downloadJson(reference, exported.content); notice.value = '已下载已保存字典：' + reference
+    } else {
+      downloadJson((props.locator.table || props.locator.name) + '.未独立保存', prettyJson(observed.description.document))
+      notice.value = '已下载最近读取的生产者默认说明（未独立保存），不含草稿。'
+    }
+  } catch (e) { error.value = e.message } finally { busy.value = false }
 }
 function rebase() {
   if (!window.confirm('已核对当前结构和说明？保留原稿中的语义修改，按当前版本重新提交；缺失字段不会自动迁移。')) return
@@ -233,19 +263,19 @@ onMounted(async () => {
 </script>
 <style scoped>
 .channel-description { color: var(--text-primary); min-width: 0; max-width: 100%; }
-.heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; } h3 { margin: 0; }
-.heading-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; } .heading-actions button { margin: 0; }
+.heading { flex-wrap: wrap; display: flex; align-items: center; justify-content: space-between; gap: 8px; } h3 { margin: 0; }
+.heading-actions { flex-wrap: wrap; display: flex; align-items: center; gap: 8px; flex-shrink: 0; } .heading-actions button { margin: 0; }
 .subject, pre { overflow-wrap: anywhere; } .subject { margin: 4px 0 12px; }
 label { display: block; margin: 6px 0; } .object-notes { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; }
 input:not([type=checkbox]), textarea, select { box-sizing: border-box; max-width: 100%; width: 100%; color: var(--text-primary); background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 4px; padding: 6px; }
 select option { color: var(--text-primary); background: var(--bg-card); }
-input::placeholder { color: var(--text-secondary); opacity: 1; } textarea { min-height: 52px; resize: vertical; } fieldset { border: 0; padding: 0; min-width: 0; }
+input::placeholder { color: var(--text-secondary); opacity: 1; } textarea { min-height: 52px; resize: vertical; overflow-y: hidden; } fieldset { border: 0; padding: 0; min-width: 0; }
 .description-editor { min-width: 0; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-card); }
 .description-editor:focus-within { outline: 1px solid var(--el-color-primary); }
 .description-editor textarea { display: block; border: 0; background: transparent; outline: none; }
 .description-editor .supplement { margin: 0; padding: 0 6px 6px; }
 .field-toolbar { display: flex; align-items: center; gap: 12px; margin: 10px 0; color: var(--text-secondary); font-size: 12px; } .field-toolbar input { width: 240px; }
-.fields-scroll { max-width: 100%; overflow: auto; } .fields { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.fields-scroll { max-width: 100%; overflow: auto; } .fields { min-width: 620px; width: 100%; table-layout: fixed; border-collapse: collapse; }
 th, td { text-align: left; vertical-align: top; padding: 8px; border-bottom: 1px solid var(--border-color); overflow-wrap: anywhere; } th:first-child { width: 29%; } th:nth-child(2) { width: 18%; } th:nth-child(3) { width: 29%; } th:last-child { width: 24%; }
 .fields th { vertical-align: middle; } .field-header-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .field-header-actions button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 28px; height: 28px; margin: 0; padding: 0; border-color: transparent; background: transparent; font-size: 16px; }
@@ -264,4 +294,12 @@ th, td { text-align: left; vertical-align: top; padding: 8px; border-bottom: 1px
 pre { white-space: pre-wrap; max-height: 280px; overflow: auto; background: var(--bg-secondary); padding: 10px; }
 button { color: var(--text-primary); background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 4px; padding: 7px 12px; margin: 6px 8px 6px 0; cursor: pointer; } button:disabled { opacity: .5; cursor: default; }
 [role=alert] { color: var(--el-color-danger); } [role=status] { color: var(--el-color-primary); } details { margin: 12px 0; } summary { cursor: pointer; }
+.reading-basis { color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.object-summary { display: flex; gap: 12px; align-items: baseline; margin: 12px 0; }
+.object-semantics { padding: 10px; background: var(--bg-secondary); border-radius: 6px; }
+dl { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 10px; } dt { color: var(--text-secondary); } dd { margin: 0; min-width: 0; }
+.object-relation { padding: 12px 0; border-top: 1px solid var(--border-color); overflow-wrap: anywhere; } .object-relation p { margin: 4px 0; }
+.field-title, .semantic-tag { display: block; color: var(--text-secondary); font-size: 12px; margin-top: 4px; }
+.field-relation a { display: block; color: var(--el-color-primary); margin-bottom: 4px; }
+@media (max-width: 700px) { .object-notes { grid-template-columns: minmax(0, 1fr); } dl { grid-template-columns: minmax(0, 1fr); } dt { margin-top: 8px; } .heading-actions { gap: 4px; } }
 </style>

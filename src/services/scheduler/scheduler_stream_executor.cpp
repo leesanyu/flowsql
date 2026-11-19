@@ -2571,8 +2571,7 @@ int SchedulerPlugin::ExecuteWithOperatorChain(Span<IChannel*> inputs, IChannel* 
                 if (!service) contract_error = {"UNAVAILABLE", "declared operator contract service unavailable", ""};
                 return fail_contract(contract_error);
             }
-            Json contract;
-            contract.Parse(definition.document_json->c_str());
+            const auto& contract = *definition.document;
             size_t port_index = 0, port_count = 0;
             for (size_t n = 0; n < stage_inputs.size; ++n) {
                 auto* df = dynamic_cast<IDataFrameChannel*>(stage_inputs[n]);

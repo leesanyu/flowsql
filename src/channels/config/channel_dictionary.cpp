@@ -132,8 +132,28 @@ int LoadDictionary(DataSemanticsRegistry& registry, const std::string& ref, Json
         return Fail(e, "INVALID_REFERENCE", "exact dictionary required");
     DataSemanticsSnapshot snap;
     if (registry.Resolve(ref.c_str(), &snap, e)) return -1;
-    d->Parse(snap.document_json->c_str());
+    d->CopyFrom(*snap.document, d->GetAllocator());
     return 0;
+}
+std::string BindingState(const Value& binding, const Value& dictionary, const Value& source, const Value& required,
+                         bool observation_trusted) {
+    if (Get(source, "schema_state") != "known") return "pending";
+    if (!binding.IsObject()) return "unbound";
+    Json check_binding;
+    auto& a = check_binding.GetAllocator();
+    check_binding.CopyFrom(binding, a);
+    Set(check_binding, "source_snapshot", Copy(source, a), a);
+    Set(check_binding["confirmation"], "source_revision", Get(source, "source_revision"), a);
+    std::string check;
+    DataSemanticsError error;
+    if (CheckSemanticsBinding(check_binding, dictionary, &check, &error)) return "mismatch";
+    if (required.Empty()) return "matched";
+    if (observation_trusted && Get(binding["confirmation"], "source_revision") == Get(source, "source_revision")) {
+        bool all = true;
+        for (const auto& item : required.GetArray()) all = all && Has(binding["confirmation"]["items"], Text(item));
+        if (all) return "matched";
+    }
+    return "needs_confirmation";
 }
 }  // namespace
 int32_t ChannelDictionaryService::Control(const std::string& op, const std::string& text, std::string& response) {
@@ -174,7 +194,7 @@ int32_t ChannelDictionaryService::Control(const std::string& op, const std::stri
         Json binding, dictionary;
         const auto& key = source["object_key"];
         if (registry_.BindingLookup(Get(key, "provider_id"), Get(key, "object_id"), &bound, &e) == 0)
-            binding.Parse(bound.document_json->c_str());
+            binding.CopyFrom(*bound.document, binding.GetAllocator());
         else if (e.code != "NOT_FOUND")
             return Error(e, response);
         const auto dictionary_ref =
@@ -200,6 +220,25 @@ int32_t ChannelDictionaryService::Control(const std::string& op, const std::stri
             Differences(binding.IsObject() ? &binding : nullptr, dictionary.IsObject() ? &dictionary : nullptr, source,
                         map, renames, diffs, required, a);
         if (op == "preview") {
+            // Verify the current binding against this same live source, before constructing a candidate.
+            Json current_dictionary;
+            const Value* checked_dictionary = &dictionary;
+            const Value* checked_required = &required;
+            Value current_required(rapidjson::kArrayType);
+            if (binding.IsObject() && (r.HasMember("base_dictionary_ref") || r.HasMember("field_map") ||
+                                       r.HasMember("renames") || r.HasMember("remove_fields"))) {
+                if (LoadDictionary(registry_, Get(binding, "dictionary_ref"), &current_dictionary, &e))
+                    return Error(e, response);
+                checked_dictionary = &current_dictionary;
+                Value current_diffs(rapidjson::kArrayType), no_renames(rapidjson::kObjectType);
+                if (known && !observation_trusted) current_required.PushBack("observation", a);
+                if (known)
+                    Differences(&binding, checked_dictionary, source, binding["field_map"], no_renames, current_diffs,
+                                current_required, a);
+                checked_required = &current_required;
+            }
+            Set(data, "binding_state",
+                BindingState(binding, *checked_dictionary, source, *checked_required, observation_trusted), a);
             Json candidate(rapidjson::kObjectType);
             auto& ca = candidate.GetAllocator();
             if (known) {
@@ -265,7 +304,7 @@ int32_t ChannelDictionaryService::Control(const std::string& op, const std::stri
                                                          : "needs_confirmation",
                 a);
         } else {
-            std::string state = !known ? "pending" : binding.IsObject() ? "matched" : "unbound";
+            std::string state;
             if (op == "apply") {
                 if (!known) return Error({"BINDING_MISMATCH", "source structure is not complete", ""}, response);
                 const auto& basis = r["source_basis"];
@@ -321,27 +360,8 @@ int32_t ChannelDictionaryService::Control(const std::string& op, const std::stri
                 dictionary = std::move(target);
                 binding = std::move(b);
                 state = "matched";
-            } else if (known && binding.IsObject()) {
-                Json check_binding;
-                check_binding.CopyFrom(binding, check_binding.GetAllocator());
-                Set(check_binding, "source_snapshot", Copy(source, check_binding.GetAllocator()),
-                    check_binding.GetAllocator());
-                Set(check_binding["confirmation"], "source_revision", Get(source, "source_revision"),
-                    check_binding.GetAllocator());
-                std::string check;
-                if (CheckSemanticsBinding(check_binding, dictionary, &check, &e))
-                    state = "mismatch";
-                else if (!required.Empty()) {
-                    state = "needs_confirmation";
-                    if (observation_trusted && binding.HasMember("confirmation") &&
-                        Get(binding["confirmation"], "source_revision") == Get(source, "source_revision")) {
-                        bool all = true;
-                        for (const auto& item : required.GetArray())
-                            all = all && Has(binding["confirmation"]["items"], Text(item));
-                        if (all) state = "matched";
-                    }
-                }
-            }
+            } else
+                state = BindingState(binding, dictionary, source, required, observation_trusted);
             Value check(rapidjson::kObjectType);
             check.AddMember("binding_ref", bound.document_json ? Value(bound.exact_reference.c_str(), a) : Value(), a);
             check.AddMember("dictionary_ref",

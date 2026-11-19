@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
 import { writeFile } from 'node:fs/promises'
+import { json, parseJson } from '../../frontend/src/utils/dataSemantics.js'
+import { downloads } from './semantics_browser_download.mjs'
 import { openBrowser } from '../test_visualization/browser_support.mjs'
 const [base, evidence] = process.argv.slice(2)
 const browser = await openBrowser(base)
 const { send, evaluate: ev, wait, pause } = browser
+const download = downloads(browser, evidence)
 const body = () => ev('document.body.innerText')
 const text = value => wait(async () => (await body()).includes(value), value)
 const find = label => `[...document.querySelectorAll('button,[role=tab],.channel-type-item,.browser-table-item')].find(e=>(e.textContent.trim()===${JSON.stringify(label)} || (e.classList.contains('channel-type-item') && e.textContent.trim().startsWith(${JSON.stringify(label)}))) && e.getBoundingClientRect().width>0)`
@@ -19,8 +22,8 @@ async function mouse(expression) {
 const click = async label => { await wait(() => ev(`!!(${find(label)})`), label); await mouse(find(label)) }
 const set = (label, value) => ev(`(()=>{const e=document.querySelector(${JSON.stringify('[aria-label="' + label + '"]')});e.value=${JSON.stringify(value)};e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}))})()`)
 const api = async (operation, payload) => {
-  const result = await fetch(base + '/api/semantics/v1/' + operation, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
-  const value = await result.json(); assert.equal(result.status, 200, JSON.stringify(value)); return value.data
+  const result = await fetch(base + '/api/semantics/v1/' + operation, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: json(payload) })
+  const value = parseJson(await result.text()); assert.equal(result.status, 200, json(value)); return value.data
 }
 async function seedCompleteDictionary(locator, before, edits, name) {
   const document = structuredClone(before.description.document)
@@ -37,10 +40,14 @@ async function seedCompleteDictionary(locator, before, edits, name) {
 }
 
 async function checkEditors(document) {
+  await ev('document.querySelector("[data-testid=object-semantics]").open=true')
+  for (const key of ['identity_fields','revision_field','time_fields','limitations'])
+    assert.equal(await ev('document.querySelector('+JSON.stringify('[data-entity-semantic="'+key+'"] .semantic-value')+').dataset.semanticState'),document.entity[key].state)
+  assert.equal(await ev('document.querySelectorAll("[data-field-semantics]").length'),document.fields.length)
   const groups = await ev(`(()=>{const p=document.querySelector('[data-testid=channel-description]');return [...p.querySelectorAll('.description-editor')].map(e=>{const r=e.getBoundingClientRect();return {label:e.querySelector('textarea').getAttribute('aria-label'),notes:[...e.querySelectorAll('.supplement')].map(n=>n.textContent),bordered:parseFloat(getComputedStyle(e).borderTopWidth)>0&&parseFloat(getComputedStyle(e).borderBottomWidth)>0,contained:[...e.querySelectorAll('textarea,.supplement')].every(n=>{const b=n.getBoundingClientRect();return b.x>=r.x&&b.right<=r.right+1&&b.y>=r.y&&b.bottom<=r.bottom+1})}})})()`)
   const expected = [
-    ['对象说明', document.entity, ['limitations'], ['使用局限']],
-    ['一行表示什么', document.entity, ['row_semantics'], ['行语义']],
+    ['对象说明', document.entity, [], []],
+    ['一行表示什么', document.entity, [], []],
     ...document.fields.map(f => {
       const meaning = f.time_semantics?.state === 'declared' ? f.time_semantics.value.description : null
       const extra = meaning?.state === 'declared' && !String(f.definition.value || '').replace(/\s+/g, '').includes(meaning.value.replace(/\s+/g, ''))
@@ -86,6 +93,15 @@ try {
   assert.equal(await ev(`document.querySelector('[aria-label="latency_ns 字段说明"]').value`), definition)
   await checkEditors(before.description.document)
   await checkKnownTimes()
+  for (const [width,height] of [[1440,1000],[1024,768],[390,844]]) {
+    await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});await pause(150)
+    assert.equal(await ev('document.documentElement.scrollWidth>innerWidth+1'),false)
+    const panelWidth = await ev(`document.querySelector('[data-testid=channel-description]').getBoundingClientRect().width`)
+    assert.ok(panelWidth >= (width < 900 ? width * .65 : 400), json({ width, panelWidth, message: 'description has usable width' }))
+    assert.equal(await ev(`[...document.querySelectorAll('[data-testid=channel-description] .heading-actions button')].some(e=>e.scrollWidth>e.clientWidth+1)`), false, 'heading buttons are not clipped')
+    await writeFile(`${evidence}/npm-dictionary-${width}.png`,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
+  }
+  await send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false})
   assert.equal(await ev(`document.querySelector('[aria-label="observed_at 字段说明"]').closest('.description-editor').querySelector('.supplement')?.textContent?.startsWith('时间含义：') || false`), false, 'time meaning already in field body is not repeated')
   const page = await body()
   for (const value of ['NULL', 'run_id', 'RCODE', '采集截断']) assert.ok(page.includes(value), value)
@@ -116,12 +132,28 @@ try {
   if (fresh.basis.dictionary_ref)
     assert.deepEqual((await api('resolve', { exact_reference: fresh.basis.dictionary_ref })).document, fresh.description.document, 'original precise dictionary remains unchanged')
   await writeFile(evidence + '/browser-imported-time.png', Buffer.from((await send('Page.captureScreenshot', { format: 'png' })).data, 'base64'))
+  const listBefore=await api('list',{})
+  await set('对象说明','不应进入下载的未保存草稿')
+  const file=await download(()=>click('下载 JSON'))
+  if (before.basis.dictionary_ref) {
+    assert.equal(file.value.source_reference,before.basis.dictionary_ref)
+    assert.deepEqual(file.value.document,before.description.document)
+  } else {
+    await text('未独立保存')
+    assert.ok(file.filename.includes('未独立保存'))
+    assert.deepEqual(file.value,before.description.document)
+    assert.ok(!Object.hasOwn(file.value,'source_reference'))
+  }
+  assert.ok(!file.content.includes('不应进入下载的未保存草稿'))
+  assert.equal(await ev('document.querySelector("[aria-label=对象说明]").value'),'不应进入下载的未保存草稿')
+  assert.deepEqual(await api('list',{}),listBefore,'download does not save or bind metadata')
+  await set('对象说明',before.description.document.description.value || '')
   await set('搜索字段名', 'latency_ns')
   assert.deepEqual(await ev('[...document.querySelectorAll("[data-description-field]")].map(e=>e.dataset.descriptionField)'), ['latency_ns'])
   await set('latency_ns 字段说明', '人工补充：捕获点可配对 DNS 时延，结合运行与有效性解释。')
   await set('对象说明', '人工补充：结合使用局限阅读当前 DNS 结果对象。')
   await set('一行表示什么', '人工补充：一行对应当前运行内的 DNS 事务事件。')
-  await mouse("document.querySelector('[data-testid=channel-description] .heading-actions button')")
+  await click('保存')
   await text('说明已保存')
   await wait(() => ev('!!document.querySelector("[aria-label=对象说明]:enabled")'), 'save reread')
   const after = await api('describe', { target: { kind: 'channel', locator } })
@@ -150,4 +182,7 @@ try {
   assert.deepEqual(browser.exceptions, [])
   await writeFile(evidence + '/browser-requests.json', JSON.stringify(requests, null, 2))
   console.log('PASS: canonical Unix times, compact unsupported state, deduplicated time meaning, three body edits preserve complete semantics/history, unchanged table and no data read/execute')
+} catch (error) {
+  await writeFile(evidence + '/browser-failure.json', json({ body: await body(), requests: await ev('window.__requests'), exceptions: browser.exceptions }))
+  throw error
 } finally { await browser.close() }
