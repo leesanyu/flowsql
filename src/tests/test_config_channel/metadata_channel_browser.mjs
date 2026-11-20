@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { json, parseJson, blankDocument, semanticKeys } from '../../frontend/src/utils/dataSemantics.js'
 import { downloads } from './semantics_browser_download.mjs'
 import { openBrowser } from '../test_visualization/browser_support.mjs'
-const [base, evidence] = process.argv.slice(2)
+const [base, evidence, retryCsv] = process.argv.slice(2)
 const sourceDiffEvidence = `${evidence}/source-diff-dialog`
 await mkdir(sourceDiffEvidence, { recursive: true })
 const dataframeLoadEvidence = `${evidence}/dataframe-pending`
@@ -13,7 +13,7 @@ const download = downloads(b, evidence)
 const body = () => ev('document.body.innerText')
 const text = value => wait(async () => (await body()).includes(value), value)
 const ready = () => wait(()=>ev('!!document.querySelector("[aria-label=对象说明]:enabled")'),'editable description')
-await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__requests=[];const f=window.fetch;window.fetch=function(u,o){window.__requests.push({url:String(u),body:o?.body});if(String(u).endsWith('/dataframe/preview')&&window.__dataframePreview)return window.__dataframePreview(()=>f.apply(this,arguments));return f.apply(this,arguments)};const x=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){this.__url=u;return x.apply(this,arguments)};const s=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(body){window.__requests.push({url:this.__url,body});return s.apply(this,arguments)}` })
+await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__requests=[];const f=window.fetch;window.fetch=function(u,o){window.__requests.push({url:String(u),body:o?.body});return f.apply(this,arguments)};const x=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){this.__url=u;return x.apply(this,arguments)};const s=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(body){window.__requests.push({url:this.__url,body});if(String(this.__url).endsWith('/dataframe/preview')&&window.__dataframePreview)return window.__dataframePreview(payload=>s.call(this,payload),body);return s.apply(this,arguments)}` })
 const find = (label, scope='document') => `[...${scope}.querySelectorAll('button,[role=tab],.el-pager li,.channel-type-item,.browser-table-item')].find(e=>(e.textContent.trim()===${JSON.stringify(label)} || e.textContent.trim()===${JSON.stringify(({确定:'OK',取消:'Cancel'})[label] || label)} || (e.classList.contains('channel-type-item') && e.textContent.trim().startsWith(${JSON.stringify(label)}))) && e.getBoundingClientRect().width>0)`
 async function mouse(expression) {
   const p = await ev(`(()=>{const e=${expression};if(!e||e.disabled)throw Error('unavailable mouse target');e.scrollIntoView({block:'center',inline:'nearest'});return true})()`)
@@ -102,29 +102,31 @@ try {
     await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false})
     await navigate(); assert.deepEqual(await counts(),{describe:0,rows:0,consume:0});await layout()
     await writeFile(`${evidence}/dataframe-${width}.png`,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
-    const before=await counts()
+    const entryCounts=await counts()
+    if(width===1280)await ev('window.__dataframePreview=(send,body)=>{window.__resumeDataframePreview=()=>send(body)}')
     await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='sample')`)
     await text('数据说明')
     if(width===1280) {
-      await text('结构尚未加载')
-      assert.equal((await counts()).rows, before.rows)
+      await text('正在加载 DataFrame')
+      await wait(()=>ev('!!window.__resumeDataframePreview'),'dictionary triggers first DataFrame load')
+      assert.equal((await counts()).rows,entryCounts.rows+1)
       assert.equal(await ev('!!document.querySelector("[aria-label=对象说明]")'),false)
-      await click('刷新',descriptionActions);await text('结构尚未加载')
-      assert.equal((await counts()).rows,before.rows,'刷新说明不加载业务行')
+      assert.equal(await ev('[...document.querySelectorAll("[data-testid=channel-description] .heading-actions button")].every(button=>button.disabled)'),true,'加载中禁止重复请求与保存')
+      assert.deepEqual(await ev('JSON.parse(window.__requests.find(request=>request.url.endsWith("/dataframe/preview")).body)'),{category:'dataframe',name:'sample',page:1,page_size:1})
       assert.equal(await descriptionWrites(),0)
-      await writeFile(`${dataframeLoadEvidence}/pending.png`,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
-      await closeDialog()
-      await click('预览',`[...document.querySelectorAll('.el-table__body tr')].find(r=>r.querySelector('.object-name')?.textContent.trim()==='sample')`)
-      await wait(()=>ev('document.querySelector(".el-pagination__total")?.textContent.includes("45")'),'explicit DataFrame preview')
-      await closeDrawer()
-      await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='sample')`)
+      await writeFile(`${dataframeLoadEvidence}/loading.png`,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
+      await ev('window.__resumeDataframePreview();delete window.__dataframePreview;delete window.__resumeDataframePreview')
     }
     await ready()
-    assert.equal((await counts()).rows,before.rows+(width===1280?1:0));assert.equal((await counts()).consume,0)
+    assert.equal((await counts()).rows,entryCounts.rows+(width===1280?1:0));assert.equal((await counts()).consume,0)
     if(width===1280){
       assert.equal(await descriptionWrites(),0,'读取说明不保存说明')
       await writeFile(`${dataframeLoadEvidence}/ready.png`,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
       const loaded=await counts()
+      assert.equal(loaded.describe,entryCounts.describe+2,'首次加载前后各读取一次当前字典')
+      assert.equal(await ev('!!document.querySelector(".el-drawer")?.getBoundingClientRect().width'),false,'字典加载不打开预览抽屉')
+      await click('刷新',descriptionActions);await ready()
+      assert.equal((await counts()).rows,loaded.rows,'已加载实例刷新不重复预览')
       await closeDialog()
       await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='sample')`);await ready()
       assert.equal((await counts()).rows,loaded.rows,'已加载实例重新进入不重复预览')
@@ -287,7 +289,7 @@ try {
       await collapseFields(width,theme)
     }
     await closeDialog();await mouse(`document.querySelector('[title="切换主题"]')`);await layout()
-    await click('预览',`[...document.querySelectorAll('.el-table__body tr')].find(r=>r.querySelector('.object-name')?.textContent.trim()==='sample')`);await wait(()=>ev('document.querySelector(".el-pagination__total")?.textContent.includes("45")'),'45 preview rows');assert.ok((await counts()).rows>before.rows)
+    await click('预览',`[...document.querySelectorAll('.el-table__body tr')].find(r=>r.querySelector('.object-name')?.textContent.trim()==='sample')`);await wait(()=>ev('document.querySelector(".el-pagination__total")?.textContent.includes("45")'),'45 preview rows');assert.ok((await counts()).rows>entryCounts.rows)
     if(width===1280){await click('2');await text('21');assert.equal(await ev('document.querySelector(".browser-content .el-table__body tr td").textContent.trim()'),'21')}
     await closeDrawer();await click('数据库通道');await layout();await writeFile(`${evidence}/database-${width}.png`,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
     const initial=await counts();await click('浏览');await text('empty_table');await click('empty_table');await text('数据说明');await ready()
@@ -375,6 +377,37 @@ try {
   await ready();assert.equal(await ev('document.querySelector("[aria-label=对象说明]").value'),'');await closeDialog()
   // Retained management actions use the same actual mouse/hit checks as the new entry.
   const dfRow=name=>`[...document.querySelectorAll('.el-table__body tr')].find(r=>r.querySelector('.object-name')?.textContent.trim()===${JSON.stringify(name)})`
+  const emptyBefore=await counts(), emptyWrites=await descriptionWrites()
+  await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='empty')`);await ready()
+  assert.deepEqual(await ev('[...document.querySelectorAll("[data-description-field]")].map(e=>e.dataset.descriptionField)'),['id','value'],'空 CSV 加载后仍展示真实字段')
+  assert.equal((await counts()).rows,emptyBefore.rows+1)
+  assert.equal(await descriptionWrites(),emptyWrites,'查看空 CSV 不保存字典')
+  await closeDialog()
+  const emptyResponse=await fetch(base+'/api/channels/dataframe')
+  assert.equal(emptyResponse.status,200)
+  const emptyChannels=parseJson(await emptyResponse.text())
+  assert.equal(emptyChannels.channels.find(channel=>channel.name==='empty').rows,0,'空 CSV 不能按缺少业务行判定加载失败')
+  await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='empty')`);await ready()
+  assert.equal((await counts()).rows,emptyBefore.rows+1,'空 CSV 再次打开复用已加载结构');await closeDialog()
+  const retryLocator={kind:'dataframe',name:'disposable'}, retryBefore=await api('semantics/v1/describe',{target:{kind:'channel',locator:retryLocator}})
+  const retryDraft={basis:retryBefore.basis,editor_changes:{description:'retained loading draft',fields:{value:{definition:'retained loading field draft'}}}}
+  await ev(`sessionStorage.setItem('flowsql.channel-description.'+${JSON.stringify(json(retryLocator))},${JSON.stringify(json(retryDraft))})`)
+  // Fail the real CSV loader, then repair this isolated fixture before explicit retry.
+  const originalCsv=await readFile(retryCsv)
+  await writeFile(retryCsv,'')
+  const failureBefore=await counts(), failureWrites=await descriptionWrites()
+  await mouse(`[...document.querySelectorAll('.object-name')].find(e=>e.textContent.trim()==='disposable')`)
+  await text('加载 DataFrame 失败');await text('CSV_LOAD_FAILED')
+  assert.equal(await ev('document.querySelector("[data-testid=channel-description] .heading-actions button:nth-child(2)").disabled'),true)
+  assert.deepEqual(await ev(`JSON.parse(sessionStorage.getItem('flowsql.channel-description.'+${JSON.stringify(json(retryLocator))}))`),retryDraft)
+  await pause(400);assert.equal((await counts()).rows,failureBefore.rows+1,'加载失败不自动循环重试')
+  await writeFile(`${dataframeLoadEvidence}/load-error.png`,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'))
+  await writeFile(retryCsv,originalCsv)
+  await click('刷新',descriptionActions);await ready()
+  assert.equal((await counts()).rows,failureBefore.rows+2,'用户显式刷新可重试一次加载')
+  assert.equal(await ev('document.querySelector("[aria-label=对象说明]").value'),'retained loading draft')
+  assert.equal(await ev('document.querySelector("[aria-label=\\"value 字段说明\\"]").value'),'retained loading field draft')
+  assert.equal(await descriptionWrites(),failureWrites,'失败及重试均不保存字典');await closeDialog()
   const promptValue=async value=>ev(`(()=>{const e=document.querySelector('.el-message-box input');e.value=${JSON.stringify(value)};e.dispatchEvent(new Event('input',{bubbles:true}))})()`)
   await click('重命名',dfRow('disposable'));await promptValue('renamed_disposable');await click('确定',"document.querySelector('.el-message-box')");await text('renamed_disposable')
   await click('删除',dfRow('renamed_disposable'));await click('取消',"document.querySelector('.el-message-box')");assert.ok((await body()).includes('renamed_disposable'))
@@ -397,5 +430,5 @@ try {
   await click('编辑');await text('编辑连接配置');await click('取消',"document.querySelector('.el-dialog:not([style*=display])')")
   assert.deepEqual(b.exceptions,[])
   await writeFile(evidence+'/layout.json',JSON.stringify({viewports:[1280,1440,1920],realMouse:true,requests:await counts()},null,2))
-  console.log('PASS: three viewport channel layouts, actual mouse/hit testing, grouped object save, metadata-only DB selection, explicit previews/paging, themes/routes/zoom and conflict draft isolation')
+  console.log('PASS: first dictionary load, loaded/empty reuse, failure/manual retry with drafts, three viewport layouts, grouped save, metadata-only DB selection, previews/paging and conflict isolation')
 } catch(e){await writeFile(evidence+'/failure.txt',e.stack+'\n'+JSON.stringify(b.exceptions,null,2)+'\n'+await body());await writeFile(evidence+'/failure.png',Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'));throw e} finally {await b.close()}

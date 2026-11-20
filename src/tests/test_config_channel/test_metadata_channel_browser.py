@@ -12,7 +12,7 @@ from test_data_semantics_api import ROOT, request
 
 
 def main():
-    evidence = ROOT / 'evidence/data-semantics-read-optimization/channel-browser'
+    evidence = ROOT / 'evidence/dataframe-dictionary-loading/channel-browser'
     evidence.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='flowsql-object-channels-') as temporary:
         directory = Path(temporary)
@@ -20,12 +20,16 @@ def main():
         csv = 'id,value,value_extra\n' + ''.join(f'{i},{i * 2.5},{i}\n' for i in range(1, 46))
         (directory / 'frames/sample.csv').write_text(csv)
         (directory / 'frames/disposable.csv').write_text(csv)
+        (directory / 'frames/empty.csv').write_text('id,value\n')
         (directory / ('frames/' + 'long_channel_name_' * 5 + '.csv')).write_text(csv)
         with sqlite3.connect(directory / 'source.db') as db:
             db.execute('CREATE TABLE populated(id INTEGER, value REAL, created_at TIMESTAMP)')
             db.execute('INSERT INTO populated VALUES(1,2.5,NULL)')
         with running(Path(sys.argv[1]).resolve(), directory) as (base, _, log, _):
-            result = subprocess.run([sys.argv[2], str(Path(__file__).with_name('metadata_channel_browser.mjs')), base, str(evidence)], capture_output=True, text=True, timeout=260)
+            for name in ('sample', 'empty', 'disposable'):
+                status, description = request(base+'/api/semantics/v1/describe', dict(target=dict(kind='channel',locator=dict(kind='dataframe',name=name))))
+                assert status == 200 and description['data']['structure']['state'] == 'pending', description
+            result = subprocess.run([sys.argv[2], str(Path(__file__).with_name('metadata_channel_browser.mjs')), base, str(evidence), str(directory / 'frames/disposable.csv')], capture_output=True, text=True, timeout=260)
             (evidence / 'browser.log').write_text(result.stdout + result.stderr)
             (evidence / 'host.log').write_text(log.read_text())
             print(result.stdout + result.stderr)
@@ -41,6 +45,8 @@ def main():
                 status, d = request(base+'/api/semantics/v1/describe', dict(target=dict(kind='channel',locator=json.loads(encoded))))
                 assert status == 200 and d['data']['basis']['dictionary_ref'] == ref, d
                 assert d['data']['description']['document'], d
+                if json.loads(encoded)['kind'] == 'dataframe':
+                    assert d['data']['structure']['state'] == 'pending', d
             (evidence / 'restart.log').write_text(log.read_text())
     print('PASS: channel object workflow and precise descriptions survive actual plugin-host restart')
 

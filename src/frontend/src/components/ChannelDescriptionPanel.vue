@@ -4,7 +4,8 @@
     <p class="subject">{{ locator.name }}<template v-if="locator.table"> / {{ locator.schema ? locator.schema + '.' : '' }}{{ locator.table }}</template></p>
     <p v-if="error" role="alert">{{ error }}</p><p v-if="notice" role="status">{{ notice }}</p>
     <p v-if="busy && !observation" role="status">正在读取当前结构与说明…</p>
-    <p v-if="observation?.structure.state === 'pending'" role="status">结构尚未加载；可从对象的“预览”入口显式加载后刷新说明。</p>
+    <p v-if="loadingDataFrame" role="status">正在加载 DataFrame，完成后展示当前字典…</p>
+    <p v-else-if="observation?.structure.state === 'pending'" role="status">结构尚未加载；点击“刷新”重试加载并读取说明。</p>
     <p v-if="observation" class="reading-basis">{{ descriptionSource }}<template v-if="observation.basis.dictionary_ref"> · {{ observation.basis.dictionary_ref }}</template> · {{ descriptionState }}</p>
     <p v-if="observation?.structure.state === 'unsupported'">{{ observation.structure.reason }}</p>
     <p v-if="observation?.description.state === 'needs_review'" role="status">来源或绑定需要核对；已有说明与草稿已保留。</p>
@@ -79,11 +80,13 @@ import { ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp } from '@element-plus/icons-vue'
 import ChannelRelationEditor from './ChannelRelationEditor.vue'
 import SemanticValue from './SemanticValue.vue'
+import api from '../api/index.js'
 import { semanticsCall as call, clone, json, parseJson, labels, semanticKeys, prettyJson, downloadJson, autoGrow as vAutoGrow } from '../utils/dataSemantics.js'
 import { timeEditorConfig, timeDescription, timeSummary } from '../utils/channelDescriptionTime.js'
 const props = defineProps({ locator: { type: Object, required: true } })
 const observation = ref(null), basis = ref(null), changes = ref({}), busy = ref(false), error = ref(''), notice = ref(''), filter = ref(''), confirmations = ref([]), relationField = ref(''), relationTargets = ref({})
 const fieldsCollapsed = ref(false), objectDetails = ref(null)
+const loadingDataFrame = ref(false)
 const fieldNames = computed(() => Object.fromEntries((observation.value?.description.document?.fields || []).map(f => [f.field_id, observation.value?.context.binding?.field_map?.[f.field_id] || f.name])))
 const descriptionSource = computed(() => ({ bound_dictionary: '已保存绑定字典', producer_default: '生产者默认说明 · 未独立保存' }[observation.value?.description.origin] || '当前读取说明'))
 const descriptionState = computed(() => ({ present: '已有说明', missing: '尚无说明', needs_review: '待核对' }[observation.value?.description.state]))
@@ -208,7 +211,24 @@ async function inspectSource() {
 async function refresh() {
   busy.value = true; error.value = ''; confirmations.value = []
   try {
-    observation.value = await call('describe', { target: { kind: 'channel', locator: props.locator } })
+    let loadDataFrame = false
+    try {
+      observation.value = await call('describe', { target: { kind: 'channel', locator: props.locator } })
+      loadDataFrame = props.locator.kind === 'dataframe' && observation.value.structure.state === 'pending'
+    } catch (e) {
+      if (props.locator.kind !== 'dataframe' || !e.message.startsWith('SOURCE_UNAVAILABLE：CSV_LOAD_FAILED')) throw e
+      loadDataFrame = true
+    }
+    if (loadDataFrame) {
+      loadingDataFrame.value = true
+      try {
+        await api.previewDfChannel(props.locator.name, 1, 1)
+      } catch (e) {
+        error.value = '加载 DataFrame 失败：' + (e.response?.data?.code || e.response?.data?.error || e.message)
+        return
+      } finally { loadingDataFrame.value = false }
+      observation.value = await call('describe', { target: { kind: 'channel', locator: props.locator } })
+    }
     if (!basis.value || !Object.keys(changes.value).length) basis.value = clone(observation.value.basis)
     if (changedBasis.value) notice.value = '当前来源或说明版本已变化；原稿保留，请核对差异后继续。'
     if (objectDetails.value?.open) await readRelationTargets()
