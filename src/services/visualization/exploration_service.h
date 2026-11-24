@@ -27,7 +27,7 @@ struct QueryLimits {
 class ExplorationService {
  public:
     bool Init(IQuerier* querier, QueryLimits limits, std::string dataframe_upstream = {},
-              std::string dataframe_shared_dir = {});
+              std::string dataframe_shared_dir = {}, std::string semantics_upstream = {});
     DataFrameTransferClient& DataFrames() { return dataframes_; }
     void Start();
     void Routes(httplib::Server& server);
@@ -74,5 +74,7 @@ class ExplorationService {
     std::thread monitor_;
     std::mutex dataframe_mutex_;
     DataFrameTransferClient dataframes_;
+    std::string semantics_upstream_;
+    std::string SemanticTarget(const Source& source) const;
 };
 }  // namespace flowsql::visualization

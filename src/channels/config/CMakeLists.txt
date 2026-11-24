@@ -17,7 +17,7 @@ add_library(${PROJECT_NAME} SHARED
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_SOURCE_DIR})
 add_thirddepen(${PROJECT_NAME} rapidjson sqlite yaml-cpp httplib)
 find_package(OpenSSL REQUIRED)
-target_link_libraries(${PROJECT_NAME} OpenSSL::Crypto)
+target_link_libraries(${PROJECT_NAME} OpenSSL::Crypto flowsql_common)
 set_target_properties(${PROJECT_NAME} PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 
 file(READ "${CMAKE_SOURCE_DIR}/../config/semantics/documents.schema.json" FLOWSQL_SEMANTICS_SCHEMA)

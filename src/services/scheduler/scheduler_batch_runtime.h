@@ -46,6 +46,8 @@ struct BatchRuntimeSnapshot {
     int64_t result_col_count = 0;
     std::string result_target;
     std::string managed_result_json;
+    std::string semantic_context_json;
+    std::string result_columns_json;
     std::vector<std::string> contract_checks_json;
     int64_t created_ms = 0;
     int64_t started_ms = 0;

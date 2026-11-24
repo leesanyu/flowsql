@@ -1,6 +1,7 @@
 // Copyright (C) 2026 LIHUO. All rights reserved.
 // Licensed under the MIT License.
 #include "metadata_description.h"
+#include <framework/core/sql_text_splitter.h>
 #include <rapidjson/schema.h>
 #include <cerrno>
 #include <charconv>
@@ -126,6 +127,30 @@ int ReadNotes(ConfigChannelProvider& configs, const OperatorComponentContract& c
     return 0;
 }
 }  // namespace
+
+int MetadataDescriptionService::DescribeSql(const char* text, std::string* response) {
+    using namespace dataset;
+    const auto started = std::chrono::steady_clock::now();
+    Json req;
+    DataSemanticsError e;
+    if (Parse(text, "describe_sqlRequest", &req, &e)) return Error(e, response);
+    const auto deadline =
+        started + std::chrono::milliseconds(req.HasMember("timeout_ms") ? req["timeout_ms"].GetUint() : 5000);
+    const auto command = ParseSqlCommand(Text(req["sql"]));
+    if (!command.error.message.empty() || command.kind != SqlCommandKind::kDescribe)
+        return Error({"INVALID_DOCUMENT",
+                      command.error.message.empty() ? "expected one DESC statement" : command.error.message, "/sql"},
+                     response);
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+    if (remaining <= 0) return Error({"SOURCE_TIMEOUT", "metadata request deadline exceeded", ""}, response);
+    Json target;
+    target.Parse(command.target_json.c_str());
+    Json description(rapidjson::kObjectType);
+    description.AddMember("target", Copy(target, description.GetAllocator()), description.GetAllocator());
+    description.AddMember("timeout_ms", static_cast<unsigned>(remaining), description.GetAllocator());
+    return Describe(Encode(description).c_str(), response);
+}
 
 int MetadataDescriptionService::Describe(const char* text, std::string* response) {
     using namespace dataset;

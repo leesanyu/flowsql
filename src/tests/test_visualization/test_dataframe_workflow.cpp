@@ -6,6 +6,7 @@
 #include <arrow/api.h>
 #include <rapidjson/document.h>
 #include <services/visualization/dataframe_workflow.h>
+#include <services/visualization/exploration_semantics.h>
 
 #include <chrono>
 #include <cmath>
@@ -314,6 +315,20 @@ void TestDecimals() {
 
 void TestBuckets() {
     Fixture fixture;
+    for (const auto* unit : {"day", "month"}) {
+        auto payload = Json(R"({"workflow":[{"type":"view","query":[{"op":"aggregate",
+            "groupBy":[{"field":"f7","unit":"day","asFieldKey":"bucket"}],
+            "measures":[{"field":"*","agg":"count","asFieldKey":"n"}]}]}]})");
+        payload["workflow"][0]["query"][0]["groupBy"][0]["unit"].SetString(unit, payload.GetAllocator());
+        const auto fields = DescribeArrowSchema(*fixture.batch->schema());
+        const auto computed =
+            ExecuteDataFrameWorkflow(fixture.batch, fields, payload, "complete", 10000, 8 << 20, Deadline());
+        const auto mapped = WorkflowProjections(fields, payload, "dataframe");
+        CHECK(mapped.size() == computed.fields.size() && mapped.size() == 2);
+        CHECK(mapped[0].source_field == "stamp" && mapped[0].operation == "time_bucket");
+        CHECK(mapped[0].configuration_json.find(unit) != std::string::npos);
+        CHECK(mapped[1].function == "count" && mapped[1].source_field == "*");
+    }
     auto result = Run(fixture.batch,
                       R"([{"type":"view","query":[{"op":"aggregate",
                           "groupBy":[{"field":"f7","unit":"day","asFieldKey":"d"}],

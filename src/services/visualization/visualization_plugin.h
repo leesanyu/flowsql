@@ -20,6 +20,7 @@ struct EntryOptions {
     // Deployment-configured data plane; browsers can never supply either value.
     std::string dataframe_upstream;
     std::string dataframe_shared_dir;
+    std::string semantics_upstream;
 };
 
 class VisualizationPlugin : public IPlugin {

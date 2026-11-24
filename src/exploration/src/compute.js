@@ -1,8 +1,9 @@
 import { contract } from './bridge.js'
+import { parseJson } from '../../frontend/src/utils/dataSemantics.js'
 
 export async function api(path, options = {}) {
   const response = await fetch('/api/visualization/' + path, options)
-  const body = await response.json()
+  const body = parseJson(await response.text())
   if (!response.ok) throw Object.assign(new Error(body.message || '数据探索请求失败'), { code: body.code })
   return body
 }

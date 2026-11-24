@@ -467,6 +467,14 @@ int ClickHouseSession::ParseArrowStream(const std::string& body,
         if (!batch) break;
         batches->push_back(batch);
     }
+    if (batches->empty()) {
+        auto empty = arrow::RecordBatch::MakeEmpty(reader->schema());
+        if (!empty.ok()) {
+            last_error_ = empty.status().ToString();
+            return -1;
+        }
+        batches->push_back(*empty);
+    }
     return 0;
 }
 

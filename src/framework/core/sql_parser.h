@@ -23,15 +23,16 @@ struct OperatorRef {
 
 // SQL 解析结果
 struct SqlStatement {
-    std::vector<std::string> sources;    // FROM 后的全部源通道名
-    std::vector<OperatorRef> operators;  // USING/THEN 算子链
+    std::vector<std::string> sources;                                                // FROM 后的全部源通道名
+    std::vector<OperatorRef> operators;                                              // USING/THEN 算子链
     std::vector<std::unordered_map<std::string, std::string>> operator_with_params;  // 与 operators 等长并按索引对应
-    std::string dest;         // INTO 后的目标通道名（可选，空表示直接返回结果）
-    std::vector<std::string> columns;  // SELECT 后的列名（空表示 *）
-    std::string where_clause; // WHERE 后的过滤条件（可选，空表示无过滤）
+    std::string dest;                         // INTO 后的目标通道名（可选，空表示直接返回结果）
+    std::vector<std::string> columns;         // SELECT 后的列名（空表示 *）
+    std::vector<std::string> column_aliases;  // 与 columns 等长；无别名为空
+    std::string where_clause;                 // WHERE 后的过滤条件（可选，空表示无过滤）
     std::vector<StageFilterClause> stage_filters;  // source stage 0，operator stage 1..N
-    std::string sql_part;     // 完整 SQL 部分（不含 USING/WITH/INTO），数据库通道直接使用
-    std::string error;        // 解析错误信息（空表示成功）
+    std::string sql_part;  // 完整 SQL 部分（不含 USING/WITH/INTO），数据库通道直接使用
+    std::string error;     // 解析错误信息（空表示成功）
 
     // 是否有算子
     bool HasOperator() const { return !operators.empty(); }

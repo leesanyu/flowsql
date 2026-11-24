@@ -715,6 +715,12 @@ int main() {
                  ++invocation;
                  rsp = "{\"status\":\"completed\",\"data\":[],\"contract_checks\":[{\"use_ref\":\"operator_use.task@" +
                        std::to_string(invocation) + "\",\"output_check\":\"matched\"}]}";
+                 rsp.pop_back();
+                 rsp += ",\"semantic_context\":{\"state\":\"unknown\",\"subject\":{\"statement\":" +
+                        std::to_string(invocation) +
+                        "},\"observed_at\":\"1\",\"sources\":[],\"fields\":[],\"scope\":\"captured\"},\"result_"
+                        "columns\":[]}";
+
                  return error::OK;
              }},
         });
@@ -743,6 +749,21 @@ int main() {
         ASSERT_TRUE(detail.HasMember("contract_checks"));
         ASSERT_EQ(detail["contract_checks"].Size(), 2u);
         ASSERT_EQ(std::string(detail["contract_checks"][1]["use_ref"].GetString()), "operator_use.task@2");
+        ASSERT_TRUE(detail["semantic_context"] == submitted["semantic_context"]);
+        ASSERT_EQ(detail["semantic_context"]["subject"]["statement"].GetInt(), 2);
+        TaskPlugin reopened;
+        ASSERT_EQ(plugin.Stop(), 0);
+        ASSERT_EQ(plugin.Unload(), 0);
+        ASSERT_EQ(reopened.Option(("db_dir=" + directory + ";disable_worker=1").c_str()), 0);
+        ASSERT_EQ(reopened.Load(&querier), 0);
+        ASSERT_EQ(reopened.Start(), 0);
+        auto reopened_routes = CollectRoutes(&reopened);
+        ASSERT_EQ(reopened_routes["POST:/tasks/detail"]("", request, response), error::OK);
+        rapidjson::Document reloaded;
+        reloaded.Parse(response.c_str());
+        ASSERT_TRUE(reloaded["semantic_context"] == submitted["semantic_context"]);
+        ASSERT_EQ(reopened.Stop(), 0);
+
         ASSERT_EQ(plugin.Stop(), 0);
     }
     {
@@ -911,6 +932,10 @@ int main() {
         ASSERT_TRUE(routes.count("POST:/tasks/delete") == 1);
         ASSERT_TRUE(routes.count("POST:/tasks/cancel") == 1);
 
+        std::string rejected_id;
+        ASSERT_TRUE(p.CreateTask("DESC CHANNEL dataframe.input", &rejected_id) != 0);
+        ASSERT_TRUE(p.CreateTask("SELECT 1; DESC OPERATOR npm.basic", &rejected_id) != 0);
+        ASSERT_TRUE(rejected_id.empty());
         std::string rsp;
         ASSERT_EQ(routes["POST:/tasks/batch/execute"]("/tasks/batch/execute", R"({"sql_text":"SELECT 1","mode":"async"})", rsp), error::OK);
         rapidjson::Document d;

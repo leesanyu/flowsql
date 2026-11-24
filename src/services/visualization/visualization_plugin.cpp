@@ -66,6 +66,8 @@ int VisualizationPlugin::Option(const char* arg) {
             options_.static_dir = it->value.GetString();
         else if (key == "dataframe_upstream" && it->value.IsString())
             options_.dataframe_upstream = it->value.GetString();
+        else if (key == "semantics_upstream" && it->value.IsString())
+            options_.semantics_upstream = it->value.GetString();
         else if (key == "dataframe_shared_dir" && it->value.IsString())
             options_.dataframe_shared_dir = it->value.GetString();
         else if (key == "limits" && it->value.IsObject()) {
@@ -98,7 +100,9 @@ int VisualizationPlugin::Load(IQuerier* querier) {
 int VisualizationPlugin::Start() {
     if (!ValidPackage(options_.static_dir)) return -1;
     server_.new_task_queue = [this] { return new httplib::ThreadPool(limits_.max_active + 4); };
-    if (!service_.Init(querier_, limits_, options_.dataframe_upstream, options_.dataframe_shared_dir)) return -1;
+    if (!service_.Init(querier_, limits_, options_.dataframe_upstream, options_.dataframe_shared_dir,
+                       options_.semantics_upstream))
+        return -1;
     service_.Routes(server_);
     server_.Get("/api/visualization/capabilities", [](const auto&, auto& res) {
         res.set_header("Cache-Control", "no-store");

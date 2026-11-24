@@ -505,6 +505,7 @@
 
 <script setup>
 import { computed, nextTick, ref, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import OperatorContractPanel from '../components/OperatorContractPanel.vue'
 import { Upload, Edit, QuestionFilled, Document, Tickets, FullScreen, Search } from '@element-plus/icons-vue'
 import api from '../api'
@@ -1353,11 +1354,24 @@ watch([detailForm, detailDialogVisible], () => {
   }
   else if (!detailDialogVisible.value) sessionStorage.removeItem('flowsql.operator.detail')
 }, { deep: true })
+const route = useRoute()
 onMounted(async () => {
   const saved = readDraft('detail'), creating = readDraft('create')
   if (saved) operatorType.value = saved.operatorType
   await Promise.allSettled([loadOperators(), refreshOperatorCounts()])
-  if (saved) await openDetail(saved.form.fullName, saved.mode)
+  if (route.query.name) {
+    const name = String(route.query.name)
+    const results = await Promise.allSettled(OPERATOR_TYPES.map(async type => ({ type, items: extractOperatorList(await api.getOperators(type)) })))
+    const groups = results.filter(result => result.status === 'fulfilled').map(result => result.value)
+    const group = groups.find(g => g.items.some(op => g.type === 'cpp' ? op.plugin?.operators?.includes(name) : `${op.category}.${op.name}` === name))
+    if (!group) { ElMessage.error(groups.length ? '当前算子不存在' : '算子目录读取失败'); return }
+    await switchOperatorType(group.type)
+    if (group.type === 'cpp') {
+      await openCppDetail(group.items.find(op => op.plugin?.operators?.includes(name)).plugin_id)
+      componentContractName.value = name
+    } else { await openDetail(name, 'view'); contractMounted.value = true; contractExpanded.value = true }
+  }
+  else if (saved) await openDetail(saved.form.fullName, saved.mode)
   else if (creating) showCreateDialog()
 })
 </script>

@@ -6,6 +6,7 @@ import test from 'node:test'
 
 import {
   PCAP_UPLOAD_DEFAULTS,
+  RESULT_RESPONSE_CONFIG,
   PCAP_UPLOAD_PATH,
   PCAP_UPLOAD_REQUEST_CONFIG,
   PCAP_REPLAY_SPEEDS,
@@ -127,4 +128,11 @@ test('other preview cell values have stable readable text', () => {
   assert.equal(formatPreviewCell(true), 'true')
   assert.equal(formatPreviewCell(3389), '3389')
   assert.equal(formatPreviewCell('rdp'), 'rdp')
+})
+
+test('query and historical result responses preserve exact semantic numeric declarations', () => {
+  const decoded = RESULT_RESPONSE_CONFIG.transformResponse[0]('{"rows":2,"semantic_context":{"max":18446744073709551615,"min":-9223372036854775808}}')
+  assert.equal(decoded.rows, 2)
+  assert.equal(decoded.semantic_context.max, 18446744073709551615n)
+  assert.equal(decoded.semantic_context.min, -9223372036854775808n)
 })

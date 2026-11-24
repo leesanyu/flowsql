@@ -22,14 +22,13 @@ bool SqlParser::MatchKeyword(const char* keyword) {
 
     // 大小写不敏感匹配
     for (size_t i = 0; i < len; ++i) {
-        if (std::toupper(static_cast<unsigned char>(pos_[i])) !=
-            std::toupper(static_cast<unsigned char>(keyword[i]))) return false;
+        if (std::toupper(static_cast<unsigned char>(pos_[i])) != std::toupper(static_cast<unsigned char>(keyword[i])))
+            return false;
     }
 
     // 关键字后必须结束标识符，防止前缀误匹配（如 "SELECT" 匹配 "SELECT_FOO"）
     const char* after = pos_ + len;
-    if (after < end_ &&
-        (std::isalnum(static_cast<unsigned char>(*after)) || *after == '_')) {
+    if (after < end_ && (std::isalnum(static_cast<unsigned char>(*after)) || *after == '_')) {
         return false;
     }
 
@@ -144,8 +143,7 @@ static bool KeywordAt(const char* pos, const char* begin, const char* end, const
     const size_t length = std::strlen(keyword);
     if (pos + length > end || (pos > begin && IsSqlWordChar(pos[-1]))) return false;
     for (size_t i = 0; i < length; ++i) {
-        if (std::toupper(static_cast<unsigned char>(pos[i])) !=
-            std::toupper(static_cast<unsigned char>(keyword[i]))) {
+        if (std::toupper(static_cast<unsigned char>(pos[i])) != std::toupper(static_cast<unsigned char>(keyword[i]))) {
             return false;
         }
     }
@@ -311,6 +309,19 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
                 return stmt;
             }
             stmt.columns.push_back(col);
+            SkipWhitespace();
+            std::string alias;
+            const char* alias_pos = pos_;
+            if (MatchKeyword("AS")) {
+                alias = ReadIdentifier();
+                if (alias.empty()) {
+                    stmt.error = "expected alias after AS";
+                    return stmt;
+                }
+            } else {
+                pos_ = alias_pos;
+            }
+            stmt.column_aliases.push_back(std::move(alias));
 
             SkipWhitespace();
             if (pos_ < end_ && *pos_ == ',') {
@@ -387,8 +398,7 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
 
     pos_ = extension_start ? extension_start : end_;
 
-    auto parse_with_params = [this](std::unordered_map<std::string, std::string>* out,
-                                    std::string* err) -> bool {
+    auto parse_with_params = [this](std::unordered_map<std::string, std::string>* out, std::string* err) -> bool {
         if (!out || !err) return false;
         out->clear();
         if (!MatchKeyword("WITH")) return true;
@@ -466,9 +476,7 @@ SqlStatement SqlParser::Parse(const std::string& sql) {
                     stmt.error = "operator-stage WHERE expression must not be empty";
                     return stmt;
                 }
-                if (FindTopLevelKeyword(filter_text.data(),
-                                        filter_text.data() + filter_text.size(),
-                                        "WHERE")) {
+                if (FindTopLevelKeyword(filter_text.data(), filter_text.data() + filter_text.size(), "WHERE")) {
                     stmt.error = "operator-stage WHERE clause contains unexpected WHERE";
                     return stmt;
                 }
@@ -549,9 +557,8 @@ bool SqlParser::ValidateWhereClause(const std::string& clause) {
     std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
 
     static const char* forbidden[] = {
-        "DROP", "DELETE", "INSERT", "UPDATE", "ALTER", "CREATE",
-        "EXEC", "EXECUTE", "TRUNCATE", "GRANT", "REVOKE",
-        "--", "/*", "*/", ";",
+        "DROP",     "DELETE", "INSERT", "UPDATE", "ALTER", "CREATE", "EXEC", "EXECUTE",
+        "TRUNCATE", "GRANT",  "REVOKE", "--",     "/*",    "*/",     ";",
     };
 
     for (const char* kw : forbidden) {
@@ -560,8 +567,7 @@ bool SqlParser::ValidateWhereClause(const std::string& clause) {
         if (pos != std::string::npos) {
             if (std::isalpha(keyword[0])) {
                 bool word_start = (pos == 0 || !std::isalnum(upper[pos - 1]));
-                bool word_end = (pos + keyword.size() >= upper.size() ||
-                                 !std::isalnum(upper[pos + keyword.size()]));
+                bool word_end = (pos + keyword.size() >= upper.size() || !std::isalnum(upper[pos + keyword.size()]));
                 if (word_start && word_end) return false;
             } else {
                 return false;

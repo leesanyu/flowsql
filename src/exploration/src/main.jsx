@@ -7,6 +7,7 @@ import { api, computationClient } from './compute.js'
 import { snapshotClient, snapshotLabel } from './dataframe.js'
 import { controls, editChart, marks, aggregates, chartKinds, chartProblem, roleFields, countField, histogramWorkflow, histogramRows, statisticsWorkflow } from './chart.js'
 import './style.css'
+import SemanticPanel from './SemanticPanel.jsx'
 
 function AdvancedEditor({ chart, fields, compute, context, store, onChange }) {
   const [initial] = useState(() => [chart])
@@ -79,6 +80,12 @@ function TableEditor({ page, context, update, acquire }) {
   const [busy, setBusy] = useState(false)
   const [run, setRun] = useState(0)
   const store = useRef(null)
+  const sourceContext = dataframe ? page.snapshot.semantic_context : source.semantic_context
+  const selectedIds = [...new Set([
+    ...Object.entries(chart.encodings).filter(([channel]) => !['dimensions', 'measures'].includes(channel)).flatMap(([, items]) => items.map(field => field.fid)),
+    ...[chart.config.flowsqlHistogram?.field, chart.config.flowsqlTimeBucket?.field].filter(Boolean)
+  ])]
+  const fieldLabels = Object.fromEntries(source.fields.map(field => [field.field_id,field.label]))
   const values = controls(chart)
   const kind = chartKinds[values.mark]
   const problem = chartProblem(chart, fields)
@@ -89,6 +96,7 @@ function TableEditor({ page, context, update, acquire }) {
       on_expired: () => update({ stale: '快照已过期，请重新获取快照后绘图。' }) },
     (value) => { setResult(value); setError(''); setBusy(false) },
     (message) => { setError(message); setResult(null); setBusy(false) }), [source, detail, page.snapshot?.snapshot_id])
+  useEffect(() => { setResult(null); setError('') }, [page.snapshot?.snapshot_id])
   useEffect(() => { client.setVisible(context.visible); return () => client.setVisible(false) }, [client, context.visible])
   const compute = useCallback(async (workflow) => {
     setBusy(true)
@@ -183,6 +191,11 @@ function TableEditor({ page, context, update, acquire }) {
       {!!result?.numeric_display?.length && <button className="precision-badge" aria-expanded={precision} onClick={() => setPrecision(!precision)}>
         {result.numeric_display.some((d) => d.mode === 'approximate') ? '≈ 近似数值' : 'Decimal 精确数值'}</button>}
       <button onClick={() => { client.cancel(); setBusy(false) }}>取消查询</button>
+    <aside aria-label="数据与图表说明" className="semantic-reading">
+      <SemanticPanel context={sourceContext} title="来源字段说明" fieldLabels={fieldLabels} />
+      <SemanticPanel context={sourceContext} title="所选字段说明" selectedIds={selectedIds} fieldLabels={fieldLabels} />
+      {result && <SemanticPanel context={result.semantic_context} title="图表口径说明" fieldLabels={{...fieldLabels,...Object.fromEntries(result.fields.map(field => [field.field_id,field.label]))}} />}
+    </aside>
     </div>
     {precision && result?.numeric_display?.length > 0 && <aside className="precision-info" aria-label="数值精度">
       <p>近似数值仅用于图形展示，过滤、分组与统计仍由源库执行。</p>

@@ -702,7 +702,10 @@ void test_empty_result_set() {
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
     int rc = session->ExecuteQueryArrow(("SELECT * FROM " + table + " WHERE 1=0").c_str(), &batches);
     assert(rc == 0);
-    assert(batches.empty());
+    assert(batches.size() == 1 && batches[0]->num_rows() == 0);
+    assert(batches[0]->schema()->num_fields() == 1);
+    assert(batches[0]->schema()->field(0)->name() == "id");
+    assert(batches[0]->schema()->field(0)->type()->id() == arrow::Type::INT32);
     printf("  Empty result set: batches.size()=%zu\n", batches.size());
 
     DropTableIfExists(session.get(), table);

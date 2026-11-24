@@ -17,7 +17,7 @@
               <el-radio-button :disabled="!allowSyncMode" label="sync">同步</el-radio-button>
               <el-radio-button label="async">异步</el-radio-button>
             </el-radio-group>
-            <el-button type="primary" @click="executeSQL" :loading="executing">
+            <el-button type="primary" @click="executeSQL" :loading="executing" aria-label="执行 SQL">
               <el-icon><CaretRight /></el-icon>
               执行
             </el-button>
@@ -40,16 +40,19 @@
         show-icon
       />
 
+      <section v-if="description" class="result-section" data-testid="workbench-description">
+        <el-button @click="openDescription">查看对象说明 · JSON</el-button>
+      </section>
       <!-- 执行结果 -->
       <div v-if="currentResult" class="result-section">
         <el-divider content-position="left">执行结果</el-divider>
         <div v-if="currentResult.error" class="error-message">
           <el-alert type="error" :title="currentResult.error" :closable="false" />
         </div>
-        <div v-else-if="currentResult.message">
+        <div v-if="currentResult.message">
           <el-alert type="success" :title="currentResult.message" :closable="false" />
         </div>
-        <div v-else>
+        <div v-if="!currentResult.error && (currentResult.columns?.length || currentResult.semanticContext)">
           <div class="result-meta">
             <el-tag>{{ currentResult.rows?.length || 0 }} 行</el-tag>
             <el-tag type="info">{{ currentResult.columns?.length || 0 }} 列</el-tag>
@@ -61,14 +64,17 @@
             border
           >
             <el-table-column
-              v-for="col in currentResult.columns"
-              :key="col"
-              :prop="col"
+              v-for="(col,index) in currentResult.columns"
+              :key="index"
+              :prop="currentResult.columnKeys?.[index] || col"
               :label="col"
               min-width="120"
               show-overflow-tooltip
-            />
+            >
+              <template #header>{{ col }} <button v-if="currentResult.semanticContext" type="button" :aria-label="col + ' 第' + (index + 1) + '列说明'" @click="currentSemanticRef.open(index)">说明</button></template>
+            </el-table-column>
           </el-table>
+          <ResultSemanticPanel v-if="currentResult.semanticContext" ref="currentSemanticRef" :context="currentResult.semanticContext" />
         </div>
       </div>
     </el-card>
@@ -145,10 +151,10 @@
         <div v-if="dialogResult.error" class="error-message">
           <el-alert type="error" :title="dialogResult.error" :closable="false" />
         </div>
-        <div v-else-if="dialogResult.message">
+        <div v-if="dialogResult.message">
           <el-alert type="success" :title="dialogResult.message" :closable="false" />
         </div>
-        <div v-else>
+        <div v-if="!dialogResult.error && (dialogResult.columns?.length || dialogResult.semanticContext)">
           <div class="result-meta">
             <el-tag>{{ dialogResult.rows?.length || 0 }} 行</el-tag>
             <el-tag type="info">{{ dialogResult.columns?.length || 0 }} 列</el-tag>
@@ -160,14 +166,17 @@
             border
           >
             <el-table-column
-              v-for="col in dialogResult.columns"
-              :key="col"
-              :prop="col"
+              v-for="(col,index) in dialogResult.columns"
+              :key="index"
+              :prop="dialogResult.columnKeys?.[index] || col"
               :label="col"
               min-width="120"
               show-overflow-tooltip
-            />
+            >
+              <template #header>{{ col }} <button v-if="dialogResult.semanticContext" type="button" :aria-label="col + ' 第' + (index + 1) + '列说明'" @click="historySemanticRef.open(index)">说明</button></template>
+            </el-table-column>
           </el-table>
+          <ResultSemanticPanel v-if="dialogResult.semanticContext" ref="historySemanticRef" :context="dialogResult.semanticContext" />
         </div>
       </div>
     </el-dialog>
@@ -179,6 +188,10 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { CaretRight, Refresh } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import api from '../api'
+import ResultSemanticPanel from '../components/ResultSemanticPanel.vue'
+import { semanticsCall } from '../utils/dataSemantics.js'
+import { channelReading, operatorReading } from '../utils/semanticReading.js'
+import { showJsonReading } from '../utils/semanticJsonDialog.js'
 import { formatTaskResult } from '../utils/taskResult.js'
 import { taskExecutionPolicy } from '../utils/taskExecution.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -189,10 +202,23 @@ const executeMode = ref('sync')
 const executing = ref(false)
 const sqlTaskKind = ref('unknown')
 const currentResult = ref(null)
+const description = ref(null), currentSemanticRef = ref(null), historySemanticRef = ref(null)
+let descriptionReader = null
+function openDescription() {
+  const observed = description.value, channel = observed.subject.kind === 'channel'
+  descriptionReader = showJsonReading({
+    title: channel ? '通道说明' : '算子说明', value: channel ? channelReading(observed) : operatorReading(observed),
+    links: [{ label: '当前对象管理页', href: channel ? '/channels?dataset=' + encodeURIComponent(JSON.stringify(observed.subject.locator)) : '/operators?name=' + encodeURIComponent(observed.subject.name) },
+      ...(observed.basis.dictionary_ref ? [{ label: '本次精确版本', href: '/semantics?ref=' + encodeURIComponent(observed.basis.dictionary_ref) }] : [])],
+    resolve: !channel && observed.basis.contract_ref ? { label: '读取本次完整契约', load: () => semanticsCall('resolve', { exact_reference: observed.basis.contract_ref }) } : null
+  })
+}
+let executionGeneration = 0
 const tasks = ref([])
 const loading = ref(false)
 const resultDialogVisible = ref(false)
 const dialogResult = ref(null)
+watch(resultDialogVisible, visible => { if (!visible) historySemanticRef.value?.close() })
 const resultLoadingId = ref('')
 const currentTaskId = ref('')
 let pollTimer = null
@@ -228,8 +254,10 @@ const normalizeAnalyzePayload = (payload) => {
   const statementCount = Number.isInteger(payload?.statement_count)
     ? payload.statement_count
     : statements.length
-  const taskKind = typeof payload?.task_kind === 'string' ? payload.task_kind : 'unknown'
+  const taskKind = payload?.command_kind === 'describe' ? null : typeof payload?.task_kind === 'string' ? payload.task_kind : 'unknown'
   return {
+    command_kind: payload?.command_kind || null,
+    target: payload?.target || null,
     statement_count: statementCount,
     statements,
     statement_kinds: statementKinds,
@@ -438,8 +466,12 @@ const executeSQL = async () => {
     return
   }
 
+  const generation = ++executionGeneration
   executing.value = true
   currentResult.value = null
+  descriptionReader?.close()
+  description.value = null
+  currentTaskId.value = ''
 
   try {
     if (analyzeTimer) {
@@ -447,6 +479,13 @@ const executeSQL = async () => {
       analyzeTimer = null
     }
     const analysis = await analyzeCurrentSql()
+    if (generation !== executionGeneration) return
+    if (analysis.command_kind === 'describe') {
+      const data = await semanticsCall('describe-sql', { sql })
+      if (generation !== executionGeneration) return
+      description.value = data; openDescription()
+      return
+    }
     executeMode.value = taskExecutionPolicy(analysis, executeMode.value).mode
     const sqls = Array.isArray(analysis?.statements) ? analysis.statements : []
     if (sqls.length === 0) {
@@ -457,6 +496,7 @@ const executeSQL = async () => {
       if (analysis.task_kind === 'stream' || analysis.task_kind === 'mixed') {
         const payload = buildStreamGroupPayload(sqls)
         const streamRes = await api.executeStreamTask(payload)
+        if (generation !== executionGeneration) return
         const submit = streamRes.data || {}
         const taskId = submit.task_id
         currentTaskId.value = taskId
@@ -474,6 +514,7 @@ const executeSQL = async () => {
       }
       if (analysis.task_kind === 'batch') {
         const res = await api.executeBatchTask(sql, executeMode.value)
+        if (generation !== executionGeneration) return
         const submit = res.data || {}
         const taskId = submit.task_id
         currentTaskId.value = taskId
@@ -495,6 +536,7 @@ const executeSQL = async () => {
         sql_text: sqls[0],
         timeout_s: 0
       })
+      if (generation !== executionGeneration) return
       const submit = streamRes.data || {}
       const taskId = submit.task_id
       currentTaskId.value = taskId
@@ -513,6 +555,7 @@ const executeSQL = async () => {
     }
 
     const res = await api.executeBatchTask(sqls[0], executeMode.value)
+        if (generation !== executionGeneration) return
     const submit = res.data || {}
     const taskId = submit.task_id
 
@@ -540,11 +583,12 @@ const executeSQL = async () => {
     await loadTasks()
     startPolling()
   } catch (error) {
+    if (generation !== executionGeneration) return
     const detail = parseApiError(error)
     ElMessage.error('执行失败: ' + detail)
-    currentResult.value = { error: detail }
+    if (generation === executionGeneration) currentResult.value = { error: detail }
   } finally {
-    executing.value = false
+    if (generation === executionGeneration) executing.value = false
   }
 }
 
@@ -566,10 +610,12 @@ const loadTasks = async () => {
       stopPolling()
     }
     if (currentTaskId.value) {
+      const taskId = currentTaskId.value, generation = executionGeneration
       const current = tasks.value.find(t => (t.id || t.task_id) === currentTaskId.value)
       if (current && isTerminal(current.status)) {
         if ((current.task_kind || '') === 'stream') {
           const statusRes = await api.getStreamTaskStatus(currentTaskId.value)
+          if (taskId !== currentTaskId.value || generation !== executionGeneration) return
           const statusPayload = statusRes?.data || {}
           const runtimeKind = statusPayload.runtime_kind || 'single'
           const groupMode = statusPayload.group_mode || ''
@@ -586,6 +632,7 @@ const loadTasks = async () => {
           }
         } else {
           const resultRes = await api.getTaskResult(currentTaskId.value)
+          if (taskId !== currentTaskId.value || generation !== executionGeneration) return
           currentResult.value = formatTaskResult(resultRes.data)
         }
         currentTaskId.value = ''
@@ -739,10 +786,13 @@ onMounted(() => {
 })
 
 watch(sqlText, () => {
+  executionGeneration++; executing.value = false
   scheduleSqlAnalyze()
 })
 
 onUnmounted(() => {
+  descriptionReader?.close()
+  executionGeneration++
   stopPolling()
   if (analyzeTimer) {
     clearTimeout(analyzeTimer)

@@ -2369,13 +2369,19 @@ int SchedulerPlugin::ExecuteTransfer(IChannel* source, IChannel* sink, const std
         auto* dst = dynamic_cast<IDataFrameChannel*>(sink);
         if (!src || !dst) return -1;
 
-        // DataFrame + WHERE → 先过滤再复制
-        if (!stmt.where_clause.empty()) {
-            auto filtered = ApplyDataFrameFilter(src, stmt.where_clause, ++tmp_channel_seq_);
-            if (!filtered) return -1;
-            return ChannelAdapter::CopyDataFrame(filtered.get(), dst);
+        DataFrame frame;
+        if (src->Read(&frame)) return -1;
+        if (!stmt.where_clause.empty() && frame.Filter(stmt.where_clause.c_str())) return -1;
+        auto batch = ProjectResult(frame.ToArrow(), stmt.columns);
+        if (!batch) {
+            if (error) *error = "DataFrame projection requires existing direct columns";
+            return -1;
         }
-        return ChannelAdapter::CopyDataFrame(src, dst);
+        auto fields = batch->schema()->fields();
+        for (size_t i = 0; i < stmt.column_aliases.size(); ++i)
+            if (!stmt.column_aliases[i].empty()) fields[i] = fields[i]->WithName(stmt.column_aliases[i]);
+        frame.FromArrow(arrow::RecordBatch::Make(arrow::schema(fields), batch->num_rows(), batch->columns()));
+        return dst->Write(&frame);
     }
 
     if (source_type == ChannelType::kDataFrame && sink_type == ChannelType::kDatabase) {

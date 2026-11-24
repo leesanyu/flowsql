@@ -65,3 +65,14 @@ test('failed, running, and unknown task states keep their existing messages', ()
     message: '任务状态：unknown'
   })
 })
+
+test('captured result columns retain positions, duplicate labels and zero-row schema', () => {
+  const semantic_context = { state: 'available', fields: [{ output_index: 0 }, { output_index: 1 }] }
+  const result = formatTaskResult({ status: 'completed', result_columns: ['same', 'same'], result_values: [[1, 2]], semantic_context })
+  assert.deepEqual(result.columns, ['same', 'same'])
+  assert.deepEqual(result.rows, [{ column_0: 1, column_1: 2 }])
+  assert.equal(result.semanticContext, semantic_context)
+  const empty = formatTaskResult({ status: 'completed', rows: 0, result_columns: ['zero'], result_values: [], semantic_context })
+  assert.deepEqual(empty.columns, ['zero'])
+  assert.deepEqual(empty.rows, [])
+})

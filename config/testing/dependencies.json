@@ -774,6 +774,81 @@
         "semantics_http",
         "visualization_browser"
       ]
+    },
+    "test_data_semantics_consumption_frontend": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_semantic_context": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_semantic_queries": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "driver",
+      "location": "native",
+      "resources": [
+        "database_driver",
+        "semantics_http"
+      ]
+    },
+    "test_consumption_browser": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "semantics_http",
+        "visualization_browser"
+      ]
+    },
+    "test_visualization_semantics": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "semantics_http",
+        "visualization_dataframe_transfer"
+      ]
+    },
+    "test_visualization_semantics_browser": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "semantics_http",
+        "visualization_browser"
+      ]
+    },
+    "test_visualization_semantics_matrix": {
+      "services": [
+        "mysql",
+        "postgres",
+        "clickhouse"
+      ],
+      "role": "driver",
+      "location": "native",
+      "resources": [
+        "database_driver",
+        "semantics_http",
+        "visualization_browser"
+      ]
+    },
+    "test_consumption_npm": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": [
+        "semantics_http",
+        "visualization_browser"
+      ]
     }
   }
 }

@@ -252,7 +252,7 @@ def main():
                         passed(backend + '_decimal_native_precision_null_and_filtered_integer_protection')
                         # Select the exact same Decimal rows with a byte budget that admits ordinary rows,
                         # but cannot admit the complete response with precision metadata.
-                        reduced = dict(projection); reduced.pop('numeric_display'); reduced['elapsed_ms'] = 0
+                        reduced = dict(projection); reduced.pop('numeric_display'); reduced.pop('semantic_context'); reduced['elapsed_ms'] = 0
                         budget = len(json.dumps(reduced, separators=(',',':'), ensure_ascii=False).encode()) + 96
                         budget_base = f'http://127.0.0.1:{port()}'
                         budget_options = json.dumps(dict(port=int(budget_base.rsplit(':',1)[1]), static_dir=str(output/'exploration'), limits=dict(max_bytes=budget)))

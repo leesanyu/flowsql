@@ -43,7 +43,7 @@ add_executable(test_visualization_dataframe_workflow test_dataframe_workflow.cpp
     ${CMAKE_SOURCE_DIR}/services/visualization/workflow.cpp)
 target_include_directories(test_visualization_dataframe_workflow PRIVATE ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/services/visualization)
-add_thirddepen(test_visualization_dataframe_workflow arrow rapidjson)
+add_thirddepen(test_visualization_dataframe_workflow arrow rapidjson httplib)
 target_link_libraries(test_visualization_dataframe_workflow OpenSSL::Crypto)
 target_compile_options(test_visualization_dataframe_workflow PRIVATE -UNDEBUG)
 set_target_properties(test_visualization_dataframe_workflow PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
@@ -105,3 +105,18 @@ add_test(NAME test_visualization_statistics COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_statistics.py ${CMAKE_BINARY_DIR}/output ${FLOWSQL_TEST_NODE})
 set_tests_properties(test_visualization_statistics PROPERTIES TIMEOUT 240 WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output
     RESOURCE_LOCK visualization_browser)
+
+add_test(NAME test_visualization_semantics COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_semantics.py ${CMAKE_BINARY_DIR}/output)
+set_tests_properties(test_visualization_semantics PROPERTIES TIMEOUT 180
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output RESOURCE_LOCK "semantics_http;visualization_dataframe_transfer")
+
+add_test(NAME test_visualization_semantics_browser COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_semantics_browser.py ${CMAKE_BINARY_DIR}/output ${FLOWSQL_TEST_NODE})
+set_tests_properties(test_visualization_semantics_browser PROPERTIES TIMEOUT 420
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output RESOURCE_LOCK "semantics_http;visualization_browser")
+
+add_test(NAME test_visualization_semantics_matrix COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_semantics_matrix.py ${CMAKE_BINARY_DIR}/output)
+set_tests_properties(test_visualization_semantics_matrix PROPERTIES TIMEOUT 240
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output RESOURCE_LOCK "database_driver;semantics_http;visualization_browser")

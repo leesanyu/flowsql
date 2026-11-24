@@ -2,6 +2,16 @@
 // Licensed under the MIT License.
 
 export const formatTaskResult = (result, runningMessage = '') => {
+  if (result.status === 'failed') return { error: result.error || '执行失败' }
+  if (Array.isArray(result.result_columns)) {
+    const columns = result.result_columns
+    const columnKeys = columns.map((_, index) => 'column_' + index)
+    const values = result.result_values || result.data?.data || []
+    return { columns, columnKeys,
+      rows: values.map(row => Object.fromEntries(columnKeys.map((key, i) => [key, row[i]]))),
+      semanticContext: result.semantic_context,
+      ...(values.length === 0 ? { message: `执行完成（${result.rows ?? 0} 行已写入）` } : {}) }
+  }
   if (Array.isArray(result.data)) {
     if (result.status === 'completed' && result.data.length === 0) {
       return {

@@ -2,7 +2,7 @@ add_library(flowsql_visualization SHARED visualization_plugin.cpp workflow.cpp e
 target_include_directories(flowsql_visualization PRIVATE ${CMAKE_SOURCE_DIR})
 add_thirddepen(flowsql_visualization arrow httplib rapidjson)
 find_package(OpenSSL REQUIRED)
-target_link_libraries(flowsql_visualization OpenSSL::Crypto)
+target_link_libraries(flowsql_visualization flowsql_common OpenSSL::Crypto)
 set_target_properties(flowsql_visualization PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 
 set(exploration ${CMAKE_SOURCE_DIR}/exploration)
@@ -22,6 +22,9 @@ add_custom_command(OUTPUT ${frontend_stamp} ${CMAKE_BINARY_DIR}/output/explorati
         ${FLOWSQL_NPM_EXECUTABLE} run build -- --outDir ${CMAKE_BINARY_DIR}/output/exploration
     COMMAND ${CMAKE_COMMAND} -E touch ${frontend_stamp}
     DEPENDS ${npm_stamp} ${exploration_sources} ${exploration}/index.html ${exploration}/vite.config.js
+        ${CMAKE_SOURCE_DIR}/frontend/src/utils/dataSemantics.js
+        ${CMAKE_SOURCE_DIR}/frontend/src/utils/semanticReading.js
+        ${CMAKE_SOURCE_DIR}/frontend/src/utils/semanticJsonDialog.js
         ${FLOWSQL_VERSION_DIR}/build-info.json
     WORKING_DIRECTORY ${exploration} VERBATIM)
 add_custom_target(flowsql_exploration DEPENDS ${frontend_stamp} ${CMAKE_BINARY_DIR}/output/exploration/manifest.json)

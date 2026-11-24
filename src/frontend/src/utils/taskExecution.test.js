@@ -35,3 +35,11 @@ test('existing stream and multi-statement execution still require async', () => 
     assert.equal(policy.continuousSource, false)
   }
 })
+
+
+test('DESC uses synchronous reading regardless of selected execution mode', () => {
+  const policy = taskExecutionPolicy({ command_kind: 'describe', task_kind: null, statement_count: 1, requires_async: false }, 'async')
+  assert.equal(policy.mode, 'sync')
+  assert.equal(policy.readOnly, true)
+  assert.equal(policy.allowSync, true)
+})

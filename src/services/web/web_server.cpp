@@ -780,7 +780,7 @@ int WebServer::Init(const std::string& db_path) {
     }
     for (const char* operation :
          {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export", "channels/describe",
-          "channels/preview", "channels/check", "channels/apply", "operators/check", "describe",
+          "channels/preview", "channels/check", "channels/apply", "operators/check", "describe", "describe-sql",
           "channels/save-description", "operators/save-description"}) {
         const std::string target = std::string("/semantics/") + operation;
         server_.Post(std::string("/api/semantics/v1/") + operation, [this, target](const httplib::Request& req,
@@ -1190,7 +1190,7 @@ void WebServer::EnumApiRoutes(std::function<void(const RouteItem&)> cb) {
     }
     for (const char* operation :
          {"list", "resolve", "history", "save", "references", "binding_lookup", "import", "export", "channels/describe",
-          "channels/preview", "channels/check", "channels/apply", "operators/check", "describe",
+          "channels/preview", "channels/check", "channels/apply", "operators/check", "describe", "describe-sql",
           "channels/save-description", "operators/save-description"}) {
         const std::string target = std::string("/semantics/") + operation;
         cb({"POST", std::string("/api/semantics/v1/") + operation,
@@ -1557,6 +1557,14 @@ int32_t WebServer::HandleGetTaskResult(const std::string&, const std::string& re
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
     w.StartObject();
     w.Key("status"); w.String(status.c_str());
+    w.Key("task_id");
+    w.String(task_id.c_str());
+    for (const char* key : {"semantic_context", "result_columns"}) {
+        if (detail.HasMember(key)) {
+            w.Key(key);
+            detail[key].Accept(w);
+        }
+    }
     if (detail.HasMember("result") && detail["result"].IsObject()) {
         w.Key("result");
         detail["result"].Accept(w);

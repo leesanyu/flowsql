@@ -45,6 +45,34 @@ Python 基本信息及源码在前，“说明与契约”按需展开；C++ 先
 增加 `--execute` 后才执行预检与 `builtin.passthrough` SQL，并读取结果的精确 use/dictionary 依据及必要上下文。
 准备输入、激活算子与选择新输出名的步骤见[通道与算子说明](data-semantics.md#普通客户端发现描述与显式执行)。
 
+## 就地查看说明
+
+在 SQL 工作台，每次执行一条说明命令，例如：
+
+```sql
+DESC CHANNEL dataframe.samples;
+```
+
+或单独执行 `DESC OPERATOR npm.basic;`。数据库使用 `DESC CHANNEL sqlite.analysis TABLE dns_results;`，
+对象名替换为当前通道和表；PostgreSQL 可追加 `SCHEMA public`。
+DESC 完成后自动打开独立的 JSON 只读弹框，不创建执行任务；与 SELECT 混合或提交多条 DESC 会在执行前拒绝。
+结构/说明状态、实体属性、字段及精确依据统一放在 JSON 中，支持语法高亮、最大化、复制和下载；Esc 关闭后回到原页面。
+未加载 CSV 保持结构待加载，进入管理页显式加载后再读。
+普通 HTTP 客户端使用 `POST /api/semantics/v1/describe-sql`，不要提交到 batch/stream 执行入口。
+
+按 E01 准备并加载 samples 后，可分别执行：
+
+```sql
+SELECT value AS plotted_value FROM dataframe.samples;
+```
+
+点击结果列头“说明”，在同一套 JSON 弹框查看该列的本次来源、定义与精确版本；“本次结果说明 · JSON”显示全部输出。
+历史任务结果使用相同窗口。别名保留来源身份，重复列名按位置区分，零行也显示实际结构。
+四库单表的已有聚合会显示实际计数/函数；DataFrame 沿用现有投影能力，不因说明增强而增加计算能力。
+未知表达式/多源不继承同名字段含义；说明失败与执行失败分别显示。
+同步、异步和历史结果保留各自执行时捕获的依据，修改当前说明后重新执行才取得新版本。
+详细语法、HTTP 示例和状态含义见[就地阅读说明](data-semantics.md#在工作台与探索中阅读说明)。
+
 ## 语句结构与结果出口
 
 下面是结构示意，尖括号和花括号不是可复制的 SQL：

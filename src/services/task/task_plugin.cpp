@@ -6,9 +6,10 @@
 #include <common/error_code.h>
 #include <common/log.h>
 #include <framework/core/json_error_builder.h>
-#include <framework/core/sql_text_splitter.h>
 #include <framework/core/sql_parser.h>
+#include <framework/core/sql_text_splitter.h>
 #include <framework/interfaces/ichannel_registry.h>
+#include <common/semantic_context.hpp>
 
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -31,14 +32,15 @@ namespace task {
 
 namespace {
 
-// Persist publication reports and immutable contract references, never result data or SQL.
+// Persist publication reports and captured semantic evidence with the task result.
 int SavePublication(TaskStoreSqlite* store, const std::string& task_id, const rapidjson::Value& response,
                     const char* member) {
     if (!response.IsObject()) return 0;
     const bool publication =
         response.HasMember(member) && response[member].IsObject() && response[member].HasMember("publication");
     const bool checks = response.HasMember("contract_checks") && response["contract_checks"].IsArray();
-    if (!publication && !checks) return 0;
+    const bool semantics = response.HasMember("semantic_context");
+    if (!publication && !checks && !semantics) return 0;
     std::string previous;
     if (!store || store->GetResultSummary(task_id, &previous) != 0) return -1;
     rapidjson::Document summary(rapidjson::kObjectType);
@@ -47,6 +49,12 @@ int SavePublication(TaskStoreSqlite* store, const std::string& task_id, const ra
         if (!summary.IsObject()) return -1;
     }
     auto& allocator = summary.GetAllocator();
+    if (semantics) {
+        for (const char* key : {"semantic_context", "result_columns"}) {
+            if (summary.HasMember(key)) summary.RemoveMember(key);
+            summary.AddMember(rapidjson::Value(key, allocator), rapidjson::Value(response[key], allocator), allocator);
+        }
+    }
     if (publication) {
         if (!summary.HasMember("publication")) summary.AddMember("publication", rapidjson::Value(), allocator);
         summary["publication"].CopyFrom(response[member]["publication"], allocator);
@@ -68,11 +76,29 @@ int SavePublication(TaskStoreSqlite* store, const std::string& task_id, const ra
 
 void WritePublication(TaskStoreSqlite* store, const std::string& task_id,
                       rapidjson::Writer<rapidjson::StringBuffer>& writer) {
+    const auto unknown = [&] {
+        dataset::Json subject(rapidjson::kObjectType);
+        dataset::Set(subject, "kind", "task", subject.GetAllocator());
+        dataset::Set(subject, "task_id", task_id, subject.GetAllocator());
+        auto context = semantics::ResultContext(subject, dataset::Value(), {}, {}, "basis_not_recorded");
+        writer.Key("semantic_context");
+        context.Accept(writer);
+    };
     std::string result;
-    if (!store || store->GetResultSummary(task_id, &result) != 0 || result.empty()) return;
+    if (!store || store->GetResultSummary(task_id, &result) != 0 || result.empty()) {
+        unknown();
+        return;
+    }
     rapidjson::Document doc;
     doc.Parse(result.c_str());
     if (!doc.HasParseError() && doc.IsObject()) {
+        if (doc.HasMember("semantic_context")) {
+            writer.Key("semantic_context");
+            doc["semantic_context"].Accept(writer);
+            writer.Key("result_columns");
+            doc["result_columns"].Accept(writer);
+        } else
+            unknown();
         if (doc.HasMember("contract_checks")) {
             writer.Key("contract_checks");
             doc["contract_checks"].Accept(writer);
@@ -685,6 +711,8 @@ int TaskPlugin::UpdateTaskKindAndRuntimeId(const std::string& task_id,
 }
 
 int TaskPlugin::CreateTask(const std::string& request_sql, std::string* task_id) {
+    const auto command = ParseSqlCommand(request_sql);
+    if (!command.error.message.empty() || command.kind == SqlCommandKind::kDescribe) return -1;
     return CreateTaskInternal(request_sql, request_sql, BuildSqlsJson({request_sql}), 1, 0, task_id);
 }
 
@@ -1106,15 +1134,15 @@ int32_t TaskPlugin::HandleBatchExecute(const std::string&, const std::string& re
             ErrorCodeId::kBatchSqlTextInvalid);
         return error::BAD_REQUEST;
     }
-    const std::string sql_text = d["sql_text"].GetString();
+    const std::string sql_text(d["sql_text"].GetString(), d["sql_text"].GetStringLength());
 
-    std::vector<std::string> sqls;
-    SqlTextSplitError split_err;
-    if (SplitSqlText(sql_text, &sqls, &split_err) != 0) {
-        std::string err = "invalid request, sql_text split failed";
-        if (!split_err.message.empty()) {
-            err += ": " + split_err.message;
-        }
+    auto command = ParseSqlCommand(sql_text);
+    auto sqls = std::move(command.statements);
+    auto split_err = command.error;
+    if (command.kind == SqlCommandKind::kDescribe && split_err.message.empty())
+        split_err.message = "DESC is read-only; use describe-sql";
+    if (!split_err.message.empty()) {
+        const std::string err = "invalid request, sql_text invalid: " + split_err.message;
         rsp = BuildErrorWithCodeAndSqlIndexJson(
             err,
             ErrorCodeId::kBatchSqlTextInvalid,
@@ -1292,6 +1320,10 @@ int32_t TaskPlugin::HandleBatchExecute(const std::string&, const std::string& re
     w.Key("result_target");
     w.String(rec.result_target.c_str());
     WritePublication(store_.get(), task_id, w);
+    if (exec_doc.IsObject() && exec_doc.HasMember("result_values")) {
+        w.Key("result_values");
+        exec_doc["result_values"].Accept(w);
+    }
     w.Key("rows");
     w.Int64(rec.result_row_count);
     if (rec.status == TaskStatus::kCompleted) {
@@ -1350,6 +1382,18 @@ int32_t TaskPlugin::HandleSqlClassify(const std::string&, const std::string& req
         return error::BAD_REQUEST;
     }
 
+    const auto command = ParseSqlCommand(std::string(d["sql"].GetString(), d["sql"].GetStringLength()));
+    if (!command.error.message.empty() || command.statements.size() != 1) {
+        rsp = BuildErrorJson(command.error.message.empty() ? "classification requires one statement"
+                                                           : command.error.message);
+        return error::BAD_REQUEST;
+    }
+    if (command.kind == SqlCommandKind::kDescribe) {
+        rsp = "{\"command_kind\":\"describe\",\"task_kind\":null,\"requires_async\":false,\"target\":" +
+              command.target_json + "}";
+        return error::OK;
+    }
+
     std::string task_kind;
     std::string classify_err_rsp;
     bool requires_async = false;
@@ -1363,6 +1407,8 @@ int32_t TaskPlugin::HandleSqlClassify(const std::string&, const std::string& req
     rapidjson::StringBuffer out;
     rapidjson::Writer<rapidjson::StringBuffer> w(out);
     w.StartObject();
+    w.Key("command_kind");
+    w.String("execute");
     w.Key("task_kind");
     w.String(task_kind.c_str());
     w.Key("requires_async");
@@ -1379,17 +1425,41 @@ int32_t TaskPlugin::HandleSqlAnalyze(const std::string&, const std::string& req,
         rsp = BuildErrorWithCodeJson("invalid request, expected {\"sql_text\":\"...\"}", ErrorCodeId::kSqlTextInvalid);
         return error::BAD_REQUEST;
     }
-    const std::string sql_text = d["sql_text"].GetString();
+    const std::string sql_text(d["sql_text"].GetString(), d["sql_text"].GetStringLength());
 
-    std::vector<std::string> sqls;
-    SqlTextSplitError split_err;
-    if (SplitSqlText(sql_text, &sqls, &split_err) != 0) {
-        std::string err = "invalid request, sql_text split failed";
-        if (!split_err.message.empty()) {
-            err += ": " + split_err.message;
-        }
+    auto command = ParseSqlCommand(sql_text);
+    auto sqls = std::move(command.statements);
+    auto split_err = command.error;
+    if (!split_err.message.empty()) {
+        const std::string err = "invalid request, sql_text invalid: " + split_err.message;
         rsp = BuildErrorWithCodeAndSqlIndexJson(err, ErrorCodeId::kSqlTextInvalid, split_err.statement_index);
         return error::BAD_REQUEST;
+    }
+
+    if (command.kind == SqlCommandKind::kDescribe) {
+        rapidjson::StringBuffer out;
+        rapidjson::Writer<rapidjson::StringBuffer> w(out);
+        w.StartObject();
+        w.Key("command_kind");
+        w.String("describe");
+        w.Key("task_kind");
+        w.Null();
+        w.Key("requires_async");
+        w.Bool(false);
+        w.Key("target");
+        w.RawValue(command.target_json.c_str(), command.target_json.size(), rapidjson::kObjectType);
+        w.Key("statement_count");
+        w.Uint(1);
+        w.Key("statements");
+        w.StartArray();
+        w.String(sqls.front().c_str());
+        w.EndArray();
+        w.Key("statement_kinds");
+        w.StartArray();
+        w.EndArray();
+        w.EndObject();
+        rsp = out.GetString();
+        return error::OK;
     }
 
     std::vector<std::string> statement_kinds;
@@ -1440,6 +1510,8 @@ int32_t TaskPlugin::HandleSqlAnalyze(const std::string&, const std::string& req,
     rapidjson::StringBuffer out;
     rapidjson::Writer<rapidjson::StringBuffer> w(out);
     w.StartObject();
+    w.Key("command_kind");
+    w.String("execute");
     w.Key("statement_count");
     w.Uint(static_cast<unsigned>(sqls.size()));
     w.Key("statements");
@@ -1884,19 +1956,19 @@ int32_t TaskPlugin::HandleStreamExecute(const std::string&, const std::string& r
                                 ErrorCodeId::kStreamGroupSqlTextInvalid);
         return error::BAD_REQUEST;
     }
-    const std::string sql_text = doc["sql_text"].GetString();
+    const std::string sql_text(doc["sql_text"].GetString(), doc["sql_text"].GetStringLength());
 
     const bool has_legacy_sql = doc.HasMember("sql");
     const bool has_legacy_sqls = doc.HasMember("sqls");
     const bool has_legacy_dag = doc.HasMember("dag") || doc.HasMember("nodes") || doc.HasMember("source_share_sets");
 
-    std::vector<std::string> sqls;
-    SqlTextSplitError split_err;
-    if (SplitSqlText(sql_text, &sqls, &split_err) != 0) {
-        std::string err = "invalid request, sql_text split failed";
-        if (!split_err.message.empty()) {
-            err += ": " + split_err.message;
-        }
+    auto command = ParseSqlCommand(sql_text);
+    auto sqls = std::move(command.statements);
+    auto split_err = command.error;
+    if (command.kind == SqlCommandKind::kDescribe && split_err.message.empty())
+        split_err.message = "DESC is read-only; use describe-sql";
+    if (!split_err.message.empty()) {
+        const std::string err = "invalid request, sql_text invalid: " + split_err.message;
         rsp = BuildErrorWithCodeAndSqlIndexJson(
             err,
             ErrorCodeId::kStreamGroupSqlTextInvalid,

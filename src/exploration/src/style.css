@@ -43,3 +43,6 @@ label { display: inline-flex; align-items: center; gap: 5px; }
 .control-hint { color: var(--muted); font-size: 12px; margin: 0; }
 .quick-controls input[type="number"] { width: 70px; }
 .recommendations { max-height: 140px; overflow: auto; }
+
+.semantic-reading { display: flex; gap: 6px; min-width: 0; font-size: 12px; }
+.semantic-trigger { box-sizing: border-box; border: 1px solid var(--border); border-radius: 6px; padding: 0 8px; cursor: pointer; font: inherit; line-height: 18px; white-space: nowrap; }

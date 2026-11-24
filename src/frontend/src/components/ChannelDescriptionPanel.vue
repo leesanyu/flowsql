@@ -1,5 +1,11 @@
 <template>
   <section class="channel-description" data-testid="channel-description">
+    <template v-if="readOnly">
+      <div class="heading"><h3>通道说明 · 只读</h3><button v-if="!initialObservation" :disabled="busy" @click="refresh">重试读取</button></div>
+      <p v-if="error" role="alert">{{ error }}</p>
+      <ChannelDescriptionReading v-if="observation" :observation="observation" />
+    </template>
+    <template v-else>
     <div class="heading"><h3>数据说明</h3><div class="heading-actions"><button :disabled="busy || !observation?.description.document" @click="download">下载 JSON</button><button :disabled="busy || observation?.structure.state !== 'known'" @click="save">保存</button><button :disabled="busy" @click="refresh">刷新</button></div></div>
     <p class="subject">{{ locator.name }}<template v-if="locator.table"> / {{ locator.schema ? locator.schema + '.' : '' }}{{ locator.table }}</template></p>
     <p v-if="error" role="alert">{{ error }}</p><p v-if="notice" role="status">{{ notice }}</p>
@@ -72,6 +78,7 @@
       </div>
     </div>
     <details v-if="observation"><summary>技术详情（最近读取结果）</summary><p class="supplement">以下 JSON 为最近读取结果，不包含未保存草稿。</p><button @click="copy">复制 JSON</button><pre data-testid="description-json">{{ prettyJson(observation) }}</pre></details>
+    </template>
   </section>
 </template>
 <script setup>
@@ -80,10 +87,11 @@ import { ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp } from '@element-plus/icons-vue'
 import ChannelRelationEditor from './ChannelRelationEditor.vue'
 import SemanticValue from './SemanticValue.vue'
+import ChannelDescriptionReading from './ChannelDescriptionReading.vue'
 import api from '../api/index.js'
 import { semanticsCall as call, clone, json, parseJson, labels, semanticKeys, prettyJson, downloadJson, autoGrow as vAutoGrow } from '../utils/dataSemantics.js'
 import { timeEditorConfig, timeDescription, timeSummary } from '../utils/channelDescriptionTime.js'
-const props = defineProps({ locator: { type: Object, required: true } })
+const props = defineProps({ locator: { type: Object, required: true }, readOnly: Boolean, initialObservation: Object })
 const observation = ref(null), basis = ref(null), changes = ref({}), busy = ref(false), error = ref(''), notice = ref(''), filter = ref(''), confirmations = ref([]), relationField = ref(''), relationTargets = ref({})
 const fieldsCollapsed = ref(false), objectDetails = ref(null)
 const loadingDataFrame = ref(false)
@@ -209,6 +217,12 @@ async function inspectSource() {
   confirmations.value = [...required]
 }
 async function refresh() {
+  if (props.readOnly) {
+    busy.value = true; error.value = ''
+    try { observation.value = props.initialObservation || await call('describe', { target: { kind: 'channel', locator: props.locator } }) }
+    catch (e) { error.value = e.message } finally { busy.value = false }
+    return
+  }
   busy.value = true; error.value = ''; confirmations.value = []
   try {
     let loadDataFrame = false
@@ -268,6 +282,7 @@ async function save() {
 }
 async function copy() { try { await navigator.clipboard.writeText(json(observation.value)); notice.value = 'JSON 已复制' } catch { notice.value = '可在技术详情中选择并复制 JSON' } }
 onMounted(async () => {
+  if (props.readOnly) { await refresh(); return }
   let draftError = ''
   try {
     const draft = parseJson(sessionStorage.getItem(key()) || 'null')

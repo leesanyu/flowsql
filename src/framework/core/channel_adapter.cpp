@@ -30,6 +30,22 @@ int ChannelAdapter::ReadToDataFrame(IDatabaseChannel* db, const char* query, IDa
                                     std::string* error) {
     if (!db || !df_out) return -1;
 
+    // ClickHouse exposes the columnar query contract; execute it once without a row-reader retry.
+    if (std::string(db->Category()) == "clickhouse") {
+        std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+        if (db->ExecuteQueryArrow(query, &batches) != 0) {
+            if (error) *error = db->GetLastError();
+            return -1;
+        }
+        auto combined = arrow::ConcatenateRecordBatches(batches);
+        if (!combined.ok()) {
+            if (error) *error = combined.status().ToString();
+            return -1;
+        }
+        DataFrame result;
+        result.FromArrow(*combined);
+        return df_out->Write(&result);
+    }
     IBatchReader* reader = nullptr;
     if (db->CreateReader(query, &reader) != 0 || !reader) {
         if (error) {
@@ -45,6 +61,23 @@ int ChannelAdapter::ReadToDataFrame(IDatabaseChannel* db, const char* query, IDa
     std::shared_ptr<arrow::Schema> schema;
     const uint8_t* buf = nullptr;
     size_t len = 0;
+
+    if (reader->GetSchema(&buf, &len) != 0) {
+        if (error) *error = reader->GetLastError();
+        reader->Close();
+        reader->Release();
+        return -1;
+    }
+    auto schema_bytes = arrow::Buffer::FromString(std::string(reinterpret_cast<const char*>(buf), len));
+    auto schema_reader =
+        arrow::ipc::RecordBatchStreamReader::Open(std::make_shared<arrow::io::BufferReader>(schema_bytes));
+    if (!schema_reader.ok()) {
+        if (error) *error = schema_reader.status().ToString();
+        reader->Close();
+        reader->Release();
+        return -1;
+    }
+    schema = (*schema_reader)->schema();
 
     while (true) {
         int rc = reader->Next(&buf, &len);
@@ -89,6 +122,13 @@ int ChannelAdapter::ReadToDataFrame(IDatabaseChannel* db, const char* query, IDa
         }
         result.SetSchema(SchemaToFields(schema));
         result.FromArrow(*concat_result);
+    } else {
+        const auto empty = arrow::RecordBatch::MakeEmpty(schema);
+        if (!empty.ok()) {
+            if (error) *error = empty.status().ToString();
+            return -1;
+        }
+        result.FromArrow(*empty);
     }
 
     return df_out->Write(&result);

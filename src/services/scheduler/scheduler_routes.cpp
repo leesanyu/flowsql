@@ -17,6 +17,7 @@
 #include <chrono>
 #include <common/channel_dataset.hpp>
 #include <common/operator_contract_observation.hpp>
+#include <common/semantic_capture.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -349,6 +350,18 @@ int32_t SchedulerPlugin::HandleSqlClassify(const std::string&, const std::string
         return error::BAD_REQUEST;
     }
 
+    const auto command = ParseSqlCommand(std::string(doc["sql"].GetString(), doc["sql"].GetStringLength()));
+    if (!command.error.message.empty() || command.statements.size() != 1) {
+        rsp = BuildErrorJson(command.error.message.empty() ? "classification requires one statement"
+                                                           : command.error.message);
+        return error::BAD_REQUEST;
+    }
+    if (command.kind == SqlCommandKind::kDescribe) {
+        rsp = "{\"command_kind\":\"describe\",\"task_kind\":null,\"requires_async\":false,\"target\":" +
+              command.target_json + "}";
+        return error::OK;
+    }
+
     std::string task_kind;
     std::string err_rsp;
     bool requires_async = false;
@@ -361,6 +374,8 @@ int32_t SchedulerPlugin::HandleSqlClassify(const std::string&, const std::string
     rapidjson::StringBuffer buf;
     rapidjson::Writer<rapidjson::StringBuffer> w(buf);
     w.StartObject();
+    w.Key("command_kind");
+    w.String("execute");
     w.Key("task_kind");
     w.String(task_kind.c_str());
     w.Key("requires_async");
@@ -414,7 +429,7 @@ int32_t SchedulerPlugin::HandleBatchSubmit(const std::string&, const std::string
                 rsp = BuildErrorJson("sqls must be non-empty string array");
                 return error::BAD_REQUEST;
             }
-            std::string sql = it.GetString();
+            std::string sql(it.GetString(), it.GetStringLength());
             if (sql.empty()) {
                 rsp = BuildErrorJson("sqls must not contain empty SQL");
                 return error::BAD_REQUEST;
@@ -423,7 +438,8 @@ int32_t SchedulerPlugin::HandleBatchSubmit(const std::string&, const std::string
         }
     } else if (doc.HasMember("sql_text") && doc["sql_text"].IsString()) {
         SqlTextSplitError split_err;
-        if (SplitSqlText(doc["sql_text"].GetString(), &sqls, &split_err) != 0) {
+        if (SplitSqlText(std::string(doc["sql_text"].GetString(), doc["sql_text"].GetStringLength()), &sqls,
+                         &split_err) != 0) {
             std::string err = "invalid sql_text";
             if (!split_err.message.empty()) err += ": " + split_err.message;
             rsp = BuildErrorJson(err);
@@ -434,6 +450,15 @@ int32_t SchedulerPlugin::HandleBatchSubmit(const std::string&, const std::string
         return error::BAD_REQUEST;
     }
 
+    for (const auto& sql : sqls) {
+        const auto command = ParseSqlCommand(sql);
+        if (!command.error.message.empty() || command.kind == SqlCommandKind::kDescribe ||
+            command.statements.size() != 1) {
+            rsp = BuildErrorJson(command.error.message.empty() ? "batch execution accepts SELECT statements only"
+                                                               : command.error.message);
+            return error::BAD_REQUEST;
+        }
+    }
     for (size_t i = 0; i < sqls.size(); ++i) {
         std::string task_kind;
         std::string classify_err_rsp;
@@ -536,6 +561,13 @@ int32_t SchedulerPlugin::HandleBatchStatus(const std::string&, const std::string
         for (const auto& check : snapshot.contract_checks_json)
             w.RawValue(check.c_str(), check.size(), rapidjson::kObjectType);
         w.EndArray();
+    }
+    if (IsTerminalBatchRuntimeStatus(snapshot.status) && !snapshot.semantic_context_json.empty()) {
+        w.Key("semantic_context");
+        w.RawValue(snapshot.semantic_context_json.c_str(), snapshot.semantic_context_json.size(),
+                   rapidjson::kObjectType);
+        w.Key("result_columns");
+        w.RawValue(snapshot.result_columns_json.c_str(), snapshot.result_columns_json.size(), rapidjson::kArrayType);
     }
     if (!snapshot.managed_result_json.empty()) {
         w.Key("managed_result");
@@ -905,7 +937,14 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         rsp = BuildErrorJson("invalid request, expected {\"sql\":\"...\"}");
         return error::BAD_REQUEST;
     }
-    std::string sql_text = doc["sql"].GetString();
+    const std::string sql_text(doc["sql"].GetString(), doc["sql"].GetStringLength());
+    const auto command = ParseSqlCommand(sql_text);
+    if (!command.error.message.empty() || command.kind == SqlCommandKind::kDescribe || command.statements.size() != 1) {
+        rsp =
+            BuildErrorJson(command.error.message.empty() ? "execution requires one SELECT statement; DESC is read-only"
+                                                         : command.error.message);
+        return error::BAD_REQUEST;
+    }
 
     static constexpr size_t kMaxSqlLength = 64 * 1024;
     if (sql_text.size() > kMaxSqlLength) {
@@ -1277,6 +1316,28 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             rapidjson::StringBuffer transform_buf;
             rapidjson::Writer<rapidjson::StringBuffer> transform_writer(transform_buf);
             transform_writer.StartObject();
+            if (named_result && dataframe_sink) {
+                DataFrame output_frame;
+                if (dataframe_sink->Read(&output_frame) == 0) {
+                    std::vector<std::string> names;
+                    for (const auto& field : output_frame.GetSchema()) names.push_back(field.name);
+                    dataset::Json target, subject(rapidjson::kObjectType);
+                    target.Parse(R"({"kind":"channel","locator":{"kind":"dataframe","name":""}})");
+                    dataset::Set(target["locator"], "name", dataframe_name, target.GetAllocator());
+                    dataset::Set(subject, "execution_id", dataset::Token(), subject.GetAllocator());
+                    dataset::Set(subject, "kind", "query", subject.GetAllocator());
+                    semantics::Capture capture(std::move(target), semantics::LocalDescription(querier_));
+                    capture.Begin();
+                    auto context =
+                        capture.Context(subject, names, {{"*", "identity", "", "{}", "", true}}, stmt.sql_part);
+                    transform_writer.Key("semantic_context");
+                    context.Accept(transform_writer);
+                    transform_writer.Key("result_columns");
+                    transform_writer.StartArray();
+                    for (const auto& name : names) transform_writer.String(name.c_str());
+                    transform_writer.EndArray();
+                }
+            }
             transform_writer.Key("contract_checks");
             transform_writer.RawValue(contract_checks.empty() ? "[]" : contract_checks.c_str(),
                                       contract_checks.empty() ? 2 : contract_checks.size(), rapidjson::kArrayType);
@@ -1449,6 +1510,42 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
             sink = temp_sink.get();
         }
 
+        dataset::Json semantic_target;
+        const auto projections = semantics::QueryProjections(stmt);
+        if (!projections.empty() && input_channels.size() == 1) {
+            dataset::Json locator(rapidjson::kObjectType);
+            auto& a = locator.GetAllocator();
+            if (std::string(input_channels.front()->Type()) == ChannelType::kDataFrame) {
+                dataset::Set(locator, "kind", "dataframe", a);
+                dataset::Set(locator, "name", input_channels.front()->Name(), a);
+            } else if (std::string(input_channels.front()->Type()) == ChannelType::kDatabase) {
+                std::string type, name, table;
+                if (ParseDatabaseDestination(stmt.sources.front(), &type, &name, &table) && !table.empty()) {
+                    dataset::Set(locator, "kind", "database_table", a);
+                    dataset::Set(locator, "type", type, a);
+                    dataset::Set(locator, "name", name, a);
+                    const auto dot = table.find('.');
+                    if (dot != std::string::npos) {
+                        dataset::Set(locator, (type == "postgres" || type == "postgresql") ? "schema" : "database",
+                                     table.substr(0, dot), a);
+                        table = table.substr(dot + 1);
+                    }
+                    dataset::Set(locator, "table", table, a);
+                }
+            }
+            if (locator.HasMember("kind")) {
+                semantic_target.SetObject();
+                dataset::Set(semantic_target, "kind", "channel", semantic_target.GetAllocator());
+                semantic_target.AddMember("locator", dataset::Copy(locator, semantic_target.GetAllocator()),
+                                          semantic_target.GetAllocator());
+            }
+        }
+        semantics::Capture semantic_capture(std::move(semantic_target), semantics::LocalDescription(querier_));
+        semantic_capture.Begin();
+        dataset::Json semantic_subject(rapidjson::kObjectType);
+        dataset::Set(semantic_subject, "kind", "query", semantic_subject.GetAllocator());
+        dataset::Set(semantic_subject, "execution_id", dataset::Token(), semantic_subject.GetAllocator());
+
         int rc = 0;
         int64_t affected_rows = 0;
         std::string exec_error;
@@ -1531,16 +1628,45 @@ int32_t SchedulerPlugin::HandleExecute(const std::string&, const std::string& re
         std::string result_json = "[]";
         int64_t row_count = 0;
         const bool named_dataframe_result = !stmt.dest.empty() && IsDataframeRefName(stmt.dest);
-        if (df_sink && df_sink->Read(&result) == 0 && result.RowCount() > 0) {
+        if (df_sink && df_sink->Read(&result) == 0) {
             row_count = result.RowCount();
             if (!named_dataframe_result) result_json = result.ToJson();
         } else if (sink_type == ChannelType::kDatabase) {
             row_count = affected_rows;
         }
 
+        std::vector<std::string> result_names;
+        for (const auto& field : result.GetSchema()) result_names.push_back(field.name);
+        semantic_capture.Finish(input_channels.size() == 1 &&
+                                (std::string(input_channels.front()->Type()) != ChannelType::kDataFrame ||
+                                 FindChannel(stmt.sources.front()) == input_channels.front()));
+        auto semantic_context = semantic_capture.Context(semantic_subject, result_names, projections, stmt.sql_part);
+        if (stmt.HasOperator() && named_dataframe_result) {
+            dataset::Json target;
+            target.Parse(R"({"kind":"channel","locator":{"kind":"dataframe","name":""}})");
+            dataset::Set(target["locator"], "name", DataframeNamePart(stmt.dest), target.GetAllocator());
+            semantics::Capture output_capture(std::move(target), semantics::LocalDescription(querier_));
+            output_capture.Begin();
+            semantic_context = output_capture.Context(semantic_subject, result_names,
+                                                      {{"*", "identity", "", "{}", "", true}}, stmt.sql_part);
+        }
+        dataset::Json result_table;
+        if (!named_dataframe_result) result_table.Parse(result_json.c_str());
         rapidjson::StringBuffer buf;
         rapidjson::Writer<rapidjson::StringBuffer> w(buf);
         w.StartObject();
+        w.Key("semantic_context");
+        semantic_context.Accept(w);
+        w.Key("result_columns");
+        w.StartArray();
+        for (const auto& name : result_names) w.String(name.c_str());
+        w.EndArray();
+        if (result_table.IsObject()) {
+            w.Key("result_values");
+            result_table["data"].Accept(w);
+        }
+        w.Key("result_col_count");
+        w.Uint(static_cast<unsigned>(result_names.size()));
         w.Key("status");
         w.String("completed");
         w.Key("rows");

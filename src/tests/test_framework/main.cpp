@@ -4397,9 +4397,60 @@ void test_flow_labeling_public_contract() {
 // ============================================================
 // main
 // ============================================================
+void test_describe_sql_command() {
+    SqlParser parser;
+    auto aliased = parser.Parse("SELECT latency AS value, count(*) AS total FROM sqlite.db.samples");
+    assert(aliased.error.empty());
+    assert((aliased.columns == std::vector<std::string>{"latency", "count(*)"}));
+    assert((aliased.column_aliases == std::vector<std::string>{"value", "total"}));
+    assert(!parser.Parse("SELECT latency AS FROM dataframe.samples").error.empty());
+
+    const auto check = [](const std::string& sql, const std::string& target) {
+        const auto command = ParseSqlCommand(sql);
+        assert(command.error.message.empty());
+        assert(command.kind == SqlCommandKind::kDescribe);
+        assert(command.statements.size() == 1);
+        rapidjson::Document actual, expected;
+        actual.Parse(command.target_json.c_str());
+        expected.Parse(target.c_str());
+        assert(!actual.HasParseError() && actual == expected);
+    };
+    check("DESC CHANNEL dataframe.samples", R"({"kind":"channel","locator":{"kind":"dataframe","name":"samples"}})");
+    check("desc channel kafka.events; -- end",
+          R"({"kind":"channel","locator":{"kind":"kafka_source","name":"events"}})");
+    check("/*start*/ DeSc /* gap */ OPERATOR npm.basic;", R"({"kind":"operator","name":"npm.basic"})");
+    check(R"(DESC CHANNEL dataframe."a.b; c""d";)",
+          R"({"kind":"channel","locator":{"kind":"dataframe","name":"a.b; c\"d"}})");
+    for (const auto* type : {"sqlite", "mysql", "postgresql", "clickhouse"}) {
+        check(std::string("DESC CHANNEL ") + type + ".analytics TABLE dns_results",
+              std::string(R"({"kind":"channel","locator":{"kind":"database_table","type":")") + type +
+                  R"(","name":"analytics","table":"dns_results"}})");
+    }
+    check(
+        R"(DESC CHANNEL postgresql.analytics TABLE "dns.results" DATABASE analytics SCHEMA public;)",
+        R"({"kind":"channel","locator":{"kind":"database_table","type":"postgresql","name":"analytics","table":"dns.results","database":"analytics","schema":"public"}})");
+    for (const auto* sql : {"DESC", "DESC CHANNEL", "DESC CHANNEL dataframe", "DESC CHANNEL dataframe.x TABLE t",
+                            "DESC CHANNEL kafka.x SCHEMA s", "DESC CHANNEL sqlite.x", "DESC OPERATOR npm.basic extra",
+                            "DESC OPERATOR npm.basic \"\"", "DESC CHANNEL sqlite.x TABLE t SCHEMA s DATABASE d",
+                            "DESC CHANNEL dataframe.x;;", "DESC CHANNEL dataframe.x; SELECT * FROM dataframe.x",
+                            "SELECT 1; DESC OPERATOR npm.basic", "DESC OPERATOR npm.basic; DESC OPERATOR npm.basic",
+                            "DESC CHANNEL dataframe.\"\"", "DESC CHANNEL dataframe.'x'", "DESC CHANNEL dataframe.\"x",
+                            "DESC CHANNEL dataframe.x /*"}) {
+        const auto command = ParseSqlCommand(sql);
+        assert(!command.error.message.empty());
+        assert(command.target_json.empty());
+    }
+    auto execute = ParseSqlCommand("SELECT 'DESC;'; SELECT 2 -- end");
+    assert(execute.error.message.empty() && execute.kind == SqlCommandKind::kExecute);
+    assert(execute.statements.size() == 2);
+    assert(ParseSqlCommand("DESCRIBE CHANNEL dataframe.x").kind == SqlCommandKind::kExecute);
+    assert(!ParseSqlCommand(std::string("DESC CHANNEL dataframe.x\0junk", 29)).error.message.empty());
+}
+
 int main(int argc, char* argv[]) {
     printf("=== FlowSQL Framework Tests ===\n\n");
 
+    test_describe_sql_command();
     test_dataframe_basic();
     test_dataframe_arrow();
     test_dataframe_json();

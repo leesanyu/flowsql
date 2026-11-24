@@ -14,7 +14,7 @@ from test_data_semantics_api import ROOT, validate, request
 from test_operator_contract_api import running_contract_host, api, bind_input
 
 def call(base, op, payload, expected=200):
-    key=op.replace('/','_')
+    key='describe_sql' if op == 'describe-sql' else op.replace('/','_')
     if expected==200:validate(key+'Request',payload)
     status,value=request(base+'/api/semantics/v1/'+op,payload)
     assert status==expected,(op,status,expected,value)
@@ -193,6 +193,131 @@ def check_usage(base,evidence):
     assert updated['basis']['description_ref'] is None and updated['usage']['identity']['purposes']==[]
     (evidence/'response-sizes.json').write_text(json.dumps(sizes,ensure_ascii=False,indent=2))
 
+def check_describe_sql(base, gateway):
+    before = call(base, 'list', {})
+    tasks_before = request(base+'/api/tasks/list', {})
+    assert tasks_before[0] == 200
+    cases = [
+        ('DESC CHANNEL dataframe.input', dict(kind='channel', locator=dict(kind='dataframe', name='input'))),
+        ('/* before */ desc channel dataframe.lazy; -- after', dict(kind='channel', locator=dict(kind='dataframe', name='lazy'))),
+        ('DESC CHANNEL sqlite.example TABLE one;', dict(kind='channel', locator=dict(kind='database_table', type='sqlite', name='example', table='one'))),
+        ('DESC OPERATOR builtin.passthrough', dict(kind='operator', name='builtin.passthrough')),
+        ('DESC OPERATOR npm.basic', dict(kind='operator', name='npm.basic')),
+    ]
+    for sql, target in cases:
+        for action, payload, schema in [('classify', dict(sql=sql), 'sqlClassifyResponse'),
+                                         ('analyze', dict(sql_text=sql), 'sqlAnalyzeResponse')]:
+            status, analysis = request(base+'/api/tasks/sql/'+action, payload)
+            assert status == 200, (sql, analysis)
+            validate(schema, analysis)
+            assert analysis['command_kind'] == 'describe' and analysis['target'] == target
+            assert analysis['task_kind'] is None and analysis['requires_async'] is False
+        status, classification = request(gateway+'/scheduler/sql/classify', dict(sql=sql))
+        assert status == 200, (sql, classification)
+        validate('sqlClassifyResponse', classification)
+        assert classification['command_kind'] == 'describe' and classification['target'] == target
+        actual = call(base, 'describe-sql', dict(sql=sql))
+        expected = call(base, 'describe', dict(target=target))
+        if target['kind'] == 'channel':
+            for parent, key in [('structure', 'observed_at'), ('checks', 'checked_at')]:
+                first, second = actual[parent].pop(key), expected[parent].pop(key)
+                assert 0 < int(first) <= int(second) <= int(time.time() * 1000), (sql, key, first, second)
+        assert actual == expected, (sql, actual, expected)
+    assert call(base, 'describe-sql', dict(sql='DESC CHANNEL dataframe.lazy'))['structure']['state'] == 'pending'
+    for sql in ('SELECT * FROM dataframe.input', 'DESC CHANNEL sqlite.example', 'DESC CHANNEL dataframe.input TABLE x',
+                'DESC OPERATOR builtin.passthrough; SELECT * FROM dataframe.input',
+                'SELECT * FROM dataframe.input; DESC OPERATOR npm.basic', 'DESC OPERATOR npm.basic;;',
+                'DESC CHANNEL dataframe.input extra', 'DESC OPERATOR npm.basic ""'):
+        assert call(base, 'describe-sql', dict(sql=sql), 400)['code'] == 'INVALID_DOCUMENT'
+    for payload in (dict(sql='DESC OPERATOR npm.basic', timeout_ms=0), dict(sql='DESC OPERATOR npm.basic', timeout_ms=30001),
+                    dict(sql=42), dict(sql='DESC OPERATOR npm.basic', target={})):
+        assert call(base, 'describe-sql', payload, 400)['code'] == 'INVALID_DOCUMENT'
+    for sql, target in [('DESC CHANNEL dataframe.absent', dict(kind='channel', locator=dict(kind='dataframe', name='absent'))),
+                        ('DESC OPERATOR missing.absent', dict(kind='operator', name='missing.absent'))]:
+        assert call(base, 'describe-sql', dict(sql=sql), 404)['code'] == call(base, 'describe', dict(target=target), 404)['code']
+    for sql in ['DESC OPERATOR npm.basic', 'DESC CHANNEL dataframe.lazy',
+                'SELECT * FROM dataframe.input; DESC OPERATOR npm.basic',
+                'DESC OPERATOR npm.basic; SELECT * FROM dataframe.input',
+                'DESC OPERATOR npm.basic; DESC CHANNEL dataframe.input',
+                'SELECT * FROM dataframe.input\0; DESC OPERATOR npm.basic']:
+        status, body = request(gateway+'/scheduler/batch/execute', dict(sql=sql))
+        assert status == 400, (sql, body)
+        status, body = request(gateway+'/scheduler/batch/submit', dict(sqls=[sql]))
+        assert status == 400, (sql, body)
+        for mode in ['sync', 'async']:
+            status, body = request(base+'/api/tasks/batch/execute', dict(sql_text=sql, mode=mode))
+            assert status == 400, (sql, mode, body)
+        status, body = request(base+'/api/tasks/stream/execute', dict(execution_kind='single', sql_text=sql))
+        assert status == 400, (sql, body)
+        if ';' in sql:
+            for action, payload in [('classify', dict(sql=sql)), ('analyze', dict(sql_text=sql))]:
+                status, body = request(base+'/api/tasks/sql/'+action, payload)
+                assert status == 400, (sql, body)
+    assert request(base+'/api/tasks/list', {}) == tasks_before
+    assert call(base, 'list', {}) == before
+
+
+def check_result_context(base):
+    def execute(sql, mode='sync'):
+        status, data = request(base+'/api/tasks/batch/execute', dict(sql_text=sql, mode=mode))
+        assert status == 200, (sql, data)
+        if mode == 'async':
+            deadline = time.monotonic()+10
+            while time.monotonic() < deadline:
+                status, detail = request(base+'/api/tasks/result', dict(task_id=data['task_id']))
+                assert status == 200, detail
+                if detail['status'] not in ['pending','running']:
+                    data=detail;break
+                time.sleep(.05)
+        assert data['status']=='completed', data
+        validate('semanticContext',data['semantic_context'])
+        return data
+    locator=dict(kind='dataframe',name='input')
+    current=describe(base,locator)
+    field=current['structure']['fields'][0]['name']
+    saved=call(base,'channels/save-description',dict(locator=locator,basis=current['basis'],
+        editor_changes={'fields':{field:{'definition':'Captured original meaning','unit':'ms'}}},
+        confirmations=current['checks'].get('required_confirmations',[])))
+    original=execute('SELECT '+field+' AS repeated, '+field+' AS repeated FROM dataframe.input')
+    context=original['semantic_context']
+    assert original['result_columns']==['repeated','repeated']
+    assert len(original['result_values'][0])==2
+    assert [f['output_index'] for f in context['fields']]==[0,1]
+    assert all(f['state']=='known' and f['operation']['kind']=='alias' for f in context['fields'])
+    assert context['sources'][0]['basis']['dictionary_ref']==saved['dictionary_ref']
+    asynchronous=execute('SELECT '+field+' FROM dataframe.input','async')
+    assert asynchronous['semantic_context']['sources'][0]['basis']['dictionary_ref']==saved['dictionary_ref']
+    current=describe(base,locator)
+    changed=call(base,'channels/save-description',dict(locator=locator,basis=current['basis'],
+        editor_changes={'fields':{field:{'definition':'Changed meaning'}}},
+        confirmations=current['checks'].get('required_confirmations',[])))
+    for result in [original,asynchronous]:
+        status, historical=request(base+'/api/tasks/result',dict(task_id=result['task_id']))
+        assert status==200 and historical['semantic_context']==result['semantic_context'],historical
+    fresh=execute('SELECT '+field+' FROM dataframe.input')
+    assert fresh['semantic_context']['sources'][0]['basis']['dictionary_ref']==changed['dictionary_ref']
+    produced=execute("SELECT * FROM dataframe.input USING contractdemo.output WITH operation='dual' INTO dataframe.consumption_output")
+    observed=describe(base,dict(kind='dataframe',name='consumption_output'))
+    assert produced['semantic_context']['sources'][0]['basis']==observed['basis']
+    assert produced['semantic_context']['sources'][0]['context']==observed['context']
+    # Replacement of the named source cannot mutate the saved result's captured basis.
+    execute('SELECT * FROM dataframe.input INTO dataframe.consumption_output')
+    status,historical=request(base+'/api/tasks/result',dict(task_id=produced['task_id']))
+    assert status==200 and historical['semantic_context']==produced['semantic_context']
+    db=dict(kind='database_table',type='sqlite',name='example',table='one')
+    observation=describe(base,db);column=observation['structure']['fields'][0]['name']
+    for sql, expected in [('SELECT * FROM sqlite.example.one WHERE 1=0','identity'),
+                          ('SELECT '+column+' AS renamed FROM sqlite.example.one','alias'),
+                          ('SELECT count(*) AS total FROM sqlite.example.one','aggregate'),
+                          ('SELECT '+column+'+1 AS expression FROM sqlite.example.one','unknown')]:
+        result=execute(sql)
+        assert result['result_columns'] and result['semantic_context']['fields']
+        assert result['semantic_context']['fields'][0]['operation']['kind']==expected, result
+        if 'WHERE 1=0' in sql: assert result['result_values']==[]
+        if 'count(*)' in sql: assert result['semantic_context']['fields'][0]['result_unit']=='个'
+        if expected=='unknown':assert result['semantic_context']['fields'][0]['source_field_id'] is None
+
+
 def main():
     evidence=ROOT/'evidence/operator-description-refinement/flat-fields/http';evidence.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='flowsql-description-http-') as tmp:
@@ -200,6 +325,7 @@ def main():
         with running_contract_host(Path(sys.argv[1]).resolve(),directory) as (base,process,log):
             for filename in ('api.schema.json','openapi.json'):
                 assert request(base+'/api/semantics/v1/'+filename)[1]==json.loads((ROOT/'config/semantics'/filename).read_text())
+            check_describe_sql(base, "http://127.0.0.1:"+str(process.args[2]))
             check_usage(base,evidence)
             locator=dict(kind='dataframe',name='input')
             d=describe(base,locator);assert d['structure']['fields'] and d['description']['state']=='missing' and d['checks']['state']=='unbound'
@@ -287,6 +413,7 @@ def main():
             for mapping in ({source_field:'absent'}, {'absent':target_field}):
                 invalid=call(base,'channels/save-description',dict(locator=source_locator,basis=linked['basis'],editor_changes={'relations':[{'dictionary_ref':target_ref,'field_map':mapping}]}),400)
                 assert invalid['field_path'].startswith('/editor_changes/relations/')
+            check_result_context(base)
             # The complete Web -> Gateway -> Router budget includes forwarding time.
             observed=[]
             class SilentPeer(BaseHTTPRequestHandler):
@@ -308,6 +435,13 @@ def main():
                     err=call(base,'describe',dict(target=dict(kind='operator',name='builtin.passthrough'),timeout_ms=80),504)
                     assert err['code']=='SOURCE_TIMEOUT' and time.monotonic()-started<.35
                     assert observed and 0<observed[0][0]<=80 and observed[0][1]<=wall+90
+                    assert request('http://127.0.0.1:'+str(gateway)+'/gateway/register',dict(prefix='/semantics/describe-sql',address='127.0.0.1:'+str(peer.server_port)))[0]==200
+                    observed.clear()
+                    started=time.monotonic()
+                    err=call(base,'describe-sql',dict(sql='DESC OPERATOR builtin.passthrough',timeout_ms=80),504)
+                    assert err['code']=='SOURCE_TIMEOUT' and time.monotonic()-started<.35
+                    assert observed and 0<observed[0][0]<=80
+
                 finally:peer.shutdown();thread.join()
             (evidence/'description.json').write_text(json.dumps(d,ensure_ascii=False,indent=2));(evidence/'host.log').write_text(log.read_text())
     print('PASS: actual HTTP published schema, object discovery, known/unbound/pending, current operator contract/context, unknown 404')

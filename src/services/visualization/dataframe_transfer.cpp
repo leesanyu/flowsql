@@ -110,7 +110,11 @@ std::vector<DataFrameSourceInfo> DataFrameTransferClient::Sources(std::string* e
     std::vector<DataFrameSourceInfo> result;
     for (const auto& item : document["sources"].GetArray()) {
         auto source_id = Text(item, "source_id"), label = Text(item, "label");
-        if (!source_id.empty() && !label.empty()) result.push_back({std::move(source_id), std::move(label)});
+        if (source_id.empty() || label.compare(0, 10, "dataframe.") != 0 || label.size() <= 10) {
+            if (error) *error = "DATA_PLANE_UNAVAILABLE";
+            return {};
+        }
+        result.push_back({std::move(source_id), std::move(label)});
     }
     return result;
 }
@@ -290,6 +294,11 @@ bool DataFrameTransferClient::Lookup(const std::string& snapshot_id, std::shared
     if (batch) *batch = found->second.info.batch;
     if (meta) *meta = found->second.info;
     return true;
+}
+
+void DataFrameTransferClient::StoreSemantics(const std::string& snapshot_id, std::string context_json) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    snapshots_.at(snapshot_id).info.semantic_context_json = std::move(context_json);
 }
 
 bool DataFrameTransferClient::Release(const std::string& snapshot_id) {

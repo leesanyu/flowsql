@@ -258,7 +258,7 @@ target_include_directories(test_metadata_description PRIVATE ${CMAKE_SOURCE_DIR}
 target_compile_options(test_metadata_description PRIVATE -UNDEBUG)
 target_compile_definitions(test_metadata_description PRIVATE FLOWSQL_SOURCE_ROOT="${CMAKE_SOURCE_DIR}/..")
 add_thirddepen(test_metadata_description rapidjson sqlite yaml-cpp)
-target_link_libraries(test_metadata_description OpenSSL::Crypto)
+target_link_libraries(test_metadata_description OpenSSL::Crypto flowsql_common)
 add_test(NAME test_metadata_description COMMAND $<TARGET_FILE:test_metadata_description>)
 add_test(NAME test_metadata_description_api COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_metadata_description_api.py $<TARGET_FILE:test_operator_contract_host>)
@@ -361,3 +361,31 @@ foreach(backend mysql postgres clickhouse)
         ${CMAKE_CURRENT_SOURCE_DIR}/test_npm_semantics_backends.py $<TARGET_FILE:test_operator_contract_host> ${backend})
     set_tests_properties(test_npm_semantics_${backend} PROPERTIES TIMEOUT 240 RESOURCE_LOCK "database_npm;semantics_http")
 endforeach()
+
+add_test(NAME test_data_semantics_consumption_frontend COMMAND ${FLOWSQL_SEMANTICS_NODE}
+    --test --test-isolation=none ${CMAKE_SOURCE_DIR}/frontend/src/utils/taskExecution.test.js
+    ${CMAKE_SOURCE_DIR}/frontend/src/utils/taskResult.test.js
+    ${CMAKE_SOURCE_DIR}/frontend/src/utils/semanticReading.test.js
+    ${CMAKE_SOURCE_DIR}/frontend/src/api/index.test.js)
+set_tests_properties(test_data_semantics_consumption_frontend PROPERTIES TIMEOUT 30)
+
+add_executable(test_semantic_context test_semantic_context.cpp)
+target_include_directories(test_semantic_context PRIVATE ${CMAKE_SOURCE_DIR})
+add_thirddepen(test_semantic_context rapidjson)
+target_link_libraries(test_semantic_context flowsql_common)
+target_compile_options(test_semantic_context PRIVATE -UNDEBUG)
+target_compile_definitions(test_semantic_context PRIVATE FLOWSQL_SOURCE_ROOT="${CMAKE_SOURCE_DIR}/..")
+set_target_properties(test_semantic_context PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+add_test(NAME test_semantic_context COMMAND $<TARGET_FILE:test_semantic_context>)
+
+add_test(NAME test_semantic_queries COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_semantic_queries.py $<TARGET_FILE:test_operator_contract_host>)
+set_tests_properties(test_semantic_queries PROPERTIES TIMEOUT 240 RESOURCE_LOCK "database_driver;semantics_http")
+
+add_test(NAME test_consumption_browser COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_consumption_browser.py $<TARGET_FILE:test_operator_contract_host> ${FLOWSQL_SEMANTICS_NODE})
+set_tests_properties(test_consumption_browser PROPERTIES TIMEOUT 210 RESOURCE_LOCK "semantics_http;visualization_browser")
+
+add_test(NAME test_consumption_npm COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_consumption_npm.py $<TARGET_FILE:test_operator_contract_host> ${FLOWSQL_SEMANTICS_NODE})
+set_tests_properties(test_consumption_npm PROPERTIES TIMEOUT 240 RESOURCE_LOCK "semantics_http;visualization_browser")

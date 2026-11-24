@@ -514,6 +514,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { Search, Loading } from '@element-plus/icons-vue'
 import api, {
   PCAP_REPLAY_SPEEDS,
@@ -1219,7 +1220,14 @@ const onBrowserTab = async (tab) => {
   } finally { if (token === tableRequest) previewLoading.value = false }
 }
 
-onMounted(() => { reloadAll() })
+const route = useRoute()
+onMounted(() => {
+  reloadAll()
+  if (route.query.dataset) {
+    try { descriptionLocator.value = JSON.parse(String(route.query.dataset)) }
+    catch { ElMessage.error('对象导航参数格式错误') }
+  }
+})
 </script>
 
 <style scoped>

@@ -14,6 +14,8 @@ class MetadataDescriptionService : public IMetadataDescription {
                                ChannelDictionaryService::Describe describe, Lookup lookup)
         : registry_(registry), configs_(configs), describe_(std::move(describe)), lookup_(std::move(lookup)) {}
     int Describe(const char*, std::string*) override;
+    // Single read-only DESC; parsing and metadata reads share the request budget.
+    int DescribeSql(const char*, std::string*);
     int SaveChannel(const char*, std::string*) override;
     int SaveOperator(const char*, std::string*) override;
 

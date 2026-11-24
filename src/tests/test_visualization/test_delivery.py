@@ -49,8 +49,13 @@ def main():
         static = directory / 'exploration'
         shutil.copytree(output / 'exploration', static)
         original = check_exploration(static)
-        project = directory / 'project'
-        project.mkdir()
+        project = directory / 'src/exploration'
+        project.mkdir(parents=True)
+        # The isolated package includes its pure JSON dependency; no Vue runtime is copied.
+        shared = directory / 'src/frontend/src/utils'
+        shared.mkdir(parents=True)
+        for name in ('dataSemantics.js', 'semanticReading.js', 'semanticJsonDialog.js'):
+            shutil.copy2(ROOT / 'src/frontend/src/utils' / name, shared / name)
         for name in ('package.json', 'index.html', 'vite.config.js'):
             shutil.copy2(ROOT / 'src/exploration' / name, project / name)
         shutil.copytree(ROOT / 'src/exploration/src', project / 'src')
@@ -85,6 +90,9 @@ def main():
         base = f'http://127.0.0.1:{visual}'
         deploy = (output / 'config/deploy-visualization.yaml').read_text()
         deploy = deploy.replace('config_file=config/flowsql.yml', 'config_file=' + str(channels))
+        # This fixture declares a database-only process, independent of the default control service.
+        for key in ('semantics_upstream', 'dataframe_upstream'):
+            deploy = deploy.replace(f'"{key}":"http://127.0.0.1:18803"', f'"{key}":""')
         deploy = deploy.replace('"port":18910', '"port":' + str(visual)).replace('"static_dir":"exploration"', '"static_dir":' + json.dumps(str(static)))
         deployment.write_text(deploy)
         env = dict(os.environ, LD_LIBRARY_PATH=str(output) + ':' + os.environ.get('LD_LIBRARY_PATH', ''))

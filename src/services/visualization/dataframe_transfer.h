@@ -29,6 +29,7 @@ struct DataFrameSnapshotInfo {
     std::string snapshot_id;
     std::string schema_revision;
     std::string captured_at;
+    std::string semantic_context_json;
     uint64_t row_count = 0;
     uint64_t ipc_bytes = 0;
     int64_t expires_at_unix = 0;
@@ -48,6 +49,7 @@ class DataFrameTransferClient {
                  std::string* error);
     bool Lookup(const std::string& snapshot_id, std::shared_ptr<arrow::RecordBatch>* batch,
                 DataFrameSnapshotInfo* meta);
+    void StoreSemantics(const std::string& snapshot_id, std::string context_json);
     bool Release(const std::string& snapshot_id);
     bool Renew(const std::string& snapshot_id, int64_t* expires_at_unix);
     void Stop();

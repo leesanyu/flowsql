@@ -226,18 +226,18 @@ def discovery(rt):
     assert 'work' in json.dumps(dbs), dbs
     defs = rt.ok('/api/channels/stream/definitions/query', {})['definitions']
     assert {'ring', 'netadapter', 'tcp_session_mock'}.issubset({d['channel_type'] for d in defs}), defs
-    rt.ok('/api/channels/stream/add', dict(type='tcp_session_mock', name='finite',
-          option=json.dumps(dict(mode='none', total_records=4, batch_rows=2, emit_interval_ms=0,
-                                 partition_count=1, ring_size=16, overflow='block', ring_mode='spsc'))))
+    rt.ok('/api/channels/stream/add', dict(type='tcp_session_mock', name='finite', role='source',
+          options=dict(mode='none', total_records=4, batch_rows=2, emit_interval_ms=0,
+                                 partition_count=1, ring_size=16, overflow='block', ring_mode='spsc')))
     rt.ok('/api/channels/stream/add', dict(type='pcapfile', name='capture', role='source',
-          option=json.dumps(dict(path=str(REPO / 'src/tests/data/packets/Dns.pcap'), format='pcap'))))
+          options=dict(path=str(REPO / 'src/tests/data/packets/Dns.pcap'), format='pcap')))
     channels = rt.ok('/api/channels/stream/query', {})['channels']
     assert any(c['type'] == 'pcapfile' and c['name'] == 'capture' for c in channels), channels
     rt.ok('/api/channels/stream/add', dict(type='netadapter', name='unused', role='source',
-          option=json.dumps(dict(backend='af_packet', interfaces=['wf_unused'], snaplen=65535,
-                                 buffer_mib=4, promiscuous=False))))
+          options=dict(backend='af_packet', interfaces=['wf_unused'], snaplen=65535,
+                                 buffer_mib=4, promiscuous=False)))
     live = 'SELECT * FROM netadapter.unused USING npm.basic INTO sqlite.work'
-    assert rt.ok('/api/tasks/sql/classify', {'sql': live}) == {'task_kind': 'batch', 'requires_async': True}
+    assert rt.ok('/api/tasks/sql/classify', {'sql': live}) == {'command_kind': 'execute', 'task_kind': 'batch', 'requires_async': True}
     status, error = call(rt.web, '/api/tasks/batch/execute', dict(sql_text=live, mode='sync'))
     assert status == 400 and error['error_code'] == 'ASYNC_EXECUTION_REQUIRED', (status, error)
     operators = rt.ok('/api/operators/list?type=builtin')['operators']
@@ -252,7 +252,7 @@ def discovery(rt):
     assert 'npm.basic' in json.dumps(cpp), cpp
     rt.ok('/api/operators/list?type=python')
     sql = 'SELECT * FROM dataframe.samples USING builtin.passthrough INTO dataframe.copy'
-    assert rt.ok('/api/tasks/sql/classify', {'sql': sql}) == {'task_kind': 'batch', 'requires_async': False}
+    assert rt.ok('/api/tasks/sql/classify', {'sql': sql}) == {'command_kind': 'execute', 'task_kind': 'batch', 'requires_async': False}
     analysis = rt.ok('/api/tasks/sql/analyze', {'sql_text': sql + ';' + sql + ';'})
     assert analysis['statement_count'] == 2 and analysis['task_kind'] == 'batch', analysis
     stream_sql = 'SELECT * FROM tcp_session_mock.finite USING builtin.passthrough_stream INTO dataframe.stream_out'

@@ -1,4 +1,6 @@
 import axios from 'axios'
+import { parseJson } from '../utils/dataSemantics.js'
+export const RESULT_RESPONSE_CONFIG = { transformResponse: [parseJson] }
 import { createConfigChannelApi } from './configChannel.js'
 import { createKafkaChannelApi } from './kafkaChannel.js'
 
@@ -147,10 +149,10 @@ export default {
       total
     }
   }),
-  executeBatchTask: (sqlText, mode = 'async') => api.post('/api/tasks/batch/execute', { sql_text: sqlText, mode }),
+  executeBatchTask: (sqlText, mode = 'async') => api.post('/api/tasks/batch/execute', { sql_text: sqlText, mode }, RESULT_RESPONSE_CONFIG),
   classifySql: (sql) => api.post('/api/tasks/sql/classify', { sql }),
   analyzeSql: (sqlText) => api.post('/api/tasks/sql/analyze', { sql_text: sqlText }),
-  getTaskResult: (id) => api.post('/api/tasks/result', { task_id: id }),
+  getTaskResult: (id) => api.post('/api/tasks/result', { task_id: id }, RESULT_RESPONSE_CONFIG),
   deleteTask: (id) => api.post('/api/tasks/delete', { task_id: id }),
   cancelTask: (id) => api.post('/api/tasks/cancel', { task_id: id }),
   getTaskDiagnostics: (id) => api.post('/api/tasks/diagnostics', { task_id: id }),

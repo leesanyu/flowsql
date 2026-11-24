@@ -4,6 +4,7 @@
 #include "exploration_service.h"
 
 #include "dataframe_workflow.h"
+#include "exploration_semantics.h"
 #include "numeric_display.h"
 
 #include <openssl/sha.h>
@@ -127,8 +128,10 @@ std::string Text(const rapidjson::Value& value, const char* key) {
 }  // namespace
 
 bool ExplorationService::Init(IQuerier* querier, QueryLimits limits, std::string dataframe_upstream,
-                              std::string dataframe_shared_dir) {
+                              std::string dataframe_shared_dir, std::string semantics_upstream) {
     limits_ = limits;
+    semantics_upstream_ = std::move(semantics_upstream);
+    if (!semantics_upstream_.empty() && !httplib::Client(semantics_upstream_).is_valid()) return false;
     if (querier) {
         factory_ = static_cast<IDatabaseFactory*>(querier->First(IID_DATABASE_FACTORY));
         leases_ = static_cast<IDatabaseChannelLeaseProvider*>(querier->First(IID_DATABASE_CHANNEL_LEASE_PROVIDER));
@@ -336,6 +339,28 @@ SourceSchema ExplorationService::Schema(IDatabaseExplorationSession& session, co
     return schema;
 }
 
+std::string ExplorationService::SemanticTarget(const Source& source) const {
+    using namespace dataset;
+    Json target(rapidjson::kObjectType);
+    auto& a = target.GetAllocator();
+    Set(target, "kind", "channel", a);
+    Value locator(rapidjson::kObjectType);
+    if (source.dataframe) {
+        Set(locator, "kind", "dataframe", a);
+        // Catalog supplies this canonical label together with its immutable source_id.
+        Set(locator, "name", source.label.substr(std::string("dataframe.").size()), a);
+    } else {
+        Set(locator, "kind", "database_table", a);
+        Set(locator, "type", source.dialect, a);
+        Set(locator, "name", source.channel, a);
+        Set(locator, "table", source.table, a);
+        if (!source.schema.empty())
+            Set(locator, source.dialect == "postgres" ? "schema" : "database", source.schema, a);
+    }
+    target.AddMember("locator", locator, a);
+    return Encode(target);
+}
+
 void ExplorationService::Routes(httplib::Server& server) {
     server.set_payload_max_length(1024 * 1024);
     server.Get("/api/visualization/sources", [this](const auto&, auto& response) {
@@ -356,49 +381,57 @@ void ExplorationService::Routes(httplib::Server& server) {
             Error(response, error);
         }
     });
-    server.Get(
-        R"(/api/visualization/sources/([a-f0-9]{32}|[a-f0-9]{64}))", [this](const auto& request, auto& response) {
-            try {
-                const auto source = FindSource(request.matches[1]);
-                if (source.dataframe) {
-                    // Discovery only: never create a snapshot as a side effect of describing a source.
-                    response.set_content("{\"source_id\":" + JsonString(source.id) +
-                                             ",\"kind\":\"dataframe\",\"label\":" + JsonString(source.label) +
-                                             ",\"fields\":[],\"capabilities\":[\"projection\",\"filter\",\"group\","
-                                             "\"count\",\"sum\",\"mean\",\"min\",\"max\",\"distinctCount\"],"
-                                             "\"time_bucket_fields\":[],\"status\":\"available\"}",
-                                         "application/json");
-                    return;
-                }
-                auto lease = Lease(source.dialect, source.channel);
-                auto session = Session(lease);
-                const auto schema = Schema(*session, source);
-                std::string bucket_fields = "[";
-                for (const auto& field : schema.fields) {
-                    if (!SupportsTimeBucket(field, source.dialect)) continue;
-                    if (bucket_fields.size() > 1) bucket_fields += ',';
-                    bucket_fields += JsonString(field.id);
-                }
-                bucket_fields += ']';
-                response.set_content(
-                    "{\"source_id\":" + JsonString(source.id) +
-                        ",\"kind\":\"database\",\"dialect\":" + JsonString(source.dialect) + ",\"label\":" +
-                        JsonString(source.channel + "." + (source.schema.empty() ? "" : source.schema + ".") +
-                                   source.table) +
-                        ",\"schema_revision\":" + JsonString(Revision(schema)) +
-                        ",\"fields\":" + FieldsJson(schema.fields) +
-                        ",\"capabilities\":[\"projection\",\"filter\",\"group\",\"count\",\"sum\","
-                        "\"mean\",\"min\",\"max\",\"distinctCount\",\"day\",\"month\"],\"time_bucket_fields\":" +
-                        bucket_fields +
-                        ","
-                        "\"workflow_version\":\"graphic-walker-0.5.3\",\"semantics\":{\"timezone\":"
-                        "\"source_calendar\",\"collation\":\"source column collation; temporal values retain source "
-                        "timezone\"}}",
-                    "application/json");
-            } catch (const QueryFailure& error) {
-                Error(response, error);
+    server.Get(R"(/api/visualization/sources/([a-f0-9]{32}|[a-f0-9]{64}))", [this](const auto& request,
+                                                                                   auto& response) {
+        try {
+            const auto source = FindSource(request.matches[1]);
+            if (source.dataframe) {
+                // Discovery only: never create a snapshot as a side effect of describing a source.
+                response.set_content("{\"source_id\":" + JsonString(source.id) +
+                                         ",\"kind\":\"dataframe\",\"label\":" + JsonString(source.label) +
+                                         ",\"fields\":[],\"capabilities\":[\"projection\",\"filter\",\"group\","
+                                         "\"count\",\"sum\",\"mean\",\"min\",\"max\",\"distinctCount\"],"
+                                         "\"time_bucket_fields\":[],\"status\":\"available\"}",
+                                     "application/json");
+                return;
             }
-        });
+            auto lease = Lease(source.dialect, source.channel);
+            auto session = Session(lease);
+            const auto schema = Schema(*session, source);
+            std::string bucket_fields = "[";
+            for (const auto& field : schema.fields) {
+                if (!SupportsTimeBucket(field, source.dialect)) continue;
+                if (bucket_fields.size() > 1) bucket_fields += ',';
+                bucket_fields += JsonString(field.id);
+            }
+            bucket_fields += ']';
+            dataset::Json target;
+            target.Parse(SemanticTarget(source).c_str());
+            semantics::Capture capture(std::move(target), HttpDescription(semantics_upstream_, limits_.timeout_ms));
+            capture.Begin();
+            const auto context = BudgetContext(
+                capture.Context(SemanticSubject(source.id, Revision(schema)), SemanticNames(schema.fields),
+                                IdentityProjections(schema.fields), "source_schema"),
+                limits_.max_bytes);
+            response.set_content(
+                "{\"source_id\":" + JsonString(source.id) +
+                    ",\"kind\":\"database\",\"dialect\":" + JsonString(source.dialect) + ",\"label\":" +
+                    JsonString(source.channel + "." + (source.schema.empty() ? "" : source.schema + ".") +
+                               source.table) +
+                    ",\"schema_revision\":" + JsonString(Revision(schema)) +
+                    ",\"semantic_context\":" + dataset::Encode(context) + ",\"fields\":" + FieldsJson(schema.fields) +
+                    ",\"capabilities\":[\"projection\",\"filter\",\"group\",\"count\",\"sum\","
+                    "\"mean\",\"min\",\"max\",\"distinctCount\",\"day\",\"month\"],\"time_bucket_fields\":" +
+                    bucket_fields +
+                    ","
+                    "\"workflow_version\":\"graphic-walker-0.5.3\",\"semantics\":{\"timezone\":"
+                    "\"source_calendar\",\"collation\":\"source column collation; temporal values retain source "
+                    "timezone\"}}",
+                "application/json");
+        } catch (const QueryFailure& error) {
+            Error(response, error);
+        }
+    });
     server.Post("/api/visualization/snapshots/acquire",
                 [this](const auto& request, auto& response) { AcquireSnapshot(request, response); });
     server.Post("/api/visualization/snapshots/renew", [this](const auto& request, auto& response) {
@@ -485,6 +518,10 @@ void ExplorationService::Compute(const httplib::Request& request, httplib::Respo
         if (Text(document, "schema_revision") != Revision(schema))
             throw QueryFailure("SCHEMA_CHANGED", "字段结构已变化，请刷新数据源");
         auto plan = CompileWorkflow(schema, document["workflow"], Text(document, "detail_mode"), limits_.max_rows);
+        dataset::Json target;
+        target.Parse(SemanticTarget(source).c_str());
+        semantics::Capture capture(std::move(target), HttpDescription(semantics_upstream_, limits_.timeout_ms));
+        capture.Begin();
         // Guard actual numeric inputs before native AVG can round a wide integer.
         // Use compiler-owned field provenance and the exact bound filter scope.
         for (const auto& input : plan.numeric_inputs) {
@@ -511,6 +548,7 @@ void ExplorationService::Compute(const httplib::Request& request, httplib::Respo
                 throw QueryFailure("UNSUPPORTED_TYPE", "整数输入超出安全范围或含混合存储类型，不能定量聚合");
         }
         auto result = Query(*session, plan.sql, plan.parameters);
+        capture.Finish();
         if (result.rows.size() > limits_.max_rows)
             throw QueryFailure("RESULT_LIMIT", "结果超限，请增加过滤或明确选择受限明细");
         std::vector<NumericDisplay> displays;
@@ -627,6 +665,11 @@ void ExplorationService::Compute(const httplib::Request& request, httplib::Respo
             throw QueryFailure("RESULT_LIMIT",
                                displays.empty() ? "序列化结果超过字节上限" : "包含精度元信息的序列化结果超过字节上限");
         if (elapsed >= limits_.timeout_ms) throw QueryFailure("TIMEOUT", "查询超过计算期限");
+        AppendContext(&body,
+                      capture.Context(SemanticSubject(source.id, Revision(schema)), SemanticNames(plan.fields),
+                                      WorkflowProjections(schema.fields, document["workflow"], source.dialect),
+                                      dataset::Encode(document["workflow"])),
+                      limits_.max_bytes);
         response.set_content(body, "application/json");
     } catch (const QueryFailure& error) {
         Error(response, error, id);
@@ -670,15 +713,30 @@ void ExplorationService::AcquireSnapshot(const httplib::Request& request, httpli
             active_.at(id).acquire_cancel = cancellation;
             registered = true;
         }
+        dataset::Json target;
+        target.Parse(SemanticTarget(source).c_str());
+        semantics::Capture capture(std::move(target), HttpDescription(semantics_upstream_, limits_.timeout_ms));
+        capture.Begin();
         DataFrameSnapshotInfo snapshot;
         std::string failure;
-        if (!dataframes_.Acquire(id, source_id, 256ULL * 1024 * 1024, cancellation, limits_.timeout_ms, &snapshot,
-                                 &failure)) {
+        if (!dataframes_.Acquire(id, source_id, 256ULL * 1024 * 1024 - 4096, cancellation, limits_.timeout_ms,
+                                 &snapshot, &failure)) {
             if (failure == "CANCELLED") throw QueryFailure("CANCELLED", "获取快照已取消");
             if (failure == "SNAPSHOT_LIMIT") throw QueryFailure("SNAPSHOT_LIMIT", "数据超过快照字节预算");
             if (failure == "BUSY") throw QueryFailure("BUSY", "当前采集繁忙，请稍后重试");
             throw QueryFailure("DATA_PLANE_UNAVAILABLE", "DataFrame 数据面不可用或来源已失效");
         }
+        bool same_object = false;
+        for (const auto& current : DataFrameSources(nullptr))
+            same_object = same_object || (current.id == source.id && current.label == source.label);
+        capture.Finish(same_object);
+        const auto snapshot_fields = DescribeArrowSchema(*snapshot.batch->schema());
+        auto context = BudgetContext(
+            capture.Context(SemanticSubject(source_id, snapshot.schema_revision, snapshot.snapshot_id),
+                            SemanticNames(snapshot_fields), IdentityProjections(snapshot_fields), "captured_snapshot"),
+            256ULL * 1024 * 1024 - snapshot.ipc_bytes);
+        snapshot.semantic_context_json = dataset::Encode(context);
+        dataframes_.StoreSemantics(snapshot.snapshot_id, snapshot.semantic_context_json);
         std::string fields = "[";
         for (int i = 0; i < snapshot.batch->schema()->num_fields(); ++i) {
             const auto& field = snapshot.batch->schema()->field(i);
@@ -690,17 +748,17 @@ void ExplorationService::AcquireSnapshot(const httplib::Request& request, httpli
                       ",\"nullable\":" + (field->nullable() ? "true}" : "false}");
         }
         fields += ']';
-        response.set_content("{\"request_id\":" + JsonString(id) + ",\"source_id\":" + JsonString(snapshot.source_id) +
-                                 ",\"snapshot_id\":" + JsonString(snapshot.snapshot_id) +
-                                 ",\"schema_revision\":" + JsonString(snapshot.schema_revision) +
-                                 ",\"captured_at\":" + JsonString(snapshot.captured_at) +
-                                 ",\"row_count\":" + std::to_string(snapshot.row_count) +
-                                 ",\"ipc_bytes\":" + std::to_string(snapshot.ipc_bytes) + ",\"expires_at_unix\":" +
-                                 std::to_string(snapshot.expires_at_unix) + ",\"fields\":" + fields +
-                                 ",\"capabilities\":[\"projection\",\"filter\",\"group\",\"count\",\"sum\","
-                                 "\"mean\",\"min\",\"max\",\"distinctCount\",\"day\",\"month\"],"
-                                 "\"time_bucket_fields\":[]}",
-                             "application/json");
+        response.set_content(
+            "{\"request_id\":" + JsonString(id) + ",\"source_id\":" + JsonString(snapshot.source_id) +
+                ",\"snapshot_id\":" + JsonString(snapshot.snapshot_id) + ",\"schema_revision\":" +
+                JsonString(snapshot.schema_revision) + ",\"semantic_context\":" + snapshot.semantic_context_json +
+                ",\"captured_at\":" + JsonString(snapshot.captured_at) + ",\"row_count\":" +
+                std::to_string(snapshot.row_count) + ",\"ipc_bytes\":" + std::to_string(snapshot.ipc_bytes) +
+                ",\"expires_at_unix\":" + std::to_string(snapshot.expires_at_unix) + ",\"fields\":" + fields +
+                ",\"capabilities\":[\"projection\",\"filter\",\"group\",\"count\",\"sum\","
+                "\"mean\",\"min\",\"max\",\"distinctCount\",\"day\",\"month\"],"
+                "\"time_bucket_fields\":[]}",
+            "application/json");
     } catch (const QueryFailure& error) {
         Error(response, error, id);
     }
@@ -812,6 +870,13 @@ void ExplorationService::ComputeDataFrame(const httplib::Request& request, const
                 ",\"elapsed_ms\":" + std::to_string(elapsed) + "}";
         if (body.size() > limits_.max_bytes) throw QueryFailure("RESULT_LIMIT", "序列化结果超过字节上限");
         if (elapsed >= limits_.timeout_ms) throw QueryFailure("TIMEOUT", "查询超过计算期限");
+        dataset::Json snapshot_context;
+        snapshot_context.Parse(meta.semantic_context_json.c_str());
+        AppendContext(
+            &body,
+            SnapshotResultContext(snapshot_context, SemanticSubject(source_id, meta.schema_revision, snapshot_id),
+                                  result.fields, WorkflowProjections(fields, plan, "dataframe"), dataset::Encode(plan)),
+            limits_.max_bytes);
         response.set_content(body, "application/json");
     } catch (const QueryFailure& error) {
         Error(response, error, id);

@@ -365,6 +365,9 @@ int ConfigChannelPlugin::LookupDescriptionOperator(const std::string& name, uint
 }
 
 void ConfigChannelPlugin::EnumRoutes(std::function<void(const RouteItem&)> callback) {
+    callback({"POST", "/semantics/describe-sql", [this](const auto&, const auto& req, auto& rsp) {
+                  return DescriptionService().DescribeSql(req.c_str(), &rsp);
+              }});
     callback({"POST", "/semantics/describe",
               [this](const auto&, const auto& req, auto& rsp) { return Describe(req.c_str(), &rsp); }});
     callback({"POST", "/semantics/channels/save-description",

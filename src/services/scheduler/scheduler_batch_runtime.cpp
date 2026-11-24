@@ -312,6 +312,21 @@ void SchedulerBatchRuntime::ExecuteTask(const std::shared_ptr<BatchRuntimeTask>&
                 task->snapshot.contract_checks_json.emplace_back(buffer.GetString(), buffer.GetSize());
             }
         }
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            task->snapshot.semantic_context_json.clear();
+            task->snapshot.result_columns_json.clear();
+            if (execution.IsObject() && execution.HasMember("semantic_context")) {
+                const auto encode = [](const rapidjson::Value& value) {
+                    rapidjson::StringBuffer buffer;
+                    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+                    value.Accept(writer);
+                    return std::string(buffer.GetString(), buffer.GetSize());
+                };
+                task->snapshot.semantic_context_json = encode(execution["semantic_context"]);
+                task->snapshot.result_columns_json = encode(execution["result_columns"]);
+            }
+        }
         if (rc != error::OK) {
             std::string err_code;
             std::string err_message;
