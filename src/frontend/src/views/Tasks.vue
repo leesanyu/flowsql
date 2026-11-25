@@ -40,9 +40,6 @@
         show-icon
       />
 
-      <section v-if="description" class="result-section" data-testid="workbench-description">
-        <el-button @click="openDescription">查看对象说明 · JSON</el-button>
-      </section>
       <!-- 执行结果 -->
       <div v-if="currentResult" class="result-section">
         <el-divider content-position="left">执行结果</el-divider>
@@ -202,10 +199,10 @@ const executeMode = ref('sync')
 const executing = ref(false)
 const sqlTaskKind = ref('unknown')
 const currentResult = ref(null)
-const description = ref(null), currentSemanticRef = ref(null), historySemanticRef = ref(null)
+const currentSemanticRef = ref(null), historySemanticRef = ref(null)
 let descriptionReader = null
-function openDescription() {
-  const observed = description.value, channel = observed.subject.kind === 'channel'
+function openDescription(observed) {
+  const channel = observed.subject.kind === 'channel'
   descriptionReader = showJsonReading({
     title: channel ? '通道说明' : '算子说明', value: channel ? channelReading(observed) : operatorReading(observed),
     links: [{ label: '当前对象管理页', href: channel ? '/channels?dataset=' + encodeURIComponent(JSON.stringify(observed.subject.locator)) : '/operators?name=' + encodeURIComponent(observed.subject.name) },
@@ -470,7 +467,6 @@ const executeSQL = async () => {
   executing.value = true
   currentResult.value = null
   descriptionReader?.close()
-  description.value = null
   currentTaskId.value = ''
 
   try {
@@ -483,7 +479,7 @@ const executeSQL = async () => {
     if (analysis.command_kind === 'describe') {
       const data = await semanticsCall('describe-sql', { sql })
       if (generation !== executionGeneration) return
-      description.value = data; openDescription()
+      openDescription(data)
       return
     }
     executeMode.value = taskExecutionPolicy(analysis, executeMode.value).mode
