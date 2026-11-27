@@ -1,0 +1,14 @@
+# Run in build/output after preparing private meta/dataframes and registered channels.
+# Exposes only the authenticated controlled listener; no Gateway/Router/SQL listener.
+services:
+  - name: data_access
+    option: '{"host":"127.0.0.1","port":18805,"policy_file":"./meta/data-access-policy.json","contract_file":"config/agent-data-access/api.schema.json","state_path":"./meta/data-access.db"}'
+    plugins:
+      - name: libflowsql_config_channel.so
+        option: 'db_path=./meta/access-config.db'
+      - name: libflowsql_builtin.so
+      - name: libflowsql_catalog.so
+        option: 'data_dir=./dataframes;operator_db_path=./meta/access-catalog.db'
+      - name: libflowsql_database.so
+        option: 'config_file=config/flowsql.yml'
+      - name: libflowsql_data_access.so

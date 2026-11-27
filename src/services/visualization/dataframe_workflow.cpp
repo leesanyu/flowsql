@@ -55,6 +55,9 @@ std::string TypeClass(const std::shared_ptr<arrow::DataType>& type) {
         case arrow::Type::DOUBLE:
         case arrow::Type::DECIMAL:
             return "number";
+        case arrow::Type::BINARY:
+        case arrow::Type::LARGE_BINARY:
+            return "binary";
         case arrow::Type::BOOL:
             return "boolean";
         case arrow::Type::STRING:
@@ -195,8 +198,8 @@ struct Cell {
 class Executor {
  public:
     Executor(const std::shared_ptr<arrow::RecordBatch>& batch, const std::vector<Field>& fields, uint64_t max_bytes,
-             const std::chrono::steady_clock::time_point& deadline)
-        : batch_(batch), fields_(fields), max_bytes_(max_bytes), deadline_(deadline) {
+             const std::chrono::steady_clock::time_point& deadline, const std::atomic_bool* cancelled)
+        : batch_(batch), fields_(fields), max_bytes_(max_bytes), deadline_(deadline), cancelled_(cancelled) {
         for (size_t i = 0; i < static_cast<size_t>(batch_->num_columns()); ++i)
             columns_.emplace(fields_[i].id, Materialise(static_cast<int>(i), fields_[i]));
     }
@@ -313,16 +316,22 @@ class Executor {
                       &result);
             return result;
         }
+        if (mode == "limited" && limit < 0) limit = maximum;
+        if (limit < 0 && rows.size() > static_cast<uint64_t>(offset) &&
+            rows.size() - static_cast<uint64_t>(offset) > maximum)
+            throw QueryFailure("RESULT_LIMIT", "完整明细超过行数预算");
         Project(rows, project, sort_ids, sort_direction, limit, offset, &result);
         return result;
     }
 
  private:
     void Checkpoint() const {
+        if (cancelled_ && *cancelled_) throw QueryFailure("CANCELLED", "查询已取消");
         if (std::chrono::steady_clock::now() >= deadline_) throw QueryFailure("TIMEOUT", "查询超过计算期限");
     }
 
     Column Materialise(int index, const Field& field) {
+        Checkpoint();
         Column column;
         column.field = field;
         column.array = batch_->column(index);
@@ -349,6 +358,7 @@ class Executor {
             case arrow::Type::DATE64: {
                 column.integers.resize(static_cast<size_t>(column.length));
                 for (int64_t row = 0; row < column.length; ++row) {
+                    if ((row & 0x3ff) == 0) Checkpoint();
                     if (column.array->IsNull(row)) continue;
                     column.valid[static_cast<size_t>(row)] = true;
                     if (type->id() == arrow::Type::DATE32)
@@ -367,12 +377,15 @@ class Executor {
             case arrow::Type::DOUBLE: {
                 column.reals.resize(static_cast<size_t>(column.length));
                 for (int64_t row = 0; row < column.length; ++row) {
+                    if ((row & 0x3ff) == 0) Checkpoint();
                     if (column.array->IsNull(row)) continue;
                     column.valid[static_cast<size_t>(row)] = true;
                     column.reals[static_cast<size_t>(row)] = RealAt(column.array, row);
                 }
                 break;
             }
+            case arrow::Type::BINARY:
+            case arrow::Type::LARGE_BINARY:
             case arrow::Type::BOOL:
             case arrow::Type::STRING:
             case arrow::Type::LARGE_STRING:
@@ -380,6 +393,7 @@ class Executor {
                 column.text_backed = true;
                 column.texts.resize(static_cast<size_t>(column.length));
                 for (int64_t row = 0; row < column.length; ++row) {
+                    if ((row & 0x3ff) == 0) Checkpoint();
                     if (column.array->IsNull(row)) continue;
                     column.valid[static_cast<size_t>(row)] = true;
                     column.texts[static_cast<size_t>(row)] = TextAt(column.array, row);
@@ -389,6 +403,7 @@ class Executor {
             case arrow::Type::DECIMAL: {
                 column.decimals.resize(static_cast<size_t>(column.length));
                 for (int64_t row = 0; row < column.length; ++row) {
+                    if ((row & 0x3ff) == 0) Checkpoint();
                     if (column.array->IsNull(row)) continue;
                     column.valid[static_cast<size_t>(row)] = true;
                     column.decimals[static_cast<size_t>(row)] = DecimalAt(column.array, row, column.scale);
@@ -438,25 +453,11 @@ class Executor {
     static std::string TextAt(const std::shared_ptr<arrow::Array>& array, int64_t row) {
         if (array->type()->id() == arrow::Type::BOOL)
             return static_cast<arrow::BooleanArray&>(*array).Value(row) ? "true" : "false";
-        if (array->type()->id() == arrow::Type::TIMESTAMP) {
-            const auto& stamp = static_cast<const arrow::TimestampType&>(*array->type());
-            const auto value = static_cast<arrow::TimestampArray&>(*array).Value(row);
-            int64_t millis = value;
-            if (stamp.unit() == arrow::TimeUnit::SECOND) millis = value * 1000;
-            if (stamp.unit() == arrow::TimeUnit::MICRO) millis = value / 1000;
-            if (stamp.unit() == arrow::TimeUnit::NANO) millis = value / 1000000;
-            const std::time_t seconds = static_cast<std::time_t>(millis >= 0 ? millis / 1000 : (millis - 999) / 1000);
-            std::tm broken{};
-            // A zoned column renders in its declared zone; a zone-less one keeps the zone-less calendar.
-            if (stamp.timezone().empty()) {
-                gmtime_r(&seconds, &broken);
-            } else {
-                localtime_r(&seconds, &broken);
-            }
-            char text[40];
-            std::strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%S", &broken);
-            return text;
-        }
+        if (IsTemporal(array->type())) return array->GetScalar(row).ValueOrDie()->ToString();
+        if (array->type()->id() == arrow::Type::BINARY)
+            return std::string(static_cast<arrow::BinaryArray&>(*array).GetView(row));
+        if (array->type()->id() == arrow::Type::LARGE_BINARY)
+            return std::string(static_cast<arrow::LargeBinaryArray&>(*array).GetView(row));
         if (array->type()->id() == arrow::Type::LARGE_STRING)
             return std::string(static_cast<arrow::LargeStringArray&>(*array).GetView(row));
         return std::string(static_cast<arrow::StringArray&>(*array).GetView(row));
@@ -496,6 +497,7 @@ class Executor {
         std::vector<std::string> values(static_cast<size_t>(column.length));
         std::vector<bool> valid(static_cast<size_t>(column.length), false);
         for (int64_t row = 0; row < column.length; ++row) {
+            if ((row & 0x3ff) == 0) Checkpoint();
             if (!column.valid[static_cast<size_t>(row)]) continue;
             int64_t millis = 0;
             if (type->id() == arrow::Type::DATE32)
@@ -581,7 +583,7 @@ class Executor {
             return cell;
         }
         cell.kind = CellKind::kText;
-        cell.text = column.texts[static_cast<size_t>(row)];
+        cell.text = column.temporal ? TextAt(column.array, row) : column.texts[static_cast<size_t>(row)];
         return cell;
     }
 
@@ -589,14 +591,18 @@ class Executor {
     static int CompareCells(const Column& column, const Cell& left, const Cell& right) {
         if (left.kind == CellKind::kNull || right.kind == CellKind::kNull)
             return left.kind == right.kind ? 0 : (left.kind == CellKind::kNull ? 1 : -1);
+        if (column.field.type == "binary") throw QueryFailure("UNSUPPORTED_TYPE", "二进制仅支持明细读取");
         if (column.field.type == "number" && column.decimal) return CompareDecimalText(left.text, right.text);
         if (left.kind == CellKind::kText || right.kind == CellKind::kText) return left.text.compare(right.text);
+        if (left.kind == CellKind::kInteger && right.kind == CellKind::kInteger)
+            return left.integer == right.integer ? 0 : (left.integer < right.integer ? -1 : 1);
         const double a = left.kind == CellKind::kInteger ? static_cast<double>(left.integer) : left.real;
         const double b = right.kind == CellKind::kInteger ? static_cast<double>(right.integer) : right.real;
         return a == b ? 0 : (a < b ? -1 : 1);
     }
 
     static int CompareToLiteral(const Column& column, const Cell& cell, const Literal& literal) {
+        if (column.field.type == "binary") throw QueryFailure("UNSUPPORTED_TYPE", "二进制仅支持明细读取");
         if (cell.kind == CellKind::kNull || literal.kind == Literal::Kind::kNull)
             return cell.kind == CellKind::kNull && literal.kind == Literal::Kind::kNull
                        ? 0
@@ -708,6 +714,7 @@ class Executor {
             }
             const bool inverse = type == "not in";
             for (const auto row : *rows) {
+                if ((row & 0x3ff) == 0) Checkpoint();
                 bool match = false;
                 if (!column.valid[static_cast<size_t>(row)]) {
                     match = has_null;
@@ -730,6 +737,7 @@ class Executor {
             const auto lower = ParseLiteral(value[0]);
             const auto upper = ParseLiteral(value[1]);
             for (const auto row : *rows) {
+                if ((row & 0x3ff) == 0) Checkpoint();
                 if (!column.valid[static_cast<size_t>(row)]) continue;
                 const auto cell = Value(column, row);
                 if (lower.kind != Literal::Kind::kNull && CompareToLiteral(column, cell, lower) < 0) continue;
@@ -753,6 +761,7 @@ class Executor {
             }
             const auto literal = ParseLiteral(value);
             for (const auto row : *rows) {
+                if ((row & 0x3ff) == 0) Checkpoint();
                 if (!column.valid[static_cast<size_t>(row)]) continue;
                 if (Matches(CompareToLiteral(column, Value(column, row), literal), op)) kept.push_back(row);
             }
@@ -774,6 +783,8 @@ class Executor {
     static int ComparePart(const KeyPart& left, const KeyPart& right) {
         if (left.null || right.null) return left.null == right.null ? 0 : (left.null ? 1 : -1);
         if (left.kind == CellKind::kText || right.kind == CellKind::kText) return left.text.compare(right.text);
+        if (left.kind == CellKind::kInteger && right.kind == CellKind::kInteger)
+            return left.integer == right.integer ? 0 : (left.integer < right.integer ? -1 : 1);
         const double a = left.kind == CellKind::kInteger ? static_cast<double>(left.integer) : left.real;
         const double b = right.kind == CellKind::kInteger ? static_cast<double>(right.integer) : right.real;
         return a == b ? 0 : (a < b ? -1 : 1);
@@ -808,8 +819,9 @@ class Executor {
             }
             return part;
         }
+        if (column.field.type == "binary") throw QueryFailure("UNSUPPORTED_TYPE", "二进制仅支持明细读取");
         part.kind = CellKind::kText;
-        part.text = column.texts[static_cast<size_t>(row)];
+        part.text = column.temporal ? TextAt(column.array, row) : column.texts[static_cast<size_t>(row)];
         return part;
     }
 
@@ -836,6 +848,11 @@ class Executor {
             if (column.reals.empty()) return column.integers[static_cast<size_t>(row)];
             return column.reals[static_cast<size_t>(row)];
         }
+        if (column.temporal) return TextAt(column.array, row);
+        if (column.field.type == "binary") {
+            const auto& bytes = column.texts[static_cast<size_t>(row)];
+            return std::vector<uint8_t>(bytes.begin(), bytes.end());
+        }
         return column.texts[static_cast<size_t>(row)];
     }
 
@@ -854,7 +871,9 @@ class Executor {
             if (std::find(project.begin(), project.end(), id) == project.end()) Invalid("排序字段未出现在结果中");
         std::vector<int64_t> ordering = rows;
         if (!sort_ids.empty()) {
+            uint64_t comparisons = 0;
             std::stable_sort(ordering.begin(), ordering.end(), [&](int64_t left, int64_t right) {
+                if ((++comparisons & 0x3ff) == 0) Checkpoint();
                 for (const auto& id : sort_ids) {
                     const auto& column = Lookup(id);
                     const auto order = CompareCells(column, Value(column, left), Value(column, right));
@@ -1141,7 +1160,9 @@ class Executor {
                                                         [&](const Field& field) { return field.id == id; }) -
                                            result->fields.begin());
             };
+            uint64_t comparisons = 0;
             std::stable_sort(output.begin(), output.end(), [&](const Row& left, const Row& right) {
+                if ((++comparisons & 0x3ff) == 0) Checkpoint();
                 for (const auto& id : sort_ids) {
                     const auto index = index_of(id);
                     const auto a = CellFrom(left.values[index]);
@@ -1149,16 +1170,12 @@ class Executor {
                     int order;
                     if (a.kind == CellKind::kNull || b.kind == CellKind::kNull)
                         order = a.kind == b.kind ? 0 : (a.kind == CellKind::kNull ? 1 : -1);
+                    else if (result->fields[index].native_type == "decimal")
+                        order = CompareDecimalText(a.text, b.text);
                     else if (a.kind == CellKind::kText || b.kind == CellKind::kText)
                         order = a.text.compare(b.text);
-                    else if (result->fields[index].native_type == "decimal")
-                        order = CompareDecimalText(
-                            a.kind == CellKind::kText
-                                ? a.text
-                                : DoubleText(a.kind == CellKind::kInteger ? static_cast<double>(a.integer) : a.real),
-                            b.kind == CellKind::kText
-                                ? b.text
-                                : DoubleText(b.kind == CellKind::kInteger ? static_cast<double>(b.integer) : b.real));
+                    else if (a.kind == CellKind::kInteger && b.kind == CellKind::kInteger)
+                        order = a.integer == b.integer ? 0 : (a.integer < b.integer ? -1 : 1);
                     else {
                         const double x = a.kind == CellKind::kInteger ? static_cast<double>(a.integer) : a.real;
                         const double y = b.kind == CellKind::kInteger ? static_cast<double>(b.integer) : b.real;
@@ -1192,6 +1209,7 @@ class Executor {
         double minimum = 0, maximum = 0;
         bool seeded = false;
         for (const auto row : rows) {
+            if ((row & 0x3ff) == 0) Checkpoint();
             if (!column.valid[static_cast<size_t>(row)]) continue;
             double value = 0;
             if (column.decimal) {
@@ -1259,6 +1277,7 @@ class Executor {
     uint64_t max_bytes_ = 0;
     size_t budget_ = 0;
     std::chrono::steady_clock::time_point deadline_;
+    const std::atomic_bool* cancelled_;
 };
 }  // namespace
 
@@ -1285,10 +1304,11 @@ std::string ArrowSchemaRevision(const arrow::Schema& schema) {
 DataFrameResult ExecuteDataFrameWorkflow(const std::shared_ptr<arrow::RecordBatch>& batch,
                                          const std::vector<Field>& fields, const rapidjson::Value& payload,
                                          const std::string& detail_mode, uint32_t max_rows, uint64_t max_bytes,
-                                         const std::chrono::steady_clock::time_point& deadline) {
+                                         const std::chrono::steady_clock::time_point& deadline,
+                                         const std::atomic_bool* cancelled) {
     if (!batch || !batch->schema()) Invalid("快照数据无效");
     if (fields.size() != static_cast<size_t>(batch->num_columns())) Invalid("快照字段与数据不一致");
-    return Executor(batch, fields, max_bytes, deadline).Run(payload, detail_mode, max_rows);
+    return Executor(batch, fields, max_bytes, deadline, cancelled).Run(payload, detail_mode, max_rows);
 }
 
 }  // namespace flowsql::visualization

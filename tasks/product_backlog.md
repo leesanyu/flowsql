@@ -27,8 +27,9 @@
 `data-semantics-dictionary` Epic 的 F1～F3 已交付，作为版本、来源和执行契约基础保留；新入口及未实施范围见 [Epic 调整](specs/epic-data-semantics-dictionary.md)。
 对象说明管理及 `npm-data-semantics` 全部实体已完成；`data-semantics-read-optimization` 的静态读取性能、通用 Web 展示与 JSON 下载也已完成并归档。
 `data-semantics-consumption`（F5，P1）已于 2026-11-24 完成工作台 DESC、结果与探索说明增强并归档。
-`llm-skill-diagnosis` 随后独立推进，继续复用相同说明接口；这一排期调整不把 DESC 或图表增强变成模型接入的技术前置条件，其余规划保持原业务边界。
-长期任务恢复、探索成果保存与原始报文调查已移至长远规划，不作为首期模型诊断的前置条件。
+`llm-skill-diagnosis` 已拆为五个独立 Feature，2026-11-26 完成整体规划检视，统一由[交互式异常诊断 Epic](specs/epic-llm-skill-diagnosis.md)组织责任与依赖；[完整分析报告](../docs/archive/2026-11-25-llm-skill-diagnosis-analysis.md)保留历史依据；2026-11-27 F1 已完成验收并归档，F2～F5 待实施，后续技术选型在各自范围实测。
+诊断目标包含独立/探索双入口、外置通用 Agent、独立部署的专用 Agent、表图文字交互及 Markdown/PDF 报告；继续复用现有说明与查询能力。
+长期采集/分析任务恢复、通用探索方案持久化与原始报文调查仍在长远规划；诊断会话状态和诊断证据/报告保存由本次拆分承担，不以这些长期规划为前置。
 
 | 状态 | Feature | 优先级 | 目标 | 规格 |
 | --- | --- | --- | --- | --- |
@@ -45,7 +46,11 @@
 | [x] | 静态说明读取与展示优化 (`data-semantics-read-optimization`) | P1 | 让频繁阅读标准、字典和算子契约的用户、任务执行器及未来模型调用方，快速取得静态定义与同版本局部说明，消除小摘要因反复处理大契约造成的秒级等待并降低任务准备开销；通过通用分层页面完整展示字段、参数、条件和关联，提供对象内 JSON 下载，保留实时来源核验、人工补充与精确历史，使程序读取和日常阅读共用可靠内容。 | [归档](archive/feat-data-semantics-read-optimization.md)；[责任边界](specs/epic-data-semantics-dictionary.md#data-semantics-read-optimization) |
 | [x] | 工作台与探索中的说明增强 (`data-semantics-consumption`) | P1 | 让频繁编写 SQL、查询及绘图的用户在使用数据时就地查阅说明，减少页面切换；复用对象描述接口提供同步 DESC 快捷查询、结果/探索字段说明及可追溯的已支持来源关系，未知表达式保持未知；作为独立体验增强，不作为普通程序或模型调用的前置条件。 | [归档](archive/feat-data-semantics-consumption.md)；[拆分边界](specs/epic-data-semantics-dictionary.md#data-semantics-consumption) |
 | [x] | 统一说明 JSON 阅读窗口 (`data-semantics-json-reading`) | P1 | 让工作台与探索用户在独立弹框中阅读、复制和下载完整说明，将状态、未知属性、字段及精确依据统一为有语法高亮的 JSON，消除页面纵向铺陈和阅读割裂。 | [归档](archive/feat-data-semantics-json-reading.md) |
-| [ ] | 大模型与 Skills 交互式异常诊断 (`llm-skill-diagnosis`) | P1 | 让网络分析用户针对选定问题、时间窗和数据范围，借助大模型与可复用诊断 skills 获得有证据支持的分析及后续验证建议；首期使用已有 NPM DNS 结果，依赖 SQL 指引、通道/算子描述接口及已验收的 DNS 必要说明，组织发现→描述→按需预检→受控查询→解释，输出事实、候选原因和证据不足；模型工具适配归本 Feature，不等待完整语义 Epic、DESC/图表集成、探索持久化、长期任务恢复或包回溯，不包含自动修复或无证据根因承诺。 | 待创建 |
+| [x] | 受控数据与 MCP 接入 (`agent-data-access`) | P1 | 让普通程序及内外 Agent 按各类通道的真实能力和获准范围取得有界、可取消、可核对且能可靠交给后续保存的结果，避免直连存储和重试重复执行；MCP 跨业务独立部署，优先由 Python 适配协议，业务与数据执行沿用 FlowSQL。 | [归档](archive/feat-agent-data-access.md) |
+| [ ] | 诊断证据、图表与报告 (`diagnosis-artifacts`) | P1 | 让分析用户和程序把真实结果可靠保存为有访问边界的证据、交互表图与报告，在源库变化或服务重启后仍准确重读、选择范围并导出完整 Markdown/PDF；独立于 Agent 使用，重试和并发编辑不丢失已存内容。 | [规格](specs/feat-diagnosis-artifacts.md) |
+| [ ] | 外置 Agent 诊断与 Skills (`diagnosis-skills`) | P1 | 让使用通用 Agent 的网络分析用户复用领域方法，通过标准工具连续调查并在产物页面或支持的内嵌图形中选择追问，得到可核查的事实、候选原因和可保存报告；真实 DNS 评测与宿主验收界定效果，共享技能和评测依据供专用 Agent 使用。 | [规格](specs/feat-diagnosis-skills.md) |
+| [ ] | 独立部署的专用诊断 Agent (`diagnosis-agent`) | P1 | 让部署者独立运行 FlowSQL 诊断 Agent，使程序客户端持续提问、补充和取消调查，得到按主体隔离、状态可观察、断连或重启后能核对继续且不重复写入的证据化结果；实测选择运行时，共用标准工具、Skills 和报告能力。 | [规格](specs/feat-diagnosis-agent.md) |
+| [ ] | 交互诊断工作台与探索联动 (`diagnosis-workspace`) | P1 | 让用户从独立工作台或探索选区进入同一会话，核对表图与结论、选择追问并编辑保存及导出报告，也能将历史证据带回探索继续分析；保持来源、筛选和观测依据准确，独立与内嵌部署共用体验。 | [规格](specs/feat-diagnosis-workspace.md) |
 
 ---
 

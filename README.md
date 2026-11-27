@@ -10,6 +10,8 @@ Linux 网卡与 Kafka 数据通道，提供 `npm.basic` 网络会话和协议分
 
 平台采用 Gateway + RouterAgency 插件架构：所有 C++ 服务共享同一个框架程序（加载不同 .so），业务插件通过 IRouterHandle 声明路由，RouterAgencyPlugin 统一收集并向 Gateway 注册，Python Worker 作为独立 FastAPI 进程运行。控制面统一走 HTTP + URI 路由，数据面通过共享内存 / Arrow IPC 实现零拷贝传输。
 
+受控数据服务由同一框架加载 `flowsql_data_access` 插件，持有主体权限、执行预算、任务和结果；独立 Python MCP 服务通过该专用 HTTP 入口接入，可单独安装和启停，无需 Worker、Agent 或模型。见 [受控数据与 MCP 接入](docs/agent-data-access.md)。
+
 常用入口：[快速开始](#快速开始) · [SQL 采集、分析与输出指引](docs/sql-workflow.md) · [SQL 与阶段过滤](#sql-过滤能力) ·
 [实时网卡采集](#netadapter-实时网卡采集) · [Kafka 接入与发布](#kafka-接入与发布) ·
 [NPM 分析](#npmbasic-网络会话与协议分析) · [基线分析](#explorebaseliner-基线分析) ·
@@ -1426,6 +1428,7 @@ flowsql/
 
 ## 文档
 
+- [受控数据与 MCP 接入](docs/agent-data-access.md) — 来源与分析发现、主体授权、有界查询、固定方案分析、结果租约和独立 MCP 部署
 - [通道与算子说明](docs/data-semantics.md) — 对象内保存、算子输入/参数/输出说明、默认 usage/显式 full、核查边界及 HTTP 客户端；兼容标准/字典、版本/绑定与导入导出
 
 - [SQL 采集、分析与输出：能力发现、执行入口与可复现示例](docs/sql-workflow.md)

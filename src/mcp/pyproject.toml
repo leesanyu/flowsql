@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flowsql-mcp"
+version = "0.1.0"
+description = "Independent FlowSQL MCP data access adapter"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.30.0,<1.31",
+    "httpx>=0.28,<1",
+    "uvicorn>=0.30,<1",
+]
+
+[project.scripts]
+flowsql-mcp = "flowsql_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["flowsql_mcp*"]

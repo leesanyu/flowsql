@@ -1,0 +1,125 @@
+{
+  "subjects": [
+    {
+      "principal": "analyst",
+      "token_env": "FLOWSQL_ACCESS_ANALYST_TOKEN",
+      "max_rows": 1000,
+      "max_bytes": 8388608,
+      "timeout_ms": 5000,
+      "result_ttl_ms": 3600000,
+      "sources": [
+        {
+          "locator": {
+            "kind": "database_table",
+            "type": "sqlite",
+            "name": "business",
+            "schema": "main",
+            "table": "sales"
+          },
+          "operations": [
+            "query"
+          ],
+          "filters": [
+            {
+              "fid": "business_date",
+              "rule": {
+                "type": "range",
+                "value": [
+                  "2026-01-01",
+                  "2026-12-31"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "locator": {
+            "kind": "dataframe",
+            "name": "orders"
+          },
+          "operations": [
+            "query"
+          ]
+        },
+        {
+          "locator": {
+            "kind": "stream",
+            "type": "memory",
+            "name": "events"
+          },
+          "operations": []
+        },
+        {
+          "locator": {
+            "kind": "block_stream",
+            "type": "pcapfile",
+            "name": "capture"
+          },
+          "operations": [
+            "analyze"
+          ]
+        },
+        {
+          "locator": {
+            "kind": "block_stream",
+            "type": "kafka",
+            "name": "logs"
+          },
+          "operations": []
+        },
+        {
+          "locator": {
+            "kind": "block_stream",
+            "type": "netadapter",
+            "name": "capture_live"
+          },
+          "operations": []
+        },
+        {
+          "locator": {
+            "kind": "config",
+            "reference": "config.analysis@1"
+          },
+          "operations": []
+        },
+        {
+          "locator": {
+            "kind": "config",
+            "reference": "config.npm-labels@1"
+          },
+          "operations": [
+            "analyze"
+          ]
+        }
+      ],
+      "analyses": [
+        {
+          "name": "dns_capture",
+          "operator": {
+            "category": "npm",
+            "name": "basic"
+          },
+          "source": {
+            "kind": "block_stream",
+            "type": "pcapfile",
+            "name": "capture"
+          },
+          "parameters": {
+            "features": "basic,session,labeling,dns",
+            "observing": "dns_transaction_ipv4",
+            "parameters": "{\"schema_version\":1,\"core\":{\"labeling\":\"config.npm-labels@1\"},\"dns\":{\"primary_label_ids\":[1002]}}"
+          },
+          "config_refs": [
+            "config.npm-labels@1"
+          ],
+          "output": {
+            "kind": "managed_database",
+            "type": "sqlite",
+            "name": "analyst_results"
+          },
+          "max_input_bytes": 67108864
+        }
+      ]
+    }
+  ]
+}

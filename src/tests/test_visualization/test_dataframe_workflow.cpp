@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <thread>
 
 using namespace flowsql;
 using namespace flowsql::visualization;
@@ -40,7 +41,7 @@ DataFrameResult Run(const std::shared_ptr<arrow::RecordBatch>& batch, const std:
                     const std::string& mode = "complete", uint32_t rows = 10000) {
     const auto payload = Json("{\"workflow\":" + workflow + "}");
     return ExecuteDataFrameWorkflow(batch, DescribeArrowSchema(*batch->schema()), payload, mode, rows, 8 << 20,
-                                    Deadline());
+                                    Deadline(), nullptr);
 }
 
 std::string ErrorCode(const std::shared_ptr<arrow::RecordBatch>& batch, const std::string& workflow) {
@@ -156,7 +157,7 @@ void TestProjectionAndSort() {
     auto top = ExecuteDataFrameWorkflow(
         fixture.batch, DescribeArrowSchema(*fixture.batch->schema()),
         Json(R"({"workflow":[{"type":"view","query":[{"op":"raw","fields":["f0"]}]}],"limit":2})"), "complete", 10000,
-        8 << 20, Deadline());
+        8 << 20, Deadline(), nullptr);
     CHECK(top.scope == "top_n" && top.rows.size() == 2);
     CHECK(ErrorCode(fixture.batch,
                     R"([{"type":"view","query":[{"op":"raw","fields":["f1"]}]},
@@ -279,7 +280,7 @@ void TestTopNAndStability() {
         "measures":[{"field":"*","agg":"count","asFieldKey":"rows"}]}]},
         {"type":"sort","by":["rows"],"sort":"descending"}],"limit":2})");
     auto result = ExecuteDataFrameWorkflow(fixture.batch, DescribeArrowSchema(*fixture.batch->schema()), payload,
-                                           "complete", 10000, 8 << 20, Deadline());
+                                           "complete", 10000, 8 << 20, Deadline(), nullptr);
     CHECK(result.scope == "top_n" && result.rows.size() == 2);
     CHECK(Text(result, 0, 0) == "a" && Integer(result, 0, 1) == 3);
     CHECK(Text(result, 1, 0) == "b");  // tie between b and "" resolved by group key order
@@ -322,7 +323,7 @@ void TestBuckets() {
         payload["workflow"][0]["query"][0]["groupBy"][0]["unit"].SetString(unit, payload.GetAllocator());
         const auto fields = DescribeArrowSchema(*fixture.batch->schema());
         const auto computed =
-            ExecuteDataFrameWorkflow(fixture.batch, fields, payload, "complete", 10000, 8 << 20, Deadline());
+            ExecuteDataFrameWorkflow(fixture.batch, fields, payload, "complete", 10000, 8 << 20, Deadline(), nullptr);
         const auto mapped = WorkflowProjections(fields, payload, "dataframe");
         CHECK(mapped.size() == computed.fields.size() && mapped.size() == 2);
         CHECK(mapped[0].source_field == "stamp" && mapped[0].operation == "time_bucket");
@@ -414,7 +415,7 @@ void TestVersionAndCancellation() {
             fixture.batch, DescribeArrowSchema(*fixture.batch->schema()),
             Json(R"({"workflow":[{"type":"filter","filters":[{"fid":"f0","rule":{"type":"is not null"}}]},
                                         {"type":"view","query":[{"op":"raw","fields":["f0"]}]}]})"),
-            "complete", 10000, 8 << 20, std::chrono::steady_clock::now());
+            "complete", 10000, 8 << 20, std::chrono::steady_clock::now(), nullptr);
         CHECK(false);
     } catch (const QueryFailure& error) {
         CHECK(error.code == "TIMEOUT");
@@ -422,10 +423,77 @@ void TestVersionAndCancellation() {
     CHECK(ErrorCode(fixture.batch, R"([{"type":"pivot"}])") == "UNSUPPORTED_OPERATION");
     std::puts("[PASS] schema revision stability and deadline enforcement");
 }
+void TestLosslessSnapshotValues() {
+    arrow::Int64Builder integers;
+    arrow::TimestampBuilder nanos(arrow::timestamp(arrow::TimeUnit::NANO, "UTC"), arrow::default_memory_pool());
+    arrow::Date32Builder days;
+    arrow::BinaryBuilder bytes;
+    for (int i = 0; i < 2; ++i) {
+        CHECK(integers.Append(9007199254740993LL - i).ok());
+        CHECK(nanos.Append(i + 1).ok());
+        CHECK(days.Append(i).ok());
+        CHECK(bytes.Append(std::string("a\0b", 3)).ok());
+    }
+    std::shared_ptr<arrow::Array> ints, stamps, dates, blobs;
+    CHECK(integers.Finish(&ints).ok());
+    CHECK(nanos.Finish(&stamps).ok());
+    CHECK(days.Finish(&dates).ok());
+    CHECK(bytes.Finish(&blobs).ok());
+    auto batch = arrow::RecordBatch::Make(
+        arrow::schema({arrow::field("id", arrow::int64()), arrow::field("stamp", nanos.type()),
+                       arrow::field("day", arrow::date32()), arrow::field("bytes", arrow::binary())}),
+        2, {ints, stamps, dates, blobs});
+    auto result = Run(batch, R"([{"type":"view","query":[{"op":"raw","fields":["f0","f1","f2","f3"]}]},
+        {"type":"sort","by":["f0"],"sort":"ascending"}])");
+    CHECK(Integer(result, 0, 0) == 9007199254740992LL);
+    CHECK(Text(result, 0, 1) == "1970-01-01 00:00:00.000000002Z");
+    CHECK(Text(result, 1, 1) == "1970-01-01 00:00:00.000000001Z");
+    CHECK(Text(result, 0, 2) == "1970-01-02");
+    CHECK(std::get<std::vector<uint8_t>>(result.rows[0][3]) == std::vector<uint8_t>({'a', 0, 'b'}));
+    result = Run(batch, R"([{"type":"view","query":[{"op":"aggregate","groupBy":["f0"],
+        "measures":[{"field":"*","agg":"count","asFieldKey":"n"}]}]}])");
+    CHECK(result.rows.size() == 2);
+    try {
+        Run(batch, R"([{"type":"view","query":[{"op":"raw","fields":["f0"]}]}])", "complete", 1);
+        CHECK(false);
+    } catch (const QueryFailure& error) {
+        CHECK(error.code == "RESULT_LIMIT");
+    }
+    auto limited = Run(batch, R"([{"type":"view","query":[{"op":"raw","fields":["f0"]}]}])", "limited", 1);
+    CHECK(limited.rows.size() == 1 && limited.scope == "limited_detail");
+    std::atomic_bool cancelled{true};
+    try {
+        ExecuteDataFrameWorkflow(batch, DescribeArrowSchema(*batch->schema()), Json(R"({"workflow":[]})"), "complete",
+                                 10, 8 << 20, Deadline(), &cancelled);
+        CHECK(false);
+    } catch (const QueryFailure& error) {
+        CHECK(error.code == "CANCELLED");
+    }
+    arrow::Int64Builder many;
+    CHECK(many.AppendValues(std::vector<int64_t>(8000000, 1)).ok());
+    auto large = arrow::RecordBatch::Make(arrow::schema({arrow::field("n", arrow::int64())}), 8000000,
+                                          {many.Finish().ValueOrDie()});
+    cancelled = false;
+    std::thread interrupt([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        cancelled = true;
+    });
+    const auto begin = std::chrono::steady_clock::now();
+    try {
+        ExecuteDataFrameWorkflow(large, DescribeArrowSchema(*large->schema()), Json(R"({"workflow":[]})"), "complete",
+                                 10, 64 << 20, Deadline(), &cancelled);
+        CHECK(false);
+    } catch (const QueryFailure& error) {
+        CHECK(error.code == "CANCELLED");
+    }
+    interrupt.join();
+    CHECK(std::chrono::steady_clock::now() - begin < std::chrono::seconds(2));
+}
 }  // namespace
 
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    TestLosslessSnapshotValues();
     TestProjectionAndSort();
     TestFilters();
     TestAggregates();

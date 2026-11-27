@@ -110,6 +110,7 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/services/scheduler ${CMAKE_BINARY_DIR}/sche
 
 # Stage 3: Database 数据库通道服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/database ${CMAKE_BINARY_DIR}/database)
+add_subdirectory(${CMAKE_SOURCE_DIR}/services/data_access ${CMAKE_BINARY_DIR}/data_access)
 
 # Stage 12: Stream 流式通道服务
 add_subdirectory(${CMAKE_SOURCE_DIR}/services/stream ${CMAKE_BINARY_DIR}/stream)
@@ -151,6 +152,7 @@ if(BUILD_TESTING)
     add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_scheduler_e2e ${CMAKE_BINARY_DIR}/test_scheduler_e2e)
     add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_sql_workflow ${CMAKE_BINARY_DIR}/test_sql_workflow)
     add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_database ${CMAKE_BINARY_DIR}/test_database)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_data_access ${CMAKE_BINARY_DIR}/test_data_access)
     add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_stream ${CMAKE_BINARY_DIR}/test_stream)
     add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_builtin ${CMAKE_BINARY_DIR}/test_builtin)
     add_subdirectory(${CMAKE_SOURCE_DIR}/tests/test_task ${CMAKE_BINARY_DIR}/test_task)

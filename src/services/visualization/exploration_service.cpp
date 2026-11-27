@@ -803,7 +803,7 @@ void ExplorationService::ComputeDataFrame(const httplib::Request& request, const
         // stays outside the plan.
         const auto& plan = document["workflow"];
         auto result = ExecuteDataFrameWorkflow(batch, fields, plan, detail, limits_.max_rows, limits_.max_bytes,
-                                               started + std::chrono::milliseconds(limits_.timeout_ms));
+                                               started + std::chrono::milliseconds(limits_.timeout_ms), nullptr);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             const auto found = active_.find(id);

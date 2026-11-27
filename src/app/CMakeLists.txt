@@ -38,6 +38,9 @@ add_custom_target(flowsql_runtime_config
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/semantics
         ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/semantics
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${FLOWSQL_RUNTIME_CONFIG_SOURCE_DIR}/agent-data-access
+        ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/agent-data-access
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${FLOWSQL_NPI_PROTOCOLS_SOURCE}
         ${FLOWSQL_RUNTIME_CONFIG_OUTPUT_DIR}/protocols.yml

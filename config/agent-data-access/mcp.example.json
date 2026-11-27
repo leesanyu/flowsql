@@ -1,0 +1,14 @@
+{
+  "host": "127.0.0.1",
+  "port": 18804,
+  "public_url": "http://127.0.0.1:18804/mcp",
+  "upstream_url": "http://127.0.0.1:18805",
+  "allowed_origins": [],
+  "bindings": [
+    {
+      "principal": "analyst",
+      "token_env": "FLOWSQL_MCP_ANALYST_TOKEN",
+      "upstream_token_env": "FLOWSQL_ACCESS_ANALYST_TOKEN"
+    }
+  ]
+}

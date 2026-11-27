@@ -1,6 +1,54 @@
 {
   "schema_version": 1,
   "tests": {
+    "test_access_sources": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_access_mysql": {
+      "services": [
+        "mysql"
+      ],
+      "role": "driver",
+      "location": "native",
+      "resources": [
+        "database_driver"
+      ]
+    },
+    "test_access_postgres": {
+      "services": [
+        "postgres"
+      ],
+      "role": "driver",
+      "location": "native",
+      "resources": [
+        "database_driver"
+      ]
+    },
+    "test_access_clickhouse": {
+      "services": [
+        "clickhouse"
+      ],
+      "role": "driver",
+      "location": "native",
+      "resources": [
+        "database_driver"
+      ]
+    },
+    "test_mcp_contract": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_access_contract": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
     "test_sql_workflow_docs": {
       "services": [],
       "role": "source",
@@ -849,6 +897,18 @@
         "semantics_http",
         "visualization_browser"
       ]
+    },
+    "test_access_dataframe": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
+    },
+    "test_access_analysis": {
+      "services": [],
+      "role": "source",
+      "location": "native",
+      "resources": []
     }
   }
 }

@@ -7,6 +7,7 @@
 #include <framework/interfaces/idatabase_exploration.h>
 #include <rapidjson/document.h>
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -33,6 +34,7 @@ std::string ArrowSchemaRevision(const arrow::Schema& schema);
 DataFrameResult ExecuteDataFrameWorkflow(const std::shared_ptr<arrow::RecordBatch>& batch,
                                          const std::vector<Field>& fields, const rapidjson::Value& payload,
                                          const std::string& detail_mode, uint32_t max_rows, uint64_t max_bytes,
-                                         const std::chrono::steady_clock::time_point& deadline);
+                                         const std::chrono::steady_clock::time_point& deadline,
+                                         const std::atomic_bool* cancelled);
 
 }  // namespace flowsql::visualization
